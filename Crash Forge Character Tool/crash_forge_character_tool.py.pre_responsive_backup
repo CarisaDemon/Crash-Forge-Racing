@@ -7,7 +7,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "Crash Forge Character Tool"
-APP_VERSION = "1.3"
+APP_VERSION = "1.2"
 TOOL_DIR = Path(__file__).resolve().parent
 
 def find_source_root():
@@ -121,7 +121,7 @@ class App(tk.Tk):
         super().__init__()
         self.title(f"{APP_TITLE}  •  v{APP_VERSION}")
         self.geometry("1060x800")
-        self.minsize(640, 520)
+        self.minsize(980, 720)
         self.configure(bg=BG)
         self.obj_var = tk.StringVar()
         self.name_var = tk.StringVar(value="My Character")
@@ -141,8 +141,6 @@ class App(tk.Tk):
         self.last_stats = None
         self.last_dest = None
         self.icon_preview = None
-        self._columns_stacked = None
-        self._compact_controls = None
         self._setup_style()
         self._build_ui()
         self._update_icon_controls()
@@ -200,40 +198,19 @@ class App(tk.Tk):
         return w
 
     def _build_ui(self):
-        shell = ttk.Frame(self)
-        shell.pack(fill="both", expand=True)
-
-        self.scroll_canvas = tk.Canvas(shell, bg=BG, highlightthickness=0, bd=0)
-        self.scroll_canvas.pack(side="left", fill="both", expand=True)
-        self.page_scrollbar = ttk.Scrollbar(shell, orient="vertical", command=self.scroll_canvas.yview)
-        self.page_scrollbar.pack(side="right", fill="y")
-        self.scroll_canvas.configure(yscrollcommand=self.page_scrollbar.set)
-
-        root = ttk.Frame(self.scroll_canvas, padding=(20, 16))
-        self._canvas_window = self.scroll_canvas.create_window((0, 0), window=root, anchor="nw")
-        root.bind("<Configure>", self._on_content_configure)
-        self.scroll_canvas.bind("<Configure>", self._on_canvas_configure)
-        self.bind("<MouseWheel>", self._on_mousewheel, add="+")
-        self.bind("<Button-4>", self._on_mousewheel, add="+")
-        self.bind("<Button-5>", self._on_mousewheel, add="+")
+        root = ttk.Frame(self, padding=(20, 16))
+        root.pack(fill="both", expand=True)
 
         header = ttk.Frame(root)
         header.pack(fill="x", pady=(0, 14))
         title_box = ttk.Frame(header)
         title_box.pack(side="left")
         ttk.Label(title_box, text="Crash Forge Character Tool", style="Title.TLabel").pack(anchor="w")
-        self.subtitle_label = ttk.Label(
-            title_box,
-            text="Build ready-to-drop Crash Forge Racing character mods.",
-            style="Subtitle.TLabel",
-            justify="left")
-        self.subtitle_label.pack(anchor="w", pady=(2, 0))
+        ttk.Label(title_box, text="Build ready-to-drop Crash Forge Racing character mods.",
+                  style="Subtitle.TLabel").pack(anchor="w", pady=(2, 0))
         status = tk.Label(header, textvariable=self.status_var, bg=PANEL_2, fg=ACCENT,
                           font=("Segoe UI Semibold", 9), padx=12, pady=6)
         status.pack(side="right", anchor="n")
-        self._header_frame = header
-        self._title_box = title_box
-        self._status_label = status
 
         source_border, source = self._card(root)
         source_border.pack(fill="x", pady=(0, 12))
@@ -252,9 +229,6 @@ class App(tk.Tk):
         right = ttk.Frame(columns)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        self._columns_frame = columns
-        self._left_column = left
-        self._right_column = right
 
         char_border, char = self._card(left)
         char_border.pack(fill="x", pady=(0, 12))
@@ -318,24 +292,16 @@ class App(tk.Tk):
         self.preview_label = tk.Label(preview_box, text="No custom icon selected", bg=FIELD, fg=MUTED,
                                       font=("Segoe UI", 9))
         self.preview_label.pack(expand=True)
-        self.icon_note = ttk.Label(
-            icon,
-            text="Note: Crash Forge Racing stores custom icon paths, but roster rendering may still use the retail fallback until custom icon rendering is wired in.",
-            style="Muted.TLabel", wraplength=440, justify="left")
-        self.icon_note.pack(anchor="w", pady=(2, 0))
+        ttk.Label(icon, text="Note: Crash Forge Racing stores custom icon paths, but roster rendering may still use the retail fallback until custom icon rendering is wired in.",
+                  style="Muted.TLabel", wraplength=440, justify="left").pack(anchor="w", pady=(2, 0))
 
         validation_border, validation = self._card(right)
         validation_border.pack(fill="both", expand=True)
         self._section_title(validation, "VALIDATION", "Checks OBJ limits, materials, textures and wheel groups.")
-        report_box = ttk.Frame(validation, style="Panel.TFrame")
-        report_box.pack(fill="both", expand=True)
-        self.report = tk.Text(report_box, wrap="word", height=13, bg=FIELD, fg=TEXT,
+        self.report = tk.Text(validation, wrap="word", height=13, bg=FIELD, fg=TEXT,
                               insertbackground=TEXT, relief="flat", padx=10, pady=10,
                               font=("Consolas", 9))
-        report_scrollbar = ttk.Scrollbar(report_box, orient="vertical", command=self.report.yview)
-        self.report.configure(yscrollcommand=report_scrollbar.set)
-        self.report.pack(side="left", fill="both", expand=True)
-        report_scrollbar.pack(side="right", fill="y")
+        self.report.pack(fill="both", expand=True)
         self.report.tag_configure("ok", foreground=SUCCESS)
         self.report.tag_configure("warn", foreground=WARNING)
         self.report.tag_configure("error", foreground=ERROR)
@@ -344,93 +310,11 @@ class App(tk.Tk):
 
         actions = ttk.Frame(root)
         actions.pack(fill="x", pady=(14, 0))
-        self.analyze_button = ttk.Button(actions, text="Analyze / Validate", command=self.analyze)
-        self.analyze_button.pack(side="left")
+        ttk.Button(actions, text="Analyze / Validate", command=self.analyze).pack(side="left")
         self.open_button = ttk.Button(actions, text="Open Generated Folder", command=self.open_generated,
                                       state="disabled")
         self.open_button.pack(side="left", padx=(8, 0))
-        self.build_button = ttk.Button(actions, text="Build Mod", command=self.build_mod, style="Accent.TButton")
-        self.build_button.pack(side="right")
-        self._actions_frame = actions
-        self.after_idle(lambda: self._update_responsive_layout(self.winfo_width()))
-
-    def _on_content_configure(self, _event=None):
-        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
-
-    def _on_canvas_configure(self, event):
-        self.scroll_canvas.itemconfigure(self._canvas_window, width=event.width)
-        self._update_responsive_layout(event.width)
-
-    def _on_mousewheel(self, event):
-        if getattr(self, "report", None) is not None and event.widget is self.report:
-            return
-
-        if getattr(event, "num", None) == 4:
-            step = -3
-        elif getattr(event, "num", None) == 5:
-            step = 3
-        else:
-            delta = getattr(event, "delta", 0)
-            if not delta:
-                return
-            step = -int(delta / 120) * 3
-            if step == 0:
-                step = -1 if delta > 0 else 1
-
-        if self.scroll_canvas.bbox("all"):
-            self.scroll_canvas.yview_scroll(step, "units")
-
-    def _update_responsive_layout(self, width):
-        stacked = width < 900
-        compact = width < 720
-
-        if stacked != self._columns_stacked:
-            self._columns_stacked = stacked
-            self._left_column.grid_forget()
-            self._right_column.grid_forget()
-
-            if stacked:
-                self._columns_frame.columnconfigure(0, weight=1, uniform="")
-                self._columns_frame.columnconfigure(1, weight=0, uniform="")
-                self._left_column.grid(row=0, column=0, sticky="nsew")
-                self._right_column.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
-            else:
-                self._columns_frame.columnconfigure(0, weight=1, uniform="main")
-                self._columns_frame.columnconfigure(1, weight=1, uniform="main")
-                self._left_column.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-                self._right_column.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-
-        if compact != self._compact_controls:
-            self._compact_controls = compact
-
-            self._title_box.pack_forget()
-            self._status_label.pack_forget()
-            self.analyze_button.pack_forget()
-            self.open_button.pack_forget()
-            self.build_button.pack_forget()
-
-            if compact:
-                self._title_box.pack(fill="x", anchor="w")
-                self._status_label.pack(anchor="w", pady=(8, 0))
-                self.analyze_button.pack(fill="x")
-                self.open_button.pack(fill="x", pady=(6, 0))
-                self.build_button.pack(fill="x", pady=(8, 0))
-            else:
-                self._title_box.pack(side="left")
-                self._status_label.pack(side="right", anchor="n")
-                self.analyze_button.pack(side="left")
-                self.open_button.pack(side="left", padx=(8, 0))
-                self.build_button.pack(side="right")
-
-        subtitle_wrap = max(260, width - 150)
-        if stacked:
-            note_wrap = max(260, width - 120)
-        else:
-            note_wrap = max(240, (width // 2) - 100)
-
-        self.subtitle_label.configure(wraplength=subtitle_wrap)
-        self.icon_note.configure(wraplength=note_wrap)
-        self.after_idle(self._on_content_configure)
+        ttk.Button(actions, text="Build Mod", command=self.build_mod, style="Accent.TButton").pack(side="right")
 
     def log(self, text, state="normal"):
         self.report.configure(state="normal")
