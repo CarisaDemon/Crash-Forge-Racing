@@ -1,0 +1,35 @@
+V111 - coherent race-world clock and presentation snapshots
+
+Running executable: ctr_native_v111_coherent_world_interp_test.exe
+Build succeeded with exit code 0. Compiler warnings remain; no build errors.
+Clock/math tests: tests/world111/unit-test-output.txt
+Synthetic rates tested: 15, 30, 60, 120, 144, 165, 200, 240, 360, 1000 FPS.
+Every test consumes 300 simulation ticks in 10 seconds of 960-unit game time.
+32 is the legacy GAME TIME step, approximately 1/30 second, not 32 wall-clock milliseconds.
+
+Scope: racing/battle overlay, normal races, time trials, bots, ghosts and in-race/end-of-race cameras.
+Main menu, adventure hub and separate cutscene overlays retain their existing execution path.
+Pause/menu input is still processed per host frame. Racing taps are consumed only on the first catch-up tick.
+World buckets execute in original order, with one legacy tick per substep. No broad early return.
+GhostTape_WriteMoves runs once inside each world tick. Ghost overflow text is rendered per host frame.
+Automatic instance animations no longer advance from world rendering; they advance on world ticks.
+Interpolation: full camera position/rotation, instance matrices/scales, animation vertices,
+particle values, ground-shadow position and turbo-meter width. No visual prediction added to physics.
+Snapshots reset on level changes, timer rewind, allocation reuse and large positional discontinuities.
+Snapshot storage grows with native allocation rather than a fixed small PS1 pool.
+Subpixel remains enabled by default. V108 deferred framebuffer path remains unchanged.
+
+Source verification: COLL.c hash unchanged from pre-V111; all Vehicle files unchanged except VehGroundShadow.c.
+Native builds use the new platform/native_world.c through main.c unity inclusion.
+
+Observed live log: world approximately 30 Hz and render often approximately 200 Hz.
+Some intervals still dropped to approximately 150-185 Hz; performance is not certified stable at 200.
+A live Time Trial screen was captured and the process remained responsive.
+Perceptual smoothness, all camera modes, save/replay compatibility and every circuit still need gameplay validation.
+No claim of complete regression coverage.
+
+Recovery: original v107 and v109 executables were not overwritten.
+Close the test game before launching ctr_native_v107_retail_collision_path_on_fixed32_test.exe
+for the last user-confirmed physics baseline, or v109 for the prior host-rate experiment.
+The pre-world-clock backup includes the unfinished v110 source state, NOT a certified release.
+The manifest records all edited/new source files. Do not blindly restore over newer work.

@@ -1,0 +1,583 @@
+import os
+import re
+import shutil
+import struct
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+
+APP_TITLE = "Crash Forge Character Tool"
+APP_VERSION = "1.2"
+TOOL_DIR = Path(__file__).resolve().parent
+
+def find_source_root():
+    for candidate in (TOOL_DIR, *TOOL_DIR.parents):
+        if ((candidate / "CMakeLists.txt").is_file() and
+                (candidate / "game").is_dir() and
+                (candidate / "platform").is_dir()):
+            return candidate
+    return None
+
+SOURCE_ROOT = find_source_root()
+DEFAULT_RACERS = str(
+    (SOURCE_ROOT / "assets" / "mods" / "racers")
+    if SOURCE_ROOT else
+    (TOOL_DIR / "output")
+)
+RETAIL = ["crash", "cortex", "tiny", "coco", "ngin", "dingo", "polar", "pura",
+          "pinstripe", "papu", "roo", "joe", "ntropy", "pen", "fake", "oxide"]
+ENGINES = ["turn", "accel", "speed", "balanced"]
+
+BG = "#0f141c"
+PANEL = "#171e29"
+PANEL_2 = "#1d2633"
+FIELD = "#101722"
+TEXT = "#edf3fb"
+MUTED = "#91a1b5"
+ACCENT = "#f6b73c"
+ACCENT_HOVER = "#ffc95e"
+SUCCESS = "#61d991"
+WARNING = "#ffd166"
+ERROR = "#ff6b78"
+BORDER = "#2a3647"
+
+def clean_slug(text):
+    text = text.strip().lower().replace(" ", "_")
+    text = re.sub(r"[^a-z0-9_]+", "", text)
+    return re.sub(r"_+", "_", text).strip("_")[:15]
+
+def parse_obj(path):
+    p = Path(path)
+    stats = {"v": 0, "vt": 0, "tri": 0, "materials": set(), "groups": set(), "mtllib": None}
+    mins = [float("inf")] * 3
+    maxs = [float("-inf")] * 3
+    with p.open("r", encoding="utf-8", errors="ignore") as f:
+        for raw in f:
+            line = raw.strip()
+            if line.startswith("v "):
+                parts = line.split()
+                if len(parts) >= 4:
+                    xyz = list(map(float, parts[1:4]))
+                    stats["v"] += 1
+                    for i, val in enumerate(xyz):
+                        mins[i] = min(mins[i], val)
+                        maxs[i] = max(maxs[i], val)
+            elif line.startswith("vt "):
+                stats["vt"] += 1
+            elif line.startswith("f "):
+                count = len(line.split()) - 1
+                if count >= 3:
+                    stats["tri"] += count - 2
+            elif line.startswith("usemtl "):
+                stats["materials"].add(line[7:].strip())
+            elif line.startswith(("o ", "g ")):
+                stats["groups"].add(line[2:].strip())
+            elif line.startswith("mtllib ") and not stats["mtllib"]:
+                stats["mtllib"] = line[7:].strip()
+    stats["extent"] = tuple(maxs[i] - mins[i] for i in range(3)) if stats["v"] else (0.0, 0.0, 0.0)
+    return stats
+
+def locate_mtl(obj_path, mtllib):
+    if not mtllib:
+        return None
+    base = Path(obj_path).parent
+    raw = mtllib.strip().strip('"')
+    candidates = [base / raw, base / raw.replace("\\", os.sep), base / Path(raw.replace("\\", "/")).name]
+    return next((c for c in candidates if c.exists()), None)
+
+def parse_mtl(path):
+    materials = 0
+    textures = []
+    with Path(path).open("r", encoding="utf-8", errors="ignore") as f:
+        for raw in f:
+            line = raw.strip()
+            if line.startswith("newmtl "):
+                materials += 1
+            elif line.startswith("map_Kd "):
+                textures.append(line[7:].strip().strip('"'))
+    return materials, textures
+
+def locate_texture(mtl_path, tex):
+    base = Path(mtl_path).parent
+    raw = tex.strip().strip('"')
+    candidates = [base / raw, base / raw.replace("\\", os.sep), base / Path(raw.replace("\\", "/")).name]
+    return next((c for c in candidates if c.exists()), None)
+
+def image_dimensions(path):
+    try:
+        data = Path(path).read_bytes()
+        if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+            return struct.unpack(">II", data[16:24])
+        if data.startswith(b"BM") and len(data) >= 26:
+            width = struct.unpack("<i", data[18:22])[0]
+            height = abs(struct.unpack("<i", data[22:26])[0])
+            return width, height
+    except OSError:
+        pass
+    return None
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(f"{APP_TITLE}  •  v{APP_VERSION}")
+        self.geometry("1060x800")
+        self.minsize(980, 720)
+        self.configure(bg=BG)
+        self.obj_var = tk.StringVar()
+        self.name_var = tk.StringVar(value="My Character")
+        self.slug_var = tk.StringVar(value="my_character")
+        self.fallback_var = tk.StringVar(value="coco")
+        self.engine_var = tk.StringVar(value="accel")
+        self.own_wheels_var = tk.BooleanVar(value=True)
+        self.icon_mode_var = tk.StringVar(value="retail")
+        self.retail_icon_var = tk.StringVar(value="coco")
+        self.custom_icon_var = tk.StringVar()
+        self.scale_var = tk.StringVar(value="1.0")
+        self.ox_var = tk.StringVar(value="0.0")
+        self.oy_var = tk.StringVar(value="0.0")
+        self.oz_var = tk.StringVar(value="0.0")
+        self.output_var = tk.StringVar(value=DEFAULT_RACERS)
+        self.status_var = tk.StringVar(value="Ready")
+        self.last_stats = None
+        self.last_dest = None
+        self.icon_preview = None
+        self._setup_style()
+        self._build_ui()
+        self._update_icon_controls()
+
+    def _setup_style(self):
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure(".", background=BG, foreground=TEXT, font=("Segoe UI", 10))
+        style.configure("TFrame", background=BG)
+        style.configure("Panel.TFrame", background=PANEL)
+        style.configure("Panel2.TFrame", background=PANEL_2)
+        style.configure("TLabel", background=BG, foreground=TEXT)
+        style.configure("Panel.TLabel", background=PANEL, foreground=TEXT)
+        style.configure("Muted.TLabel", background=PANEL, foreground=MUTED, font=("Segoe UI", 9))
+        style.configure("Title.TLabel", background=BG, foreground=TEXT, font=("Segoe UI Semibold", 22))
+        style.configure("Subtitle.TLabel", background=BG, foreground=MUTED, font=("Segoe UI", 10))
+        style.configure("Section.TLabel", background=PANEL, foreground=ACCENT, font=("Segoe UI Semibold", 11))
+        style.configure("TEntry", fieldbackground=FIELD, foreground=TEXT, bordercolor=BORDER, insertcolor=TEXT, padding=7)
+        style.configure("TCombobox", fieldbackground=FIELD, background=FIELD, foreground=TEXT,
+                        arrowcolor=TEXT, bordercolor=BORDER, padding=6)
+        style.map("TCombobox", fieldbackground=[("readonly", FIELD)], foreground=[("readonly", TEXT)])
+        style.configure("TCheckbutton", background=PANEL, foreground=TEXT)
+        style.map("TCheckbutton", background=[("active", PANEL)], foreground=[("active", TEXT)])
+        style.configure("TRadiobutton", background=PANEL, foreground=TEXT)
+        style.map("TRadiobutton", background=[("active", PANEL)], foreground=[("active", TEXT)])
+        style.configure("TButton", background=PANEL_2, foreground=TEXT, bordercolor=BORDER, padding=(12, 7))
+        style.map("TButton", background=[("active", "#283447")])
+        style.configure("Accent.TButton", background=ACCENT, foreground="#161616",
+                        bordercolor=ACCENT, font=("Segoe UI Semibold", 10), padding=(16, 9))
+        style.map("Accent.TButton", background=[("active", ACCENT_HOVER)])
+        style.configure("Ghost.TButton", background=PANEL, foreground=MUTED, bordercolor=BORDER)
+        style.configure("TSeparator", background=BORDER)
+
+    def _card(self, parent):
+        outer = tk.Frame(parent, bg=BORDER, padx=1, pady=1)
+        inner = ttk.Frame(outer, style="Panel.TFrame", padding=14)
+        inner.pack(fill="both", expand=True)
+        return outer, inner
+
+    def _section_title(self, parent, title, subtitle=None):
+        ttk.Label(parent, text=title, style="Section.TLabel").pack(anchor="w")
+        if subtitle:
+            ttk.Label(parent, text=subtitle, style="Muted.TLabel").pack(anchor="w", pady=(2, 10))
+        else:
+            ttk.Separator(parent).pack(fill="x", pady=(5, 10))
+
+    def _field(self, parent, label, variable, row, widget="entry", values=None):
+        ttk.Label(parent, text=label, style="Panel.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=5)
+        if widget == "combo":
+            w = ttk.Combobox(parent, textvariable=variable, values=values, state="readonly")
+        else:
+            w = ttk.Entry(parent, textvariable=variable)
+        w.grid(row=row, column=1, sticky="ew", pady=5)
+        parent.columnconfigure(1, weight=1)
+        return w
+
+    def _build_ui(self):
+        root = ttk.Frame(self, padding=(20, 16))
+        root.pack(fill="both", expand=True)
+
+        header = ttk.Frame(root)
+        header.pack(fill="x", pady=(0, 14))
+        title_box = ttk.Frame(header)
+        title_box.pack(side="left")
+        ttk.Label(title_box, text="Crash Forge Character Tool", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(title_box, text="Build ready-to-drop Crash Forge Racing character mods.",
+                  style="Subtitle.TLabel").pack(anchor="w", pady=(2, 0))
+        status = tk.Label(header, textvariable=self.status_var, bg=PANEL_2, fg=ACCENT,
+                          font=("Segoe UI Semibold", 9), padx=12, pady=6)
+        status.pack(side="right", anchor="n")
+
+        source_border, source = self._card(root)
+        source_border.pack(fill="x", pady=(0, 12))
+        self._section_title(source, "MODEL SOURCE", "Choose the OBJ model used by the custom racer.")
+        source_line = ttk.Frame(source, style="Panel.TFrame")
+        source_line.pack(fill="x")
+        ttk.Entry(source_line, textvariable=self.obj_var).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(source_line, text="Browse OBJ...", command=self.choose_obj).pack(side="left")
+
+        columns = ttk.Frame(root)
+        columns.pack(fill="both", expand=True)
+        columns.columnconfigure(0, weight=1, uniform="main")
+        columns.columnconfigure(1, weight=1, uniform="main")
+        columns.rowconfigure(0, weight=1)
+        left = ttk.Frame(columns)
+        right = ttk.Frame(columns)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+        char_border, char = self._card(left)
+        char_border.pack(fill="x", pady=(0, 12))
+        self._section_title(char, "CHARACTER", "Basic roster and driving settings.")
+        char_fields = ttk.Frame(char, style="Panel.TFrame")
+        char_fields.pack(fill="x")
+        self._field(char_fields, "Display name", self.name_var, 0)
+        slug_entry = self._field(char_fields, "Asset name", self.slug_var, 1)
+        ttk.Button(char_fields, text="Auto", command=self.auto_slug, style="Ghost.TButton").grid(row=1, column=2, padx=(8, 0))
+        self._field(char_fields, "Retail fallback", self.fallback_var, 2, "combo", RETAIL)
+        self._field(char_fields, "Engine class", self.engine_var, 3, "combo", ENGINES)
+
+        transform_border, transform = self._card(left)
+        transform_border.pack(fill="x", pady=(0, 12))
+        self._section_title(transform, "MODEL TRANSFORM", "Fine-tune scale and local position without re-exporting.")
+        transform_fields = ttk.Frame(transform, style="Panel.TFrame")
+        transform_fields.pack(fill="x")
+        self._field(transform_fields, "Scale", self.scale_var, 0)
+        self._field(transform_fields, "Offset X", self.ox_var, 1)
+        self._field(transform_fields, "Offset Y", self.oy_var, 2)
+        self._field(transform_fields, "Offset Z", self.oz_var, 3)
+        ttk.Checkbutton(transform_fields, text="OBJ includes its own wheels  (has_wheels = false)",
+                        variable=self.own_wheels_var).grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        output_border, output = self._card(left)
+        output_border.pack(fill="x")
+        self._section_title(output, "OUTPUT", "The generated folder is placed directly inside assets/mods/racers.")
+        output_line = ttk.Frame(output, style="Panel.TFrame")
+        output_line.pack(fill="x")
+        ttk.Entry(output_line, textvariable=self.output_var).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(output_line, text="Browse...", command=self.choose_output).pack(side="left")
+
+        icon_border, icon = self._card(right)
+        icon_border.pack(fill="x", pady=(0, 12))
+        self._section_title(icon, "ROSTER ICON", "Use a retail portrait or prepare a custom image for the mod.")
+        modes = ttk.Frame(icon, style="Panel.TFrame")
+        modes.pack(fill="x")
+        ttk.Radiobutton(modes, text="Retail icon", variable=self.icon_mode_var, value="retail",
+                        command=self._update_icon_controls).pack(side="left", padx=(0, 18))
+        ttk.Radiobutton(modes, text="Custom image", variable=self.icon_mode_var, value="custom",
+                        command=self._update_icon_controls).pack(side="left")
+        retail_line = ttk.Frame(icon, style="Panel.TFrame")
+        retail_line.pack(fill="x", pady=(10, 6))
+        ttk.Label(retail_line, text="Retail icon", style="Panel.TLabel", width=14).pack(side="left")
+        self.retail_icon_combo = ttk.Combobox(retail_line, textvariable=self.retail_icon_var,
+                                              values=RETAIL, state="readonly")
+        self.retail_icon_combo.pack(side="left", fill="x", expand=True)
+
+        custom_line = ttk.Frame(icon, style="Panel.TFrame")
+        custom_line.pack(fill="x", pady=6)
+        ttk.Label(custom_line, text="Custom file", style="Panel.TLabel", width=14).pack(side="left")
+        self.custom_icon_entry = ttk.Entry(custom_line, textvariable=self.custom_icon_var)
+        self.custom_icon_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.custom_icon_button = ttk.Button(custom_line, text="Browse...", command=self.choose_icon)
+        self.custom_icon_button.pack(side="left")
+
+        preview_box = tk.Frame(icon, bg=FIELD, highlightbackground=BORDER, highlightthickness=1,
+                               width=148, height=148)
+        preview_box.pack(fill="x", pady=(10, 8))
+        preview_box.pack_propagate(False)
+        self.preview_label = tk.Label(preview_box, text="No custom icon selected", bg=FIELD, fg=MUTED,
+                                      font=("Segoe UI", 9))
+        self.preview_label.pack(expand=True)
+        ttk.Label(icon, text="Note: Crash Forge Racing stores custom icon paths, but roster rendering may still use the retail fallback until custom icon rendering is wired in.",
+                  style="Muted.TLabel", wraplength=440, justify="left").pack(anchor="w", pady=(2, 0))
+
+        validation_border, validation = self._card(right)
+        validation_border.pack(fill="both", expand=True)
+        self._section_title(validation, "VALIDATION", "Checks OBJ limits, materials, textures and wheel groups.")
+        self.report = tk.Text(validation, wrap="word", height=13, bg=FIELD, fg=TEXT,
+                              insertbackground=TEXT, relief="flat", padx=10, pady=10,
+                              font=("Consolas", 9))
+        self.report.pack(fill="both", expand=True)
+        self.report.tag_configure("ok", foreground=SUCCESS)
+        self.report.tag_configure("warn", foreground=WARNING)
+        self.report.tag_configure("error", foreground=ERROR)
+        self.report.insert("end", "Choose an OBJ model to begin.\n")
+        self.report.configure(state="disabled")
+
+        actions = ttk.Frame(root)
+        actions.pack(fill="x", pady=(14, 0))
+        ttk.Button(actions, text="Analyze / Validate", command=self.analyze).pack(side="left")
+        self.open_button = ttk.Button(actions, text="Open Generated Folder", command=self.open_generated,
+                                      state="disabled")
+        self.open_button.pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Build Mod", command=self.build_mod, style="Accent.TButton").pack(side="right")
+
+    def log(self, text, state="normal"):
+        self.report.configure(state="normal")
+        self.report.delete("1.0", "end")
+        self.report.insert("end", text)
+        if state in ("ok", "warn", "error"):
+            self.report.tag_add(state, "1.0", "end")
+        self.report.configure(state="disabled")
+
+    def choose_obj(self):
+        path = filedialog.askopenfilename(title="Choose OBJ model",
+                                          filetypes=[("Wavefront OBJ", "*.obj"), ("All files", "*.*")])
+        if path:
+            self.obj_var.set(path)
+            if self.slug_var.get() == "my_character":
+                self.slug_var.set(clean_slug(Path(path).stem))
+            self.analyze()
+
+    def auto_slug(self):
+        self.slug_var.set(clean_slug(self.name_var.get()))
+
+    def choose_output(self):
+        path = filedialog.askdirectory(title="Choose assets/mods/racers folder")
+        if path:
+            self.output_var.set(path)
+
+    def choose_icon(self):
+        path = filedialog.askopenfilename(title="Choose custom roster icon",
+                                          filetypes=[("Supported images", "*.png *.bmp"),
+                                                     ("PNG image", "*.png"),
+                                                     ("BMP image", "*.bmp"),
+                                                     ("All files", "*.*")])
+        if path:
+            self.custom_icon_var.set(path)
+            self._refresh_icon_preview()
+
+    def _update_icon_controls(self):
+        custom = self.icon_mode_var.get() == "custom"
+        self.retail_icon_combo.configure(state="disabled" if custom else "readonly")
+        self.custom_icon_entry.configure(state="normal" if custom else "disabled")
+        self.custom_icon_button.configure(state="normal" if custom else "disabled")
+        self._refresh_icon_preview()
+
+    def _refresh_icon_preview(self):
+        self.icon_preview = None
+        self.preview_label.configure(image="", text="")
+        if self.icon_mode_var.get() != "custom":
+            self.preview_label.configure(text=f"Retail icon: {self.retail_icon_var.get().upper()}", fg=ACCENT)
+            return
+        path = self.custom_icon_var.get().strip()
+        if not path or not Path(path).is_file():
+            self.preview_label.configure(text="No custom icon selected", fg=MUTED)
+            return
+        try:
+            if Path(path).suffix.lower() == ".png":
+                img = tk.PhotoImage(file=path)
+                factor = max(1, (max(img.width(), img.height()) + 119) // 120)
+                if factor > 1:
+                    img = img.subsample(factor, factor)
+                self.icon_preview = img
+                self.preview_label.configure(image=img, text="")
+            else:
+                dims = image_dimensions(path)
+                label = f"{Path(path).name}\n{dims[0]} × {dims[1]}" if dims else Path(path).name
+                self.preview_label.configure(text=label, fg=TEXT)
+        except tk.TclError:
+            self.preview_label.configure(text=Path(path).name + "\nPreview unavailable", fg=MUTED)
+
+    def analyze(self):
+        obj = self.obj_var.get().strip()
+        self.status_var.set("Checking...")
+        if not obj or not Path(obj).is_file():
+            self.status_var.set("Needs attention")
+            self.log("ERROR: Choose a valid OBJ file.", "error")
+            return False
+        try:
+            stats = parse_obj(obj)
+        except Exception as exc:
+            self.status_var.set("Needs attention")
+            self.log(f"ERROR reading OBJ: {exc}", "error")
+            return False
+
+        self.last_stats = stats
+        problems = []
+        warnings = []
+        if stats["v"] == 0 or stats["tri"] == 0:
+            problems.append("The OBJ does not contain valid geometry.")
+        if stats["v"] > 100000:
+            problems.append("More than 100000 vertices.")
+        if stats["vt"] > 100000:
+            problems.append("More than 100000 UV coordinates.")
+        if stats["tri"] > 100000:
+            problems.append("More than 100000 final triangles.")
+        if len(stats["materials"]) > 256:
+            problems.append("More than 256 materials.")
+        if any(x > 32.0 for x in stats["extent"]):
+            problems.append("Model exceeds 32 OBJ units on at least one axis.")
+
+        slug = self.slug_var.get().strip()
+        if not re.fullmatch(r"[a-z0-9_]+", slug or ""):
+            problems.append("Asset name may only contain a-z, 0-9 and underscore.")
+        if len(slug) > 15:
+            problems.append("Asset name is longer than 15 characters.")
+
+        mtl = locate_mtl(obj, stats["mtllib"])
+        textures = []
+        if stats["mtllib"] and not mtl:
+            problems.append(f"MTL referenced by OBJ was not found: {stats['mtllib']}")
+        elif mtl:
+            material_count, textures = parse_mtl(mtl)
+            if material_count > 256:
+                problems.append("MTL contains more than 256 materials.")
+            for tex in textures:
+                located = locate_texture(mtl, tex)
+                if not located:
+                    problems.append(f"Missing texture: {tex}")
+                elif located.suffix.lower() not in (".png", ".bmp"):
+                    warnings.append(f"Texture {located.name}: PNG or BMP is recommended.")
+
+        if self.own_wheels_var.get():
+            required = {"wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"}
+            found = {g.lower() for g in stats["groups"]}
+            missing = sorted(required - found)
+            if missing:
+                warnings.append("Own wheels enabled, but these groups were not found: " +
+                                ", ".join(missing) + ". The mod can still be built, but those wheels will not rotate separately.")
+
+        custom_icon = None
+        if self.icon_mode_var.get() == "custom":
+            custom_icon = Path(self.custom_icon_var.get().strip())
+            if not custom_icon.is_file():
+                problems.append("Custom icon mode is enabled but no valid image was selected.")
+            elif custom_icon.suffix.lower() not in (".png", ".bmp"):
+                problems.append("Custom icon must be PNG or BMP.")
+            else:
+                dims = image_dimensions(custom_icon)
+                if dims and dims != (128, 128):
+                    warnings.append(f"Custom icon is {dims[0]}x{dims[1]}; 128x128 is recommended.")
+
+        lines = [
+            f"OBJ          {obj}",
+            f"Vertices     {stats['v']}",
+            f"UVs          {stats['vt']}",
+            f"Triangles    {stats['tri']}",
+            f"Materials    {len(stats['materials'])}",
+            "Extent XYZ   " + " / ".join(f"{x:.3f}" for x in stats["extent"]),
+            f"MTL          {str(mtl) if mtl else '(none)'}",
+            f"Textures     {len(textures)}",
+            f"Icon         {'custom: ' + custom_icon.name if custom_icon and custom_icon.is_file() else 'retail: ' + self.retail_icon_var.get()}",
+            "",
+        ]
+        if problems:
+            lines += ["ERRORS"] + [f"  • {item}" for item in problems]
+        else:
+            lines.append("VALIDATION PASSED — ready to build.")
+        if warnings:
+            lines += ["", "WARNINGS"] + [f"  • {item}" for item in warnings]
+
+        if problems:
+            self.status_var.set("Needs attention")
+            state = "error"
+        elif warnings:
+            self.status_var.set("Ready with warnings")
+            state = "warn"
+        else:
+            self.status_var.set("Ready to build")
+            state = "ok"
+        self.log("\n".join(lines), state)
+        return not problems
+
+    def build_mod(self):
+        if not self.analyze():
+            messagebox.showerror(APP_TITLE, "Fix the validation errors before building the mod.")
+            return
+
+        slug = self.slug_var.get().strip()
+        obj_src = Path(self.obj_var.get().strip())
+        out_root = Path(self.output_var.get().strip())
+        dest = out_root / slug
+
+        if dest.exists():
+            if not messagebox.askyesno(APP_TITLE, f"This folder already exists:\n{dest}\n\nReplace its contents?"):
+                return
+            shutil.rmtree(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+
+        stats = parse_obj(obj_src)
+        mtl_src = locate_mtl(obj_src, stats["mtllib"])
+        obj_text = obj_src.read_text(encoding="utf-8", errors="ignore")
+        if mtl_src:
+            new_lines = []
+            replaced = False
+            for line in obj_text.splitlines():
+                if line.strip().startswith("mtllib ") and not replaced:
+                    new_lines.append(f"mtllib {slug}.mtl")
+                    replaced = True
+                else:
+                    new_lines.append(line)
+            obj_text = "\n".join(new_lines) + "\n"
+        (dest / f"{slug}.obj").write_text(obj_text, encoding="utf-8")
+
+        if mtl_src:
+            mtl_lines = []
+            for raw in mtl_src.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if raw.strip().startswith("map_Kd "):
+                    tex_value = raw.strip()[7:].strip().strip('"')
+                    tex_src = locate_texture(mtl_src, tex_value)
+                    if tex_src:
+                        shutil.copy2(tex_src, dest / tex_src.name)
+                        mtl_lines.append(f"map_Kd {tex_src.name}")
+                    else:
+                        mtl_lines.append(raw)
+                else:
+                    mtl_lines.append(raw)
+            (dest / f"{slug}.mtl").write_text("\n".join(mtl_lines) + "\n", encoding="utf-8")
+        try:
+            scale = float(self.scale_var.get())
+            ox = float(self.ox_var.get())
+            oy = float(self.oy_var.get())
+            oz = float(self.oz_var.get())
+        except ValueError:
+            shutil.rmtree(dest, ignore_errors=True)
+            messagebox.showerror(APP_TITLE, "Scale and offsets must be valid numbers.")
+            return
+
+        if self.icon_mode_var.get() == "custom":
+            icon_src = Path(self.custom_icon_var.get().strip())
+            icon_name = f"{slug}_icon{icon_src.suffix.lower()}"
+            shutil.copy2(icon_src, dest / icon_name)
+            icon_value = icon_name
+        else:
+            icon_value = f"retail:{self.retail_icon_var.get()}"
+
+        has_wheels = "false" if self.own_wheels_var.get() else "true"
+        ini = (
+            "[character]\n"
+            f"name = {self.name_var.get().strip()}\n"
+            "enabled = true\n"
+            f"fallback_retail = {self.fallback_var.get()}\n"
+            f"engine = {self.engine_var.get()}\n"
+            f"has_wheels = {has_wheels}\n\n"
+            "[model]\n"
+            f"scale = {scale}\n"
+            f"offset_x = {ox}\n"
+            f"offset_y = {oy}\n"
+            f"offset_z = {oz}\n\n"
+            "[assets]\n"
+            f"asset_name = {slug}\n"
+            f"icon = {icon_value}\n"
+        )
+        (dest / "character.ini").write_text(ini, encoding="utf-8")
+
+        self.last_dest = dest
+        self.open_button.configure(state="normal")
+        self.status_var.set("Build complete")
+        files = [p.name for p in sorted(dest.iterdir()) if p.is_file()]
+        self.log("MOD BUILT SUCCESSFULLY\n\n" + str(dest) + "\n\nFILES\n" +
+                 "\n".join(f"  • {name}" for name in files), "ok")
+        messagebox.showinfo(APP_TITLE, f"Mod built successfully:\n{dest}")
+
+    def open_generated(self):
+        if self.last_dest and self.last_dest.exists():
+            os.startfile(self.last_dest)
+
+if __name__ == "__main__":
+    App().mainloop()
