@@ -7,7 +7,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "Crash Forge Character Tool"
-APP_VERSION = "1.4"
+APP_VERSION = "1.3"
 TOOL_DIR = Path(__file__).resolve().parent
 
 def find_source_root():
@@ -19,7 +19,11 @@ def find_source_root():
     return None
 
 SOURCE_ROOT = find_source_root()
-DEFAULT_GAME_ROOT = str(SOURCE_ROOT) if SOURCE_ROOT else ""
+DEFAULT_RACERS = str(
+    (SOURCE_ROOT / "assets" / "mods" / "racers")
+    if SOURCE_ROOT else
+    (TOOL_DIR / "output")
+)
 RETAIL = ["crash", "cortex", "tiny", "coco", "ngin", "dingo", "polar", "pura",
           "pinstripe", "papu", "roo", "joe", "ntropy", "pen", "fake", "oxide"]
 ENGINES = ["turn", "accel", "speed", "balanced"]
@@ -132,8 +136,7 @@ class App(tk.Tk):
         self.ox_var = tk.StringVar(value="0.0")
         self.oy_var = tk.StringVar(value="0.0")
         self.oz_var = tk.StringVar(value="0.0")
-        self.game_var = tk.StringVar(value=DEFAULT_GAME_ROOT)
-        self.output_var = tk.StringVar()
+        self.output_var = tk.StringVar(value=DEFAULT_RACERS)
         self.status_var = tk.StringVar(value="Ready")
         self.last_stats = None
         self.last_dest = None
@@ -142,8 +145,6 @@ class App(tk.Tk):
         self._compact_controls = None
         self._setup_style()
         self._build_ui()
-        self.game_var.trace_add("write", self._on_game_path_change)
-        self._sync_output_path()
         self._update_icon_controls()
 
     def _setup_style(self):
@@ -280,23 +281,11 @@ class App(tk.Tk):
 
         output_border, output = self._card(left)
         output_border.pack(fill="x")
-        self._section_title(
-            output,
-            "GAME INSTALLATION",
-            "Choose the game folder or ctr_native.exe. The mods path is detected automatically.")
-        game_line = ttk.Frame(output, style="Panel.TFrame")
-        game_line.pack(fill="x")
-        ttk.Entry(game_line, textvariable=self.game_var).pack(
-            side="left", fill="x", expand=True, padx=(0, 8))
-        ttk.Button(game_line, text="Game Folder...", command=self.choose_game_folder).pack(side="left")
-        ttk.Button(game_line, text="ctr_native.exe...", command=self.choose_game_exe).pack(
-            side="left", padx=(6, 0))
-
-        mods_line = ttk.Frame(output, style="Panel.TFrame")
-        mods_line.pack(fill="x", pady=(8, 0))
-        ttk.Label(mods_line, text="Mods path", style="Panel.TLabel", width=14).pack(side="left")
-        self.output_entry = ttk.Entry(mods_line, textvariable=self.output_var, state="readonly")
-        self.output_entry.pack(side="left", fill="x", expand=True)
+        self._section_title(output, "OUTPUT", "The generated folder is placed directly inside assets/mods/racers.")
+        output_line = ttk.Frame(output, style="Panel.TFrame")
+        output_line.pack(fill="x")
+        ttk.Entry(output_line, textvariable=self.output_var).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(output_line, text="Browse...", command=self.choose_output).pack(side="left")
 
         icon_border, icon = self._card(right)
         icon_border.pack(fill="x", pady=(0, 12))
@@ -463,80 +452,10 @@ class App(tk.Tk):
     def auto_slug(self):
         self.slug_var.set(clean_slug(self.name_var.get()))
 
-    def _game_root_from_value(self, value=None):
-        raw = (self.game_var.get() if value is None else value).strip().strip('"')
-        if not raw:
-            return None
-
-        path = Path(raw).expanduser()
-
-        if path.suffix.lower() == ".exe":
-            path = path.parent
-
-        parts = [part.lower() for part in path.parts]
-        if len(parts) >= 3 and parts[-3:] == ["assets", "mods", "racers"]:
-            path = path.parents[2]
-        elif len(parts) >= 2 and parts[-2:] == ["assets", "mods"]:
-            path = path.parents[1]
-        elif path.name.lower() == "assets":
-            path = path.parent
-
-        return path
-
-    def _mods_path_from_game(self, value=None):
-        root = self._game_root_from_value(value)
-        return (root / "assets" / "mods" / "racers") if root else None
-
-    def _on_game_path_change(self, *_args):
-        self._sync_output_path()
-
-    def _sync_output_path(self):
-        mods_path = self._mods_path_from_game()
-        self.output_var.set(str(mods_path) if mods_path else "")
-
-    def _validated_game_root(self):
-        root = self._game_root_from_value()
-        if root is None:
-            messagebox.showerror(APP_TITLE, "Choose the Crash Forge Racing game folder or ctr_native.exe.")
-            return None
-
-        if not root.is_dir():
-            messagebox.showerror(APP_TITLE, f"Game folder not found:\n{root}")
-            return None
-
-        has_exe = (root / "ctr_native.exe").is_file()
-        has_source = ((root / "CMakeLists.txt").is_file() and
-                      (root / "game").is_dir() and
-                      (root / "platform").is_dir())
-        has_assets = (root / "assets").is_dir()
-
-        if not (has_exe or has_source or has_assets):
-            messagebox.showerror(
-                APP_TITLE,
-                "That folder does not look like Crash Forge Racing.\n\n"
-                "Choose the folder containing ctr_native.exe, or select ctr_native.exe directly.")
-            return None
-
-        return root
-
-    def choose_game_folder(self):
-        initial = self._game_root_from_value()
-        path = filedialog.askdirectory(
-            title="Choose Crash Forge Racing game folder",
-            initialdir=str(initial) if initial and initial.exists() else None)
+    def choose_output(self):
+        path = filedialog.askdirectory(title="Choose assets/mods/racers folder")
         if path:
-            self.game_var.set(path)
-
-    def choose_game_exe(self):
-        initial = self._game_root_from_value()
-        path = filedialog.askopenfilename(
-            title="Choose ctr_native.exe",
-            initialdir=str(initial) if initial and initial.exists() else None,
-            filetypes=[("Crash Forge Racing", "ctr_native.exe"),
-                       ("Executable", "*.exe"),
-                       ("All files", "*.*")])
-        if path:
-            self.game_var.set(path)
+            self.output_var.set(path)
 
     def choose_icon(self):
         path = filedialog.askopenfilename(title="Choose custom roster icon",
@@ -687,15 +606,9 @@ class App(tk.Tk):
             messagebox.showerror(APP_TITLE, "Fix the validation errors before building the mod.")
             return
 
-        game_root = self._validated_game_root()
-        if game_root is None:
-            return
-
         slug = self.slug_var.get().strip()
         obj_src = Path(self.obj_var.get().strip())
-        out_root = game_root / "assets" / "mods" / "racers"
-        out_root.mkdir(parents=True, exist_ok=True)
-        self.output_var.set(str(out_root))
+        out_root = Path(self.output_var.get().strip())
         dest = out_root / slug
 
         if dest.exists():

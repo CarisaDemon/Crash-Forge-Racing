@@ -53,13 +53,25 @@ textures...
 <asset_name>_icon.png
 ```
 
-If this tool is placed anywhere inside the Crash Forge Racing source tree, it automatically detects the repository root and defaults the output to:
+In v1.4 you do not choose `assets/mods/racers` manually. Select either:
 
 ```text
-<source>/assets/mods/racers/
+<Crash Forge Racing game folder>
 ```
 
-If it is run standalone, it defaults to a local `output/` folder. The output location can always be changed from the UI.
+or the game's:
+
+```text
+ctr_native.exe
+```
+
+The tool automatically resolves and displays:
+
+```text
+<game>/assets/mods/racers/
+```
+
+When **Build Mod** is pressed, `assets/mods/racers` is created automatically if it does not exist. If the tool itself is placed inside a Crash Forge Racing source tree, that source root is detected as the initial game location.
 
 ## Character configuration
 
