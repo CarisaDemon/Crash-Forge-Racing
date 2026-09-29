@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(CTR-Native C)
 include(CheckCCompilerFlag)
+include(CheckIncludeFile)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -15,6 +16,14 @@ endif()
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE NEVER)
+
+check_include_file("vorbis/vorbisfile.h" CTR_NATIVE_HAVE_VORBISFILE_H)
+if(NOT CTR_NATIVE_HAVE_VORBISFILE_H)
+    message(FATAL_ERROR
+        "Crash Forge Racing requires the OGG Vorbis development files for custom music. "
+        "On MSYS2 MinGW32 install: mingw-w64-i686-libvorbis. "
+        "On Debian/Ubuntu install: libvorbis-dev (and the matching 32-bit development package when building with -m32).")
+endif()
 
 execute_process(
     COMMAND git rev-parse --short=12 HEAD
