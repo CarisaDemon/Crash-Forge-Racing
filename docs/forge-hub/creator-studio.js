@@ -256,6 +256,9 @@ function addModRow(item) {
         (item.status === "pending" ? "pending" : item.status === "rejected" ? "rejected" : "verified"),
         String(item.status || "unknown").toUpperCase());
     info.append(status);
+    if (item.is_published) {
+        info.append(make("span", "status-chip verified", "PUBLISHED / PUBLIC DOWNLOAD"));
+    }
     row.append(info);
     if (item.status === "pending") {
         const controls = make("div");
@@ -361,9 +364,21 @@ async function loadMyMods() {
         el("myModsList").replaceChildren(make("div","empty","Failed to load private submissions: "+result.error.message));
         renderLocalDraft(); return;
     }
+    const ids = (result.data || []).map(item => item.id);
+    let publiclyReleased = new Set();
+    if (ids.length) {
+        const visible = await client.from("forge_public_mods")
+            .select("submission_id").in("submission_id", ids);
+        if (!visible.error) {
+            publiclyReleased = new Set((visible.data || []).map(x => x.submission_id));
+        }
+    }
     const target = el("myModsList");
     target.replaceChildren();
-    for (const item of result.data || []) target.append(addModRow(item));
+    for (const item of result.data || []) {
+        item.is_published = publiclyReleased.has(item.id);
+        target.append(addModRow(item));
+    }
     if (!result.data || !result.data.length) {
         target.append(make("div","empty","No private submissions yet. Your first mod can be submitted below."));
     }
