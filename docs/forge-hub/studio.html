@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Crash Forge: Racing creator studio for private mod submissions.">
+<title>Creator Studio | Forge Hub</title>
+<link rel="stylesheet" href="./creator.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap nav">
+<a class="logo" href="./index.html">CRASH <span>FORGE</span><small>RACING / FORGE HUB</small></a>
+<nav class="navlinks" aria-label="Main navigation"><a href="./index.html">EXPLORE MODS</a><a class="active" href="./studio.html">CREATOR STUDIO</a></nav>
+</div></header>
+<main class="wrap">
+<section class="hero">
+<div><div class="eyebrow">COMMUNITY / CREATOR TOOLS</div><h1>YOUR <span>FORGE.</span></h1><p class="strap">Manage your GitHub-linked creator identity and prepare characters, karts, wheels and maps for review.</p></div>
+<div class="hero-action"><button class="btn" id="connectBtn" type="button" disabled>ACCOUNT LOGIN PENDING</button><a class="btn secondary hidden" id="githubSubmitLink" href="#" rel="noopener noreferrer" target="_blank">SUBMIT VIA GITHUB ↗</a><button class="btn secondary hidden" id="disconnectBtn" type="button">SIGN OUT</button></div>
+</section>
+<div id="backendBanner" class="notice info" role="status">Checking creator services...</div>
+<div class="page-grid">
+<aside class="stack">
+<section class="panel accent">
+<div class="panel-head"><h2>Creator Profile</h2><span class="meta">GITHUB IDENTITY</span></div>
+<div class="profile-header"><div id="creatorAvatar" class="avatar-placeholder">CF</div><div>
+<div class="profile-name" id="creatorName">Guest creator</div><div class="profile-handle" id="creatorHandle">GitHub account not linked</div>
+<span class="status-chip" id="identityStatus">OFFLINE</span>
+</div></div>
+<form id="profileForm">
+<div class="field"><label for="displayName">Display name</label><input id="displayName" maxlength="60" placeholder="Public creator name" disabled></div>
+<div class="field"><label for="biography">Biography</label><textarea id="biography" maxlength="500" placeholder="About your creations..." disabled></textarea></div>
+<button type="submit" id="saveProfileBtn" class="btn secondary" disabled>SAVE PROFILE</button>
+<p id="profileMessage" class="caption" role="status"></p>
+</form>
+<div id="profileLinks" class="small-actions"></div>
+</section>
+<section class="panel"><h2>Publication process</h2>
+<p class="muted">01 / Prepare a ZIP package.</p><p class="muted">02 / Send it to the private review queue.</p>
+<p class="muted">03 / Moderators verify the content and permissions.</p>
+<p class="muted">04 / Approved mods appear on the public hub and launcher.</p>
+<div class="separator"></div><p class="caption">The website never asks for a GitHub password. Authorization occurs on the official provider site.</p></section>
+</aside>
+<div class="stack">
+<section class="panel accent">
+<div class="panel-head"><h2>My Mods</h2><span id="myModsLabel" class="meta">SUBMISSIONS</span></div>
+<div id="myModsList" class="mini-list"><div class="empty">Connect your GitHub creator identity to view submissions.</div></div>
+<div class="small-actions"><button type="button" id="refreshBtn" class="btn ghost" disabled>REFRESH</button><a class="btn secondary hidden" id="githubMyModsLink" href="#" rel="noopener noreferrer" target="_blank">MY GITHUB SUBMISSIONS ↗</a><a class="btn secondary" href="./index.html#mods">PUBLIC CATALOG</a></div>
+</section>
+<section id="upload" class="panel accent">
+<div class="panel-head"><h2>Upload a Mod</h2><span class="meta">PRIVATE REVIEW</span></div>
+<p class="muted">Prepare your submission now; publishing requires identity verification and moderator approval.</p>
+<form id="modForm">
+<div class="inline-grid"><div class="field"><label for="modTitle">Mod name</label><input id="modTitle" maxlength="100" minlength="3" placeholder="My custom kart" required></div>
+<div class="field"><label for="modType">Category</label><select id="modType"><option>Character</option><option>Kart</option><option>Wheels</option><option value="Track">Map / Track</option></select></div></div>
+
+<div id="modMetadata" class="metadata-panel">
+  <div class="meta">MOD TYPE DETAILS</div>
+  <div id="racerMetadata" class="field metadata-group">
+    <label for="racerClass">Character stats class</label>
+    <select id="racerClass">
+      <option value="Balanced">Balanced</option>
+      <option value="Speed">Speed</option>
+      <option value="Acceleration">Acceleration</option>
+      <option value="Turning">Turning</option>
+    </select>
+    <p class="caption">Only the four vanilla CTR classes. This label does not change game physics.</p>
+  </div>
+  <div id="kartMetadata" class="metadata-group hidden">
+    <div class="field"><label for="kartDrive">Kart design</label>
+      <select id="kartDrive"><option value="Wheeled">Wheeled Kart</option>
+        <option value="Hovercraft">Hovercraft / No Wheels</option></select>
+    </div>
+    <div id="wheelSetupWrap" class="field">
+      <label for="wheelSetup">Wheel setup</label>
+      <select id="wheelSetup"><option value="Modular">Uses Modular Wheels</option>
+        <option value="Included">Wheels Included in Model</option></select>
+    </div>
+  </div>
+  <div id="mapMetadata" class="field metadata-group hidden">
+    <label for="mapKind">Map type</label>
+    <select id="mapKind">
+      <option value="Race Track">Race Track</option>
+      <option value="Battle Arena">Battle Arena</option>
+      <option value="Hub">Hub</option>
+    </select>
+    <p class="caption">Select what this map is designed for. Gameplay compatibility is reviewed separately.</p>
+  </div>
+  <p id="wheelMetadata" class="caption metadata-group hidden">A standalone modular wheel set for compatible wheeled karts.</p>
+</div>
+<div class="field"><label for="modVersion">Version</label><input id="modVersion" value="1.0" maxlength="28" required></div>
+<div class="field"><label for="modDescription">Description</label><textarea id="modDescription" minlength="10" maxlength="3000" required></textarea></div>
+<div class="field"><label for="modPackage">ZIP package</label><input id="modPackage" type="file" accept=".zip,application/zip" required><p class="caption">Up to 50 MiB. SHA-256 fingerprint is calculated in your browser.</p></div>
+<div class="inset"><div class="row"><span class="meta">PACKAGE VALIDATION</span><span class="pill" id="fileStatus">NO FILE</span></div>
+<p id="fileDetails" class="caption">Choose your ZIP to prepare a checksum.</p><p id="fileHash" class="caption"></p></div>
+<div class="field" style="margin-top:16px"><label class="checkbox-row"><input id="rightsConsent" type="checkbox" required>I created these assets or have the right to distribute them. No scripts, executables or private files are included.</label></div>
+<div class="form-actions"><button type="submit" class="btn" id="submitBtn" disabled>SUBMIT FOR REVIEW</button><button type="button" class="btn secondary" id="draftBtn">SAVE DRAFT</button><button type="button" class="btn ghost" id="clearBtn">CLEAR DRAFT</button></div>
+<p class="caption">Saved drafts contain text only. ZIP packages are never uploaded without explicitly submitting.</p>
+<div id="formMessage" role="status"></div>
+</form>
+</section>
+</div>
+</div>
+</main>
+<footer class="footer"><div class="wrap">Crash Forge: Racing / Forge Hub • Creator accounts are linked to GitHub • Public release requires moderation.</div></footer>
+<script src="./mod-taxonomy.js"></script>
+<script type="module" src="./creator-studio.js"></script>
+</body>
+</html>
