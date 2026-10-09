@@ -28,9 +28,9 @@ async function getJson(url) {
 function drawPublicMods(mods) {
     const target = byId("approvedMods");
     target.replaceChildren();
-    byId("approvedCount").textContent = String(mods.length) + " APPROVED";
+    byId("approvedCount").textContent = String(mods.length) + " PUBLISHED";
     if (!mods.length) {
-        target.append(make("div", "empty", "No approved public mods are listed for this creator yet."));
+        target.append(make("div", "empty", "No published mods are listed for this creator yet."));
         return;
     }
     for (const mod of mods) {
@@ -84,13 +84,14 @@ async function loadCreator() {
             byId("publicAvatar").replaceWith(img);
             img.id = "publicAvatar";
         }
-        setBanner("Public GitHub profile confirmed. Only curated Forge Hub entries are listed.", true);
+        setBanner("Public GitHub profile confirmed. Only officially published Forge Hub mods appear here.", true);
     } catch {
         setBanner("GitHub profile information is unavailable. Showing approved catalog entries if present.");
         byId("publicCreatorBio").textContent = "Public GitHub profile is not available right now.";
     }
     try {
-        const data = await getJson("./catalog.json");
+        const data = await getJson("https://mjvpkerobjgoldmimyxz.supabase.co/functions/v1/forge-publications")
+            .catch(() => getJson("./catalog.json"));
         const mods = Array.isArray(data.mods) ? data.mods : [];
         const approved = mods.filter(mod => {
             if (!mod || mod.compatibility !== "cfr") return false;
