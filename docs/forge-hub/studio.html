@@ -66,14 +66,14 @@
     <p class="caption">Only the four vanilla CTR classes. This label does not change game physics.</p>
   </div>
   <div id="kartMetadata" class="metadata-group hidden">
-    <div class="field"><label for="kartDrive">Kart design</label>
-      <select id="kartDrive"><option value="Wheeled">Wheeled Kart</option>
-        <option value="Hovercraft">Hovercraft / No Wheels</option></select>
-    </div>
-    <div id="wheelSetupWrap" class="field">
-      <label for="wheelSetup">Wheel setup</label>
-      <select id="wheelSetup"><option value="Modular">Uses Modular Wheels</option>
-        <option value="Included">Wheels Included in Model</option></select>
+    <div class="field">
+      <label for="kartType">Kart type</label>
+      <select id="kartType">
+        <option value="modular_body">Modular Body — Adaptable Wheels</option>
+        <option value="wheeled_kart">Modular Kart / Wheeled — Wheels Included</option>
+        <option value="hovercraft">Hovercraft — Floating / No Wheels</option>
+      </select>
+      <p class="caption" id="kartTypeHelp">Kart body only. Choose a separate compatible wheel set.</p>
     </div>
   </div>
   <div id="mapMetadata" class="field metadata-group hidden">
@@ -102,7 +102,7 @@
 </div>
 </main>
 <footer class="footer"><div class="wrap">Crash Forge: Racing / Forge Hub • Creator accounts are linked to GitHub • Public release requires moderation.</div></footer>
-<script src="./mod-taxonomy.js"></script>
-<script type="module" src="./creator-studio.js"></script>
+<script src="./mod-taxonomy.js?v=20261009_kart_1"></script>
+<script type="module" src="./creator-studio.js?v=20261009_kart_1"></script>
 </body>
 </html>
