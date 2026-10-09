@@ -397,6 +397,16 @@ async function saveProfile(event) {
         syncControls();
     }
 }
+function normalizedZipFile(file) {
+    // Windows often reports ZIPs as application/x-zip-compressed. Storage may
+    // use the File MIME from multipart/form-data, ignoring contentType options.
+    // Re-wrap the same bytes with the canonical ZIP MIME; keep the filename.
+    const zip = new File([file], file.name, {
+        type:"application/zip", lastModified:file.lastModified
+    });
+    if (zip.size !== file.size) throw new Error("The ZIP changed size during upload preparation.");
+    return zip;
+}
 async function submitMod(event) {
     event.preventDefault();
     if (submitting || !client || !activeUser || !activeProfile) {
@@ -428,8 +438,12 @@ async function submitMod(event) {
     let zipUploaded = false;
     try {
         message("Uploading private ZIP for moderation. No public listing will be created yet...");
+        // The upload body must also be application/zip. On Windows the selected
+        // File usually has type application/x-zip-compressed, which some Storage
+        // multipart encoders send instead of the explicit contentType option.
+        const zipBody = normalizedZipFile(packageInfo.file);
         const uploaded = await client.storage.from("forge-mod-queue").upload(
-            zipPath, packageInfo.file, {
+            zipPath, zipBody, {
                 cacheControl: "0", upsert:false, contentType:"application/zip"
             }
         );
