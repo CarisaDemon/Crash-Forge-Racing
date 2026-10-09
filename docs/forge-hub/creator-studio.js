@@ -313,7 +313,7 @@ function showSubmissionEditor(row, item) {
         line.append(make("label", "", label), selector);
         editor.append(line);
     }
-    for (const [text, input] of [["Name",title],["Version",version],["Description",desc]]) {
+    for (const [text, input] of [["Name",title],["Version",version],["Description / Mod Notes",desc]]) {
         const line = make("div", "field");
         line.append(make("label", "", text), input); editor.append(line);
     }
