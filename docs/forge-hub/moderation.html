@@ -32,6 +32,18 @@
 <a class="btn" href="./studio.html">GO TO CREATOR STUDIO ↗</a>
 </div>
 <div id="reviewPanel" class="hidden">
+<section id="moderatorAdminPanel" class="panel accent hidden" style="margin-bottom:22px">
+<div class="panel-head"><h2>Moderator Management</h2><span class="meta">OWNER ONLY</span></div>
+<p class="muted">Assign or revoke moderation access by a verified GitHub account. The account must first sign in through Creator Studio. Moderators cannot manage other moderators or remove the primary owner.</p>
+<form id="moderatorAddForm" class="moderator-admin-form">
+<label class="moderation-search" for="moderatorGithub">GITHUB USERNAME
+<input id="moderatorGithub" type="text" placeholder="GitHub username" maxlength="39" autocomplete="off" required>
+</label>
+<button class="btn" type="submit" id="moderatorAddButton">ADD MODERATOR</button>
+</form>
+<p class="moderation-message" id="moderatorAdminMessage" role="status" aria-live="polite"></p>
+<div id="moderatorRoster" class="moderator-roster" aria-live="polite"><p class="muted">Checking moderator roster...</p></div>
+</section>
 <section class="panel accent">
 <div class="panel-head"><h2>Submission Queue</h2><span class="meta" id="queueTotal">PRIVATE / MODERATORS ONLY</span></div>
 <div class="moderation-overview" aria-label="Submission counts">
