@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-10-09",
+  "game": {},
+  "news": [
+    {
+      "category": "DEVELOPMENT",
+      "title": "Forge Hub community catalog is ready",
+      "date": "2026-10-09",
+      "description": "The community catalog is in preview. Creator requests use verified GitHub accounts and require moderator approval. No mods have been published yet.",
+      "url": ""
+    }
+  ],
+  "mods": []
+}

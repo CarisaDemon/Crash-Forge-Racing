@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Forge Hub: verified community mods for Crash Forge: Racing, the native PC port.">
+<title>Forge Hub | Crash Forge: Racing</title>
+<style>
+:root{--bg:#080a0d;--panel:#11151a;--panel2:#171c22;--line:#313841;--hot:#ff6a00;--amber:#ffb000;--text:#edf0ee;--muted:#9da5ae;--green:#5fd28c}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:radial-gradient(ellipse 70% 35% at 73% 2%,#48200658,transparent 70%),linear-gradient(115deg,#0d1014,#08090c 52%,#14100e);font:15px/1.55 "Segoe UI",Arial,sans-serif;color:var(--text);min-height:100vh}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.20;background:repeating-linear-gradient(0deg,transparent 0,transparent 36px,#30363f 37px,#30363f 38px)}
+.wrap{width:min(1160px,92vw);margin:auto;position:relative}
+header{border-bottom:1px solid #33363a;background:#0c1015ce;backdrop-filter:blur(12px)}
+.nav{display:flex;align-items:center;justify-content:space-between;min-height:82px;gap:18px}
+.logo{font-weight:850;letter-spacing:.07em;line-height:1.1;font-size:20px;text-transform:uppercase}
+.logo span{color:var(--hot)}
+.logo small{display:block;font-weight:450;color:var(--muted);font-size:11px;letter-spacing:.23em;margin-top:5px}
+.tag{border:1px solid #604126;background:#22150e;color:#ffbd7e;font-size:11px;letter-spacing:.13em;padding:8px 12px;font-weight:700}
+.hero{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(250px,.8fr);gap:35px;padding:88px 0 67px;align-items:center}
+.eyebrow{font-size:12px;color:var(--hot);font-weight:800;letter-spacing:.22em}
+h1{font-size:clamp(52px,8.5vw,106px);line-height:.95;margin:13px 0 23px;letter-spacing:-.06em;font-weight:900}
+h1 span{color:var(--hot);text-shadow:0 0 38px #ff640029}
+.lede{max-width:620px;font-size:17px;color:#bac1c8}
+.actions{display:flex;flex-wrap:wrap;gap:11px;margin-top:30px}
+.btn{border:1px solid #88400e;background:linear-gradient(130deg,#6a2a06,#351a0e);color:white;font:700 12px "Segoe UI",sans-serif;letter-spacing:.1em;text-transform:uppercase;padding:13px 18px;display:inline-flex;align-items:center;gap:10px;text-decoration:none;cursor:pointer;border-radius:2px;transition:filter .15s}
+.btn:hover{filter:brightness(1.2)}
+.btn.secondary{background:#15191e;border-color:#3d4750;color:#d3d8d9}
+.btn.disabled{opacity:.5;cursor:default}
+.hero-box{position:relative;background:linear-gradient(150deg,#1e2024,#0e1013 70%);border:1px solid #43413a;padding:31px;min-height:300px;box-shadow:0 22px 70px #0006;overflow:hidden}
+.hero-box:before{content:"";position:absolute;width:260px;height:260px;border:48px solid #ff62000b;transform:rotate(45deg);right:-170px;top:-155px}
+.hero-box b{display:block;color:#93999f;font-size:10px;letter-spacing:.2em}
+.hero-box strong{display:block;font-size:45px;font-weight:900;line-height:1.1;margin:15px 0 8px}
+.hero-box p{color:#aeb5bb}
+.hero-box .line{height:4px;background:linear-gradient(90deg,var(--hot),var(--amber),transparent);margin:26px 0}
+.panel{background:#11151ae9;border:1px solid var(--line);padding:23px 26px;margin-bottom:19px}
+.topline{border-top:2px solid var(--hot)}
+.section-head{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:19px}
+h2{font-size:23px;letter-spacing:.02em;margin:0}
+.micro{font-size:11px;letter-spacing:.13em;color:#e7a26f;text-transform:uppercase;font-weight:700}
+.muted{color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:19px}
+.stat{background:#101317;border:1px solid #343940;padding:17px 20px}
+.stat strong{display:block;font-size:25px}
+.stat span{font-size:11px;letter-spacing:.11em;color:#9ca3a9;text-transform:uppercase}
+.controls{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:17px}
+.controls input{flex:1;min-width:195px;background:#090b0e;border:1px solid #434952;color:var(--text);padding:12px 13px;font:inherit;outline:none}
+.controls input:focus{border-color:var(--hot)}
+.tab{background:#181e24;border:1px solid #3e444b;color:#bec4c8;font:700 11px "Segoe UI",sans-serif;letter-spacing:.08em;padding:12px 14px;cursor:pointer}
+.tab.active{background:#42220f;color:white;border-color:var(--hot)}
+.mod-card,.news-card{background:#171b20;border:1px solid #343b43;padding:19px;min-width:0}
+.mod-card{display:flex;flex-direction:column;gap:10px}
+.mod-card .cardtop{display:flex;justify-content:space-between;gap:12px}
+.mod-card h3,.news-card h3{font-size:18px;line-height:1.2;margin:4px 0}
+.mod-card p,.news-card p{margin:0;color:#aeb5bc;line-height:1.5;font-size:13px}
+.mod-meta{font-size:11px;color:#ffbd8b;background:#2c1b13;border:1px solid #5a3824;padding:7px 9px;margin-top:auto;line-height:1.4}
+.pill{font-size:10px;color:#ffad73;border:1px solid #60371b;background:#2e1a11;letter-spacing:.1em;padding:5px 8px;height:fit-content;white-space:nowrap}
+.card-bottom{margin-top:auto;padding-top:11px;border-top:1px solid #353b43;display:flex;gap:10px;justify-content:space-between;align-items:center;color:#969fa7;font-size:12px}
+.small-link{color:#ffaf78;text-decoration:none;font-weight:700}
+.small-link:hover{text-decoration:underline}
+.empty{padding:30px 16px;border:1px dashed #444c54;background:#121519;text-align:center;color:#a6adb3;grid-column:1/-1}
+.empty strong{display:block;color:#e2e7e6;font-size:18px;margin-bottom:5px}
+.steps{display:flex;gap:12px;flex-wrap:wrap;color:#b3bbc1}
+.steps span{background:#191c21;padding:10px 12px;border-left:3px solid var(--hot);flex:1;min-width:155px}
+footer{border-top:1px solid #343a41;padding:22px 0 36px;color:#8d959d;font-size:12px;margin-top:20px}
+@media(max-width:880px){.hero{grid-template-columns:1fr;padding-top:62px}.hero-box{min-height:210px}.grid{grid-template-columns:1fr 1fr}}
+@media(max-width:600px){.grid,.stats{grid-template-columns:1fr}.hero{padding-top:45px}.section-head{display:block}.panel{padding:18px}.nav{min-height:70px}.tag{font-size:10px;padding:7px}}
+</style>
+</head>
+<body>
+<header><div class="wrap nav"><div class="logo">CRASH <span>FORGE</span><small>RACING / PC NATIVE</small></div><div class="tag">FORGE HUB • COMMUNITY</div></div></header>
+<main class="wrap">
+<section class="hero">
+  <div><div class="eyebrow">COMMUNITY MODS / WINDOWS</div><h1>FORGE<br><span>HUB.</span></h1>
+    <p class="lede">Characters, karts, wheels, and maps for Crash Forge: Racing. Approved community mods appear here and in the PC launcher.</p>
+    <div class="actions"><a class="btn" href="#mods">BROWSE MODS ↓</a><a class="btn secondary" href="./studio.html">CREATOR STUDIO ↗</a><span id="submitAction"></span></div>
+  </div>
+  <div class="hero-box"><b>COMMUNITY CONNECTION</b><strong>BUILT TO<br>MOD.</strong>
+    <div class="line"></div>
+    <p>Only approved submissions appear in the catalog. Download and like counts are never fabricated.</p>
+    <div class="micro" id="feedState">LOADING CATALOG...</div>
+  </div>
+</section>
+<section class="stats">
+  <div class="stat"><strong id="modsCount">—</strong><span>Public mods</span></div>
+  <div class="stat"><strong id="authorsCount">—</strong><span>Published creators</span></div>
+  <div class="stat"><strong id="updatedAt">—</strong><span>Catalog updated</span></div>
+</section>
+<section class="panel topline" id="mods">
+  <div class="section-head"><h2>Available mods</h2><span class="micro">FOR CRASH FORGE: RACING</span></div>
+  <div class="controls"><input id="search" type="search" placeholder="Search by title, author, or description..." aria-label="Search mods" autocomplete="off">
+    <button class="tab active" data-type="All">ALL</button><button class="tab" data-type="Character">CHARACTERS</button><button class="tab" data-type="Kart">KARTS</button><button class="tab" data-type="Wheels">WHEELS</button><button class="tab" data-type="Track">MAPS / TRACKS</button>
+  </div>
+  <div class="grid" id="modList"><div class="empty"><strong>Loading...</strong>Fetching published data.</div></div>
+</section>
+<section class="panel" id="news">
+  <div class="section-head"><h2>News</h2><span class="micro">VERIFIED UPDATES</span></div>
+  <div class="grid" id="newsList"><div class="empty">Loading news...</div></div>
+</section>
+<section class="panel">
+  <div class="section-head"><h2>Created a mod?</h2><span class="micro">SHARE YOUR CREATION</span></div>
+  <p class="muted">Submit your project for review. Published mods must be compatible with Crash Forge: Racing and have redistribution permission.</p>
+  <div class="steps"><span>01 / Prepare a ZIP package</span><span>02 / Host an HTTPS download</span><span>03 / Submit for review</span><span>04 / Approval and release</span></div>
+  <div class="actions" id="submitFooter"><a class="btn secondary" href="./studio.html">PREPARE MY MOD ↗</a></div>
+</section>
+</main>
+<footer><div class="wrap">Crash Forge: Racing / Forge Hub • Independent community catalog • Creators are responsible for their own content and distribution rights.</div></footer>
+<script src="./mod-taxonomy.js"></script>
+<script>
+"use strict";
+let allMods=[];
+let filter="All";
+const safeUrl = value => { try{ const u=new URL(String(value||""));return u.protocol==="https:" && !u.username && !u.password ? u.href : null; }catch{return null;} };
+const el=(tag,cls,text)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=String(text);return n;};
+const container=id=>document.getElementById(id);
+const clear=node=>{while(node.firstChild)node.removeChild(node.firstChild);};
+function showEmpty(node,title,detail){clear(node);const box=el("div","empty");box.append(el("strong","",title),document.createTextNode(detail));node.append(box);}
+function link(text,url,css="small-link"){const u=safeUrl(url);if(!u)return null;const a=el("a",css,text);a.href=u;a.target="_blank";a.rel="noopener noreferrer";return a;}
+function renderMods(){
+ const target=container("modList"),q=container("search").value.trim().toLocaleLowerCase();
+ const items=allMods.filter(m=>(filter==="All"||m.type===filter)&&[m.title,m.author,m.description,window.ForgeModMeta.summary(m.type,m)].join(" ").toLocaleLowerCase().includes(q));
+ if(!items.length){showEmpty(target,allMods.length?"No matching mods":"No approved public mods yet.",allMods.length?"Try another search or category.":"Once the first submissions are approved, they will appear here and in the launcher.");return;}
+ clear(target);
+ for(const mod of items){
+  const card=el("article","mod-card"),top=el("div","cardtop"),left=el("div");
+  left.append(el("div","micro",mod.author||"CREATOR"));
+  left.append(el("h3","",mod.title||"Mod"));
+  top.append(left,el("span","pill",({Character:"CHARACTER",Kart:"KART",Wheels:"WHEELS",Track:"MAP / TRACK"})[mod.type]||"MOD"));
+  const desc=el("p","",mod.description||"No description available.");
+  const meta=el("div","mod-meta",window.ForgeModMeta.summary(mod.type,mod));
+  const footer=el("div","card-bottom"),info=el("span","", "v"+String(mod.version||"1.0"));
+  const download=link("DOWNLOAD ↗",mod.download_url);
+  const detail=link("DETAILS ↗",mod.page_url);
+  const actions=el("div","");
+  const handle=String(mod.author_github_login||"");
+  if(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(handle)) {
+    const creator=el("a","small-link","CREATOR ↗");
+    creator.href="./creator.html?user="+encodeURIComponent(handle);
+    actions.append(creator);
+  }
+  if(detail){if(actions.childNodes.length)actions.append(document.createTextNode(" • "));actions.append(detail);}
+  if(download){if(actions.childNodes.length)actions.append(document.createTextNode("  •  "));actions.append(download);}
+  if(!actions.childNodes.length)actions.append(el("span","","NO VERIFIED DOWNLOAD"));
+  footer.append(info,actions);card.append(top,desc,meta,footer);target.append(card);
+ }
+}
+function renderNews(items){
+ const target=container("newsList");clear(target);
+ if(!items.length){showEmpty(target,"No public news yet", "Verified team announcements will appear here.");return;}
+ for(const entry of items.slice(0,9)){
+  const card=el("article","news-card");
+  card.append(el("div","micro",entry.category||"NEWS"),el("h3","",entry.title||""));
+  card.append(el("p","",entry.description||""));
+  const more=link("VIEW SOURCE ↗",entry.url);
+  if(more){const div=el("div","");div.style.marginTop="14px";div.append(more);card.append(div);}
+  if(entry.date)card.append(el("div","muted",entry.date));
+  target.append(card);
+ }
+}
+function setupSubmission(config){
+ const url=safeUrl(config.submit_url);
+ const a=url?link("SUBMIT A MOD ↗",url,"btn"):el("span","btn disabled","SUBMISSIONS COMING SOON");
+ container("submitAction").append(a);
+ const b=url?link("SUBMIT MOD FOR REVIEW ↗",url,"btn"):el("span","btn disabled","SUBMISSIONS NOT ENABLED");
+ container("submitFooter").append(b);
+}
+async function start(){
+ const results=await Promise.allSettled([
+  fetch("./catalog.json",{cache:"no-store"}).then(r=>{if(!r.ok)throw Error("HTTP "+r.status);return r.json();}),
+  fetch("./config.json",{cache:"no-store"}).then(r=>r.ok?r.json():{})
+ ]);
+ setupSubmission(results[1].status==="fulfilled"?results[1].value:{});
+ if(results[0].status!=="fulfilled"){
+  container("feedState").textContent="CATALOG UNAVAILABLE";
+  showEmpty(container("modList"),"Could not load the catalog.","Check that catalog.json is publicly accessible.");
+  showEmpty(container("newsList"),"News unavailable.","");
+  return;
+ }
+ const data=results[0].value;
+ if(data.schema_version!==1||!Array.isArray(data.mods)||!Array.isArray(data.news)){
+  container("feedState").textContent="UNSUPPORTED CATALOG FORMAT";
+  showEmpty(container("modList"),"Unsupported catalog format.","Catalog requires schema_version 1.");
+  return;
+ }
+ allMods=data.mods.filter(m=>m&&m.compatibility==="cfr"&&window.ForgeModMeta.categories.includes(m.type));
+ container("modsCount").textContent=String(allMods.length);
+ container("authorsCount").textContent=String(new Set(allMods.map(m=>m.author).filter(Boolean)).size);
+ container("updatedAt").textContent=String(data.updated_at||"—");
+ container("feedState").textContent="CATALOG LOADED";
+ renderMods();renderNews(data.news);
+}
+container("search").addEventListener("input",renderMods);
+for(const btn of document.querySelectorAll(".tab"))btn.addEventListener("click",()=>{filter=btn.dataset.type;for(const b of document.querySelectorAll(".tab"))b.classList.toggle("active",b===btn);renderMods();});
+start().catch(()=>container("feedState").textContent="CONNECTION ERROR");
+</script>
+</body>
+</html>

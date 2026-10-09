@@ -1,0 +1,126 @@
+name: "Submit a Crash Forge: Racing mod"
+description: "Request publication of a Forge Hub-compatible mod (subject to review)."
+title: "[MOD] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing your creation! A submission **does not automatically publish** a mod.
+        Moderators will check compatibility, ownership, licensing, and safety.
+        Provide a direct public HTTPS download link to an actual ZIP package.
+  - type: input
+    id: name
+    attributes:
+      label: Mod title
+      placeholder: "My Crash Forge kart"
+    validations:
+      required: true
+  - type: input
+    id: author
+    attributes:
+      label: Creator or team name
+      placeholder: "Your public creator name"
+    validations:
+      required: true
+  - type: dropdown
+    id: mod_type
+    attributes:
+      label: Category
+      options:
+        - Character
+        - Kart
+        - Wheels
+        - Map / Track
+    validations:
+      required: true
+
+  - type: dropdown
+    id: map_kind
+    attributes:
+      label: Map type (Maps / Tracks only)
+      options:
+        - Not applicable
+        - Race Track
+        - Battle Arena
+        - Hub
+    validations:
+      required: true
+  - type: dropdown
+    id: racer_class
+    attributes:
+      label: Vanilla CTR stats class (Characters only)
+      options:
+        - Not applicable
+        - Balanced
+        - Speed
+        - Acceleration
+        - Turning
+    validations:
+      required: true
+  - type: dropdown
+    id: kart_drive
+    attributes:
+      label: Kart design (Karts only)
+      options:
+        - Not applicable
+        - Wheeled
+        - Hovercraft (no wheels)
+    validations:
+      required: true
+  - type: dropdown
+    id: wheel_setup
+    attributes:
+      label: Wheel setup (Wheeled karts only)
+      options:
+        - Not applicable
+        - Modular wheels
+        - Wheels included in model
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Mod version
+      placeholder: "1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description and installation notes
+      placeholder: "Tell us what your mod adds and how it works."
+    validations:
+      required: true
+  - type: input
+    id: package_url
+    attributes:
+      label: Direct HTTPS URL to the ZIP package
+      placeholder: "https://github.com/creator/repo/releases/download/v1/mod.zip"
+      description: "The link must download a real ZIP, not lead to a page or a RAR archive."
+    validations:
+      required: true
+  - type: input
+    id: sha256
+    attributes:
+      label: ZIP SHA-256 checksum (64 hexadecimal characters)
+      description: "Used to verify that the downloaded package matches the approved file."
+    validations:
+      required: true
+  - type: input
+    id: details_url
+    attributes:
+      label: Mod or project page
+      placeholder: "https://github.com/creator/repo"
+    validations:
+      required: false
+  - type: checkboxes
+    id: permissions
+    attributes:
+      label: Rights and safety
+      options:
+        - label: "I created this content or have permission to redistribute every included asset."
+          required: true
+        - label: "This package is intended for Crash Forge: Racing and contains no scripts or executables."
+          required: true
+        - label: "I understand that publication requires review; this form does not upload or install any files in the launcher."
+          required: true
