@@ -1,7 +1,8 @@
 {
-  "supabase_url": "",
-  "supabase_publishable_key": "",
+  "supabase_url": "https://mjvpkerobjgoldmimyxz.supabase.co",
+  "supabase_publishable_key": "sb_publishable_r_LvI1SCEoK0WKd0y--REg_uMbe_930",
   "max_upload_mb": 50,
   "auth_provider": "github",
-  "storage_bucket": "forge-mod-queue"
+  "storage_bucket": "forge-mod-queue",
+  "oauth_enabled": false
 }
