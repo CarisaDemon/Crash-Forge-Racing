@@ -7,7 +7,7 @@ const PROJECT="mjvpkerobjgoldmimyxz.supabase.co";
 const MAX_ZIP=50*1024*1024;
 const UUID=/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const SHA=/^[a-f0-9]{64}$/;
-const LICENSES=new Set(["All rights reserved","CC-BY-4.0","CC0-1.0"]);
+const LICENSES=new Set(["All rights reserved","CC-BY-4.0","CC0-1.0","Game rip - source credited"]);
 const EXT=new Set([".obj",".mtl",".png",".jpg",".jpeg",".bmp",".tga",".ini",
  ".cfg",".json",".txt",".md",".wav",".ogg",".cseq",".bin",".dds",
  ".webp",".gif",".xml",".dat",".gltf",".glb"]);
@@ -142,26 +142,53 @@ async function publish(request,admin,cfg){
   auth:{autoRefreshToken:false,persistSession:false},
   global:{headers:{Authorization:authorization}}
  });
- const access=await client.rpc("forge_is_moderator");
+ const access=await client.rpc("forge_is_owner");
  if(access.error||access.data!==true)
-  return send({error:"Moderator permission required"},403);
+  return send({error:"Primary owner permission required for public release"},403);
  const raw=await request.text();
  if(raw.length>6000)return send({error:"Request too large"},413);
  let req;
  try{req=JSON.parse(raw);}catch{return send({error:"Invalid JSON"},400);}
- const id=String(req?.submission_id||"").trim(),
-  license=String(req?.license||"").trim(),
-  basis=String(req?.rights_basis||"").trim();
- if(!UUID.test(id)||!LICENSES.has(license)||basis.length<40||
-    basis.length>1000||req?.rights_confirmed!==true)
+ const id=String(req?.submission_id||"").trim();
+ if(!UUID.test(id))return send({error:"Invalid submission ID"},400);
+ const action=String(req?.action||"publish").trim();
+ if(action==="unpublish"){
+  const reason=String(req?.reason||"").trim();
+  if(reason.length<8||reason.length>500)
+   return send({error:"A takedown reason (8-500 characters) is required"},400);
+  const existing=await admin.from("forge_public_mods").select("id")
+    .eq("submission_id",id).maybeSingle();
+  if(existing.error)throw existing.error;
+  if(!existing.data)return send({error:"This mod is not published"},404);
+  const path="mods/"+id+".zip";
+  const removed=await admin.storage.from("forge-public-mods").remove([path]);
+  if(removed.error)return send({error:"Public ZIP removal failed: "+brief(removed.error)},409);
+  const result=await admin.rpc("forge_remove_publication",{
+   p_submission_id:id,p_reason:reason,p_moderator_id:user.id
+  });
+  if(result.error)return send({error:"Download removed, but listing removal must be retried: "+brief(result.error)},409);
+  return send({removed:true,message:"Public ZIP and listing removed; private review remains intact"});
+ }
+ if(action!=="publish")return send({error:"Unknown publication action"},400);
+ const license=String(req?.license||"").trim();
+ const moderatorNotes=String(req?.moderator_notes||"").trim();
+ const basis=moderatorNotes;
+ if(!LICENSES.has(license)||moderatorNotes.length<40||
+    moderatorNotes.length>1000||req?.publish_confirmed!==true)
   return send({error:"Provide valid ID, license, rights evidence and consent"},400);
  const {data:sub,error:subErr}=await admin.from("mod_submissions")
-  .select("id,owner_id,status,publication_blocked,zip_path,sha256,file_size_bytes")
+  .select("id,owner_id,status,publication_blocked,zip_path,sha256,file_size_bytes,description")
   .eq("id",id).maybeSingle();
  if(subErr||!sub)return send({error:"Submission not found"},404);
  if(sub.status!=="approved")return send({error:"Approve before publishing"},409);
  if(sub.publication_blocked)
-  return send({error:"Third-party source has no public redistribution clearance"},403);
+  return send({error:"Publication locked by moderation. Unlock it before publishing."},403);
+ const gameRip=/\\b(ripped|extracted|ported|taken)\\s+from\\s+\\S+/i.test(
+   String(sub.description||""));
+ if(gameRip && license!=="Game rip - source credited")
+  return send({error:"Keep the original game/source credited in public release metadata"},422);
+ if(!gameRip && license==="Game rip - source credited")
+  return send({error:"Source missing: identify the original game in Mod Notes"},422);
  if(!SHA.test(String(sub.sha256||""))||Number(sub.file_size_bytes)<=0||
    Number(sub.file_size_bytes)>MAX_ZIP||
    !String(sub.zip_path).startsWith(String(sub.owner_id)+"/"))
