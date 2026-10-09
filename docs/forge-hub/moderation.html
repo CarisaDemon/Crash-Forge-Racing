@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Forge Hub private moderation: review creator submissions and verify ZIP packages.">
+<title>Moderation | Crash Forge: Racing</title>
+<link rel="stylesheet" href="./creator.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap nav">
+<a class="logo" href="./index.html">CRASH <span>FORGE</span><small>RACING / FORGE HUB</small></a>
+<nav class="navlinks" aria-label="Main navigation">
+<a href="./index.html">EXPLORE</a>
+<a href="./studio.html">CREATOR STUDIO</a>
+<a class="active" href="./moderation.html">MODERATION</a>
+</nav>
+</div></header>
+<main class="wrap">
+<section class="hero">
+<div>
+<div class="eyebrow">FORGE HUB / RESTRICTED ACCESS</div>
+<h1>MOD <span>REVIEW.</span></h1>
+<p class="strap">Review submitted packages, verify file integrity and distribution rights, then approve or reject requests. Only verified Forge Hub moderators can use these actions.</p>
+</div>
+<div class="hero-action"><button class="btn secondary" id="refreshReviews" type="button" disabled>REFRESH QUEUE</button></div>
+</section>
+<div id="moderationBanner" class="notice info" role="status" aria-live="polite">Checking your GitHub moderator permission...</div>
+<div id="signInHelp" class="panel hidden">
+<h2>Sign in with GitHub</h2>
+<p class="muted">Sign in through Creator Studio using your authorized account, then return to this page.</p>
+<a class="btn" href="./studio.html">GO TO CREATOR STUDIO ↗</a>
+</div>
+<div id="reviewPanel" class="hidden">
+<section class="panel accent">
+<div class="panel-head"><h2>Submission Queue</h2><span class="meta" id="queueTotal">PRIVATE / MODERATORS ONLY</span></div>
+<div class="moderation-overview" aria-label="Submission counts">
+<div class="mod-stat"><strong id="countAll">—</strong><span>ALL</span></div>
+<div class="mod-stat"><strong id="countPending">—</strong><span>PENDING</span></div>
+<div class="mod-stat"><strong id="countApproved">—</strong><span>APPROVED</span></div>
+<div class="mod-stat"><strong id="countRejected">—</strong><span>REJECTED</span></div>
+</div>
+<div class="moderation-toolbar">
+<div class="moderation-filters" role="group" aria-label="Filter requests">
+<button class="mod-filter active" type="button" data-state="all" aria-pressed="true">ALL</button>
+<button class="mod-filter" type="button" data-state="pending" aria-pressed="false">PENDING</button>
+<button class="mod-filter" type="button" data-state="approved" aria-pressed="false">APPROVED</button>
+<button class="mod-filter" type="button" data-state="rejected" aria-pressed="false">REJECTED</button>
+</div>
+<label class="moderation-search"><span>SEARCH</span><input type="search" id="reviewSearch" placeholder="Mod title or creator..." maxlength="120"></label>
+</div>
+<div id="reviewList" class="moderation-list" aria-live="polite"><div class="empty">Loading submissions...</div></div>
+<p class="caption" id="queueLimitNote">Showing the latest 200 requests. Approved status does not publish ZIP files or add mods to the public catalog.</p>
+</section>
+<div class="notice info" style="margin-top:18px">
+<strong>Publication is a separate action.</strong>
+Approving a submission updates its private review status only. It does not place its ZIP on a public download URL or make it appear in the launcher.
+Third-party game assets, including CNK resources, require redistribution permission before public release.
+</div>
+</div>
+</main>
+<footer class="footer"><div class="wrap">Crash Forge: Racing / Forge Hub • Verified moderator actions • Private ZIP review • No automatic public release.</div></footer>
+<script src="./mod-taxonomy.js"></script>
+<script type="module" src="./moderation.js"></script>
+</body>
+</html>
