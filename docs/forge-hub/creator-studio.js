@@ -43,6 +43,7 @@ function setFileInfo(text, kind, hashText) {
 function syncControls() {
     const connected = !!(client && activeUser && activeProfile);
     el("connectBtn").disabled = !client || !!activeUser;
+    el("connectBtn").textContent = client ? "CONNECT VIA GITHUB" : "ACCOUNT LOGIN PENDING";
     el("connectBtn").classList.toggle("hidden", !!activeUser);
     el("disconnectBtn").classList.toggle("hidden", !activeUser);
     el("saveProfileBtn").disabled = !connected || profileSaving;
