@@ -183,7 +183,7 @@ async function publish(request,admin,cfg){
  if(sub.status!=="approved")return send({error:"Approve before publishing"},409);
  if(sub.publication_blocked)
   return send({error:"Publication locked by moderation. Unlock it before publishing."},403);
- const gameRip=/\\b(ripped|extracted|ported|taken)\\s+from\\s+\\S+/i.test(
+ const gameRip=/\b(ripped|extracted|ported|taken)\s+from\s+\S+/i.test(
    String(sub.description||""));
  if(gameRip && license!=="Game rip - source credited")
   return send({error:"Keep the original game/source credited in public release metadata"},422);
