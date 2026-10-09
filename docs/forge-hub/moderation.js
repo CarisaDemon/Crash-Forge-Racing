@@ -22,6 +22,10 @@ let entries = [];
 let creators = new Map();
 let activeFilter = "all";
 let busy = false;
+let published = new Map();
+let publishedReady = false;
+let publicApiKey = "";
+const PUBLICATION_URL = "https://mjvpkerobjgoldmimyxz.supabase.co/functions/v1/forge-publications";
 
 function banner(text, state = "info") {
     const el = get("moderationBanner");
@@ -56,9 +60,11 @@ function countStatuses() {
         ["countAll", "all"],
         ["countPending", "pending"],
         ["countApproved", "approved"],
-        ["countRejected", "rejected"]
+        ["countRejected", "rejected"],
+        ["countPublished", "published"]
     ]) {
         get(id).textContent = status === "all" ? entries.length :
+            status === "published" ? published.size :
             entries.filter(item => item.status === status).length;
     }
     get("queueTotal").textContent = entries.length + " REQUESTS / PRIVATE";
@@ -72,7 +78,7 @@ function render() {
     countStatuses();
     const search = get("reviewSearch").value.trim().toLowerCase();
     const filtered = entries.filter(item =>
-        (activeFilter === "all" || item.status === activeFilter) &&
+        (activeFilter === "all" || (activeFilter === "published" ? published.has(item.id) : item.status === activeFilter)) &&
         (!search || [
             item.title, item.category, item.description,
             item.original_filename, ownerHandle(item)
@@ -167,7 +173,126 @@ function makeCard(item) {
         card.append(result);
         if (item.moderator_note) card.append(node("p", "inset", "Moderator note: " + item.moderator_note));
     }
+    appendPublicationControls(card, item);
     return card;
+}
+
+function appendPublicationControls(card, item) {
+    const released = published.get(item.id);
+    if (released) {
+        const section = node("div", "moderation-published");
+        section.append(node("span", "status-chip verified", "PUBLIC RELEASE"));
+        const link = node("a", "small-link", "OPEN PUBLIC ZIP ↗");
+        link.href = released.download_url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        section.append(link);
+        section.append(node("p", "caption", "Published to Forge Hub; also visible on the creator profile and in the online launcher catalog."));
+        card.append(section);
+        return;
+    }
+    if (item.status !== "approved") return;
+    if (item.publication_blocked) {
+        const warning = node("div", "moderation-publication-blocked");
+        warning.append(node("strong", "", "PUBLICATION BLOCKED"));
+        warning.append(node("p", "", "Third-party source assets do not have documented redistribution clearance. This ZIP stays private, even though its review status is Approved."));
+        card.append(warning);
+        return;
+    }
+    if (!publishedReady) {
+        card.append(node("p", "caption", "Publication status unavailable. Retry when the public catalog reconnects."));
+        return;
+    }
+    const section = node("div", "moderation-publish");
+    section.append(node("h4", "", "PUBLIC RELEASE — SEPARATE FROM APPROVAL"));
+    section.append(node("p", "caption",
+        "Publishing makes the ZIP downloadable by everyone. Publish only original creations or content with explicit written redistribution permission."));
+    const basisLabel = node("label", "moderation-field");
+    basisLabel.append(node("span", "meta", "RIGHTS EVIDENCE (40–1000 CHARACTERS)"));
+    const basis = node("textarea");
+    basis.minLength = 40;
+    basis.maxLength = 1000;
+    basis.placeholder = "Describe who created these assets and your evidence of their permission to distribute this ZIP publicly.";
+    basisLabel.append(basis);
+    section.append(basisLabel);
+
+    const licenseLabel = node("label", "moderation-field");
+    licenseLabel.append(node("span", "meta", "PUBLIC RELEASE LICENSE"));
+    const license = node("select", "moderation-license");
+    for (const [value,text] of [
+        ["All rights reserved", "All rights reserved — distribution permission verified"],
+        ["CC-BY-4.0", "Creative Commons Attribution 4.0"],
+        ["CC0-1.0", "Creative Commons Zero 1.0"]
+    ]) {
+        const option = node("option", "", text);
+        option.value = value;
+        license.append(option);
+    }
+    licenseLabel.append(license);
+    section.append(licenseLabel);
+
+    const confirmation = node("label", "checkbox-row");
+    const checkbox = node("input");
+    checkbox.type = "checkbox";
+    confirmation.append(checkbox, document.createTextNode(
+        " I verified ownership/redistribution rights and understand this uploads a permanently public downloadable ZIP."));
+    section.append(confirmation);
+    const resultMessage = node("p", "moderation-message");
+    resultMessage.setAttribute("role", "status");
+    const button = node("button", "btn moderation-publish-button", "PUBLISH TO FORGE HUB");
+    button.type = "button";
+    button.addEventListener("click", () =>
+        publishSubmission(item, basis.value, license.value, checkbox.checked, button, resultMessage));
+    section.append(button, resultMessage);
+    card.append(section);
+}
+async function publishSubmission(item, evidence, license, confirmed, button, feedback) {
+    if (!client || !currentUser || busy || !publishedReady || published.has(item.id)) return;
+    const basis = String(evidence || "").trim();
+    if (item.status !== "approved" || item.publication_blocked) {
+        feedback.textContent = "Only approved, distribution-cleared requests can be published.";
+        return;
+    }
+    if (!confirmed || basis.length < 40 || basis.length > 1000) {
+        feedback.textContent = "Confirm rights and provide 40–1000 characters of evidence before publishing.";
+        return;
+    }
+    if (!window.confirm("This action releases the ZIP to the PUBLIC INTERNET and lists it in Forge Hub and creator profiles. Continue only if you have verified distribution rights?")) return;
+    busy = true;
+    button.disabled = true;
+    const oldLabel = button.textContent;
+    button.textContent = "VERIFYING AND PUBLISHING...";
+    feedback.textContent = "Checking original ZIP SHA-256 and releasing through the secure service...";
+    try {
+        const auth = await client.auth.getSession();
+        const token = auth.data?.session?.access_token;
+        if (auth.error || !token) throw new Error("Sign in with GitHub again.");
+        const response = await fetch(PUBLICATION_URL, {
+            method: "POST",
+            mode: "cors",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + token,
+                "apikey": publicApiKey
+            },
+            body: JSON.stringify({
+                submission_id: item.id, rights_basis: basis,
+                license, rights_confirmed: true
+            })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.published !== true) {
+            throw new Error(String(data.error || "Publication service rejected this request (HTTP " + response.status + ")."));
+        }
+        banner("Published " + item.title + " to the public Forge Hub catalog.", "ok");
+        await loadQueue();
+    } catch (error) {
+        feedback.textContent = "Publication failed: " + String(error.message || error);
+        button.disabled = false;
+        button.textContent = oldLabel;
+    } finally {
+        busy = false;
+    }
 }
 
 async function downloadSubmission(item, button, message) {
@@ -258,7 +383,7 @@ async function loadQueue() {
     const result = await client.from("mod_submissions").select(
         "id,owner_id,title,category,mod_version,description,map_kind,racer_class," +
         "kart_drive,wheel_setup,original_filename,zip_path,sha256,file_size_bytes," +
-        "status,moderator_note,created_at,reviewed_at"
+        "status,moderator_note,created_at,reviewed_at,publication_blocked"
     ).order("created_at", {ascending:false}).limit(MAX_VISIBLE);
     if (result.error) {
         banner("Could not read the review queue: " + result.error.message, "info");
@@ -266,6 +391,16 @@ async function loadQueue() {
         return;
     }
     entries = Array.isArray(result.data) ? result.data : [];
+    const publicResult = await client.from("forge_public_mods")
+        .select("submission_id,id,download_url,license,published_at")
+        .order("published_at", {ascending:false}).limit(500);
+    publishedReady = !publicResult.error;
+    published = new Map();
+    if (publishedReady) {
+        for (const entry of publicResult.data || []) published.set(entry.submission_id, entry);
+    } else {
+        banner("Public release status unavailable; Publish is disabled until it reconnects.", "info");
+    }
     creators = new Map();
     const ids = [...new Set(entries.map(mod => mod.owner_id).filter(Boolean))];
     if (ids.length) {
@@ -277,8 +412,8 @@ async function loadQueue() {
     }
     get("refreshReviews").disabled = false;
     get("queueLimitNote").textContent = "Showing the latest " + MAX_VISIBLE +
-        " requests at most. Approving a request only changes its private review status; " +
-        "it never publishes ZIP files or updates the public mod catalog.";
+        " private requests. Approve is review-only; Publish requires a separate " +
+        "rights declaration and uploads an approved ZIP to the public catalog.";
     render();
 }
 
@@ -293,6 +428,7 @@ async function initialize() {
             !String(config.supabase_publishable_key).startsWith("sb_publishable_")) {
             throw new Error("Creator authentication is not configured.");
         }
+        publicApiKey = config.supabase_publishable_key;
         const sdk = await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.50.0/+esm");
         client = sdk.createClient(config.supabase_url, config.supabase_publishable_key, {
             auth:{flowType:"pkce",detectSessionInUrl:true,persistSession:true}
