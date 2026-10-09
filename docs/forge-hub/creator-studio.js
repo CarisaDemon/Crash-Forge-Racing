@@ -532,8 +532,8 @@ async function initialize() {
     const url = String(settings.supabase_url || "").trim();
     const key = String(settings.supabase_publishable_key || "").trim();
     const provider = String(settings.auth_provider || "github");
-    if (!url || !key) {
-        notice("Direct ZIP uploads are not connected yet. You can save a draft and submit a verified GitHub Issue for moderator review. Sign-in and private uploads require the account service.");
+    if (!url || !key || settings.oauth_enabled !== true) {
+        notice("Forge Hub database and private storage are ready. GitHub OAuth is not enabled yet; continue using local drafts or verified GitHub Issue submissions.");
         return;
     }
     let endpoint = null;
