@@ -134,3 +134,25 @@ p{margin:7px 0}
   .navlinks a{font-size:10px}
   .moderation-filters .mod-filter{font-size:10px;padding:8px 9px}
 }
+
+
+/* Release controls: Approved (private) and Published (public) are distinct. */
+.moderation-overview{grid-template-columns:repeat(5,minmax(0,1fr))}
+.moderation-publish,.moderation-published,.moderation-publication-blocked{
+  margin-top:19px;padding:16px;border:1px solid #384452;display:grid;gap:12px;
+  background:#0b1319;overflow-wrap:anywhere;
+}
+.moderation-publish{border-left:3px solid #f77924}
+.moderation-publish h4{margin:0;color:#ffb77e;font-size:15px;letter-spacing:.06em}
+.moderation-publish p{margin:0}
+.moderation-published{border-left:3px solid #49ae7b}
+.moderation-published .small-link{width:max-content}
+.moderation-publication-blocked{border-left:3px solid #bd6661;background:#191112}
+.moderation-publication-blocked strong{color:#ffb8ae;font-size:12px;letter-spacing:.08em}
+.moderation-publication-blocked p{margin:0;color:#d8b5b1;font-size:12px;line-height:1.55}
+.moderation-publish .moderation-license{width:100%;background:#0c1116;color:#f4e7d9;
+  border:1px solid #45505a;padding:11px 12px;font:inherit;outline:0}
+.moderation-publish .moderation-license:focus{border-color:#ff6a00}
+.moderation-publish .moderation-publish-button{justify-self:start;max-width:100%}
+@media(max-width:800px){.moderation-overview{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:510px){.moderation-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.moderation-publish,.moderation-published,.moderation-publication-blocked{padding:12px}}
