@@ -1,6 +1,6 @@
 :root{--bg:#080a0d;--panel:#12161c;--panel2:#171d23;--edge:#343b43;--hot:#ff6a00;--warm:#ffb16a;--text:#edf0ee;--muted:#a3abb3;--good:#65d499}
 *{box-sizing:border-box}
-body{margin:0;color:var(--text);font:15px/1.52 "Segoe UI",Arial,sans-serif;background:radial-gradient(ellipse 75% 32% at 70% 0%,#55270855,transparent 80%),linear-gradient(125deg,#0d1115,#07090c 65%,#17100c);min-height:100vh}
+body{margin:0;color:var(--text);font:15px/1.52 "Segoe UI",Arial,sans-serif;background:linear-gradient(110deg,#080a0de8,#090b0cbd 55%,#10100db9),url("https://raw.githubusercontent.com/CarisaDemon/Crash-Forge-Launcher/main/assets/Fondo.png") center center / cover fixed no-repeat,#090b0e;min-height:100vh}
 body:before{content:"";position:fixed;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,transparent 0,transparent 43px,#38404b 44px);opacity:.12}
 a{color:#ffbd85;text-decoration:none}
 a:hover{text-decoration:underline}

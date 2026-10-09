@@ -14,7 +14,7 @@
 </div></header>
 <main class="wrap">
 <section class="hero">
-<div><div class="eyebrow">COMMUNITY / CREATOR TOOLS</div><h1>YOUR <span>FORGE.</span></h1><p class="strap">Manage your GitHub-linked creator identity and prepare characters, karts, wheels and maps for review.</p></div>
+<div><div class="eyebrow">COMMUNITY / CREATOR TOOLS</div><h1>YOUR <span>FORGE.</span></h1><p class="strap">Manage your GitHub-linked creator identity and prepare characters, karts, wheels, maps and Modpacks for review.</p></div>
 <div class="hero-action"><button class="btn" id="connectBtn" type="button" disabled>ACCOUNT LOGIN PENDING</button><a class="btn secondary hidden" id="githubSubmitLink" href="#" rel="noopener noreferrer" target="_blank">SUBMIT VIA GITHUB ↗</a><button class="btn secondary hidden" id="disconnectBtn" type="button">SIGN OUT</button></div>
 </section>
 <div id="backendBanner" class="notice info" role="status">Checking creator services...</div>
@@ -47,11 +47,11 @@
 <div class="small-actions"><button type="button" id="refreshBtn" class="btn ghost" disabled>REFRESH</button><a class="btn secondary hidden" id="githubMyModsLink" href="#" rel="noopener noreferrer" target="_blank">MY GITHUB SUBMISSIONS ↗</a><a class="btn secondary" href="./index.html#mods">PUBLIC CATALOG</a></div>
 </section>
 <section id="upload" class="panel accent">
-<div class="panel-head"><h2>Upload a Mod</h2><span class="meta">PRIVATE REVIEW</span></div>
+<div class="panel-head"><h2>Upload a Mod / Modpack</h2><span class="meta">PRIVATE REVIEW</span></div>
 <p class="muted">Prepare your submission now; publishing requires identity verification and moderator approval.</p>
 <form id="modForm">
 <div class="inline-grid"><div class="field"><label for="modTitle">Mod name</label><input id="modTitle" maxlength="100" minlength="3" placeholder="My custom kart" required></div>
-<div class="field"><label for="modType">Category</label><select id="modType"><option>Character</option><option>Kart</option><option>Wheels</option><option value="Track">Map / Track</option></select></div></div>
+<div class="field"><label for="modType">Category</label><select id="modType"><option>Character</option><option>Kart</option><option>Wheels</option><option value="Track">Map / Track</option><option value="Modpack">Modpack / Bundle</option></select></div></div>
 
 <div id="modMetadata" class="metadata-panel">
   <div class="meta">MOD TYPE DETAILS</div>
@@ -85,6 +85,7 @@
     </select>
     <p class="caption">Select what this map is designed for. Gameplay compatibility is reviewed separately.</p>
   </div>
+  <p id="modpackMetadata" class="caption metadata-group hidden">A Modpack ZIP contains modpack.ini plus two or more independent folders: racers/id/character.ini, karts/id/kart.ini, wheels/id/wheels.ini or tracks/id/track.ini. Each mod keeps its own identifier.</p>
   <p id="wheelMetadata" class="caption metadata-group hidden">A standalone modular wheel set for compatible wheeled karts.</p>
 </div>
 <div class="field"><label for="modVersion">Version</label><input id="modVersion" value="1.0" maxlength="28" required></div>

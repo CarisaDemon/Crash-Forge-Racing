@@ -9,7 +9,7 @@
 :root{--bg:#080a0d;--panel:#11151a;--panel2:#171c22;--line:#313841;--hot:#ff6a00;--amber:#ffb000;--text:#edf0ee;--muted:#9da5ae;--green:#5fd28c}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
-body{margin:0;background:radial-gradient(ellipse 70% 35% at 73% 2%,#48200658,transparent 70%),linear-gradient(115deg,#0d1014,#08090c 52%,#14100e);font:15px/1.55 "Segoe UI",Arial,sans-serif;color:var(--text);min-height:100vh}
+body{margin:0;background:linear-gradient(110deg,#080a0de8,#090b0cbd 55%,#10100db9),url("https://raw.githubusercontent.com/CarisaDemon/Crash-Forge-Launcher/main/assets/Fondo.png") center center / cover fixed no-repeat,#090b0e;font:15px/1.55 "Segoe UI",Arial,sans-serif;color:var(--text);min-height:100vh}
 body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.20;background:repeating-linear-gradient(0deg,transparent 0,transparent 36px,#30363f 37px,#30363f 38px)}
 .wrap{width:min(1160px,92vw);margin:auto;position:relative}
 header{border-bottom:1px solid #33363a;background:#0c1015ce;backdrop-filter:blur(12px)}
@@ -74,7 +74,7 @@ footer{border-top:1px solid #343a41;padding:22px 0 36px;color:#8d959d;font-size:
 <main class="wrap">
 <section class="hero">
   <div><div class="eyebrow">COMMUNITY MODS / WINDOWS</div><h1>FORGE<br><span>HUB.</span></h1>
-    <p class="lede">Characters, karts, wheels, and maps for Crash Forge: Racing. Approved community mods appear here and in the PC launcher.</p>
+    <p class="lede">Characters, karts, wheels, maps, and complete Modpacks for Crash Forge: Racing. Approved community mods appear here and in the PC launcher.</p>
     <div class="actions"><a class="btn" href="#mods">BROWSE MODS ↓</a><a class="btn secondary" href="./studio.html">CREATOR STUDIO ↗</a><span id="submitAction"></span></div>
   </div>
   <div class="hero-box"><b>COMMUNITY CONNECTION</b><strong>BUILT TO<br>MOD.</strong>
@@ -91,7 +91,7 @@ footer{border-top:1px solid #343a41;padding:22px 0 36px;color:#8d959d;font-size:
 <section class="panel topline" id="mods">
   <div class="section-head"><h2>Available mods</h2><span class="micro">FOR CRASH FORGE: RACING</span></div>
   <div class="controls"><input id="search" type="search" placeholder="Search by title, author, or description..." aria-label="Search mods" autocomplete="off">
-    <button class="tab active" data-type="All">ALL</button><button class="tab" data-type="Character">CHARACTERS</button><button class="tab" data-type="Kart">KARTS</button><button class="tab" data-type="Wheels">WHEELS</button><button class="tab" data-type="Track">MAPS / TRACKS</button>
+    <button class="tab active" data-type="All">ALL</button><button class="tab" data-type="Character">CHARACTERS</button><button class="tab" data-type="Kart">KARTS</button><button class="tab" data-type="Wheels">WHEELS</button><button class="tab" data-type="Track">MAPS / TRACKS</button><button class="tab" data-type="Modpack">MODPACKS</button>
   </div>
   <div class="grid" id="modList"><div class="empty"><strong>Loading...</strong>Fetching published data.</div></div>
 </section>
@@ -128,7 +128,7 @@ function renderMods(){
   const card=el("article","mod-card"),top=el("div","cardtop"),left=el("div");
   left.append(el("div","micro",mod.author||"CREATOR"));
   left.append(el("h3","",mod.title||"Mod"));
-  top.append(left,el("span","pill",({Character:"CHARACTER",Kart:"KART",Wheels:"WHEELS",Track:"MAP / TRACK"})[mod.type]||"MOD"));
+  top.append(left,el("span","pill",({Character:"CHARACTER",Kart:"KART",Wheels:"WHEELS",Track:"MAP / TRACK",Modpack:"MODPACK"})[mod.type]||"MOD"));
   const desc=el("p","",mod.description||"No description available.");
   const meta=el("div","mod-meta",window.ForgeModMeta.summary(mod.type,mod));
   const footer=el("div","card-bottom"),info=el("span","", "v"+String(mod.version||"1.0"));

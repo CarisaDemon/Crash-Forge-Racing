@@ -57,7 +57,8 @@ function refreshCategoryFields() {
     for (const [id, kind] of [["racerMetadata", "Character"],
                               ["kartMetadata", "Kart"],
                               ["mapMetadata", "Track"],
-                              ["wheelMetadata", "Wheels"]]) {
+                              ["wheelMetadata", "Wheels"],
+                              ["modpackMetadata", "Modpack"]]) {
         el(id).classList.toggle("hidden", category !== kind);
     }
     el("kartType").disabled = category !== "Kart";

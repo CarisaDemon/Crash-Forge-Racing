@@ -35,7 +35,7 @@ function drawPublicMods(mods) {
     }
     for (const mod of mods) {
         const card = make("article", "creator-card");
-        card.append(make("span", "kind", ({Character:"CHARACTER",Kart:"KART",Wheels:"WHEELS",Track:"MAP / TRACK"})[mod.type] || "MOD"));
+        card.append(make("span", "kind", ({Character:"CHARACTER",Kart:"KART",Wheels:"WHEELS",Track:"MAP / TRACK",Modpack:"MODPACK"})[mod.type] || "MOD"));
         card.append(make("h3", "", mod.title || "Untitled"));
         card.append(make("p", "", mod.description || ""));
         card.append(make("p", "mod-type-detail", window.ForgeModMeta.summary(mod.type, mod)));

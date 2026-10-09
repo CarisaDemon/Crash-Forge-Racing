@@ -3,7 +3,7 @@
    These labels do not alter game physics or fit wheel models automatically. */
 "use strict";
 (function () {
-    const categories = Object.freeze(["Character", "Kart", "Wheels", "Track"]);
+    const categories = Object.freeze(["Character", "Kart", "Wheels", "Track", "Modpack"]);
     const maps = Object.freeze(["Race Track", "Battle Arena", "Hub"]);
     const classes = Object.freeze(["Balanced", "Speed", "Acceleration", "Turning"]);
     const drives = Object.freeze(["Wheeled", "Hovercraft"]); // Existing database values
@@ -89,7 +89,7 @@
             return details.racer_class ? details.racer_class + " Stats" :
                    "Stats class not specified";
         }
-        return "Wheel Set / Separate Add-on";
+        return category === "Modpack" ? "Bundle / Multiple separately identified CFR mods" : "Wheel Set / Separate Add-on";
     }
     window.ForgeModMeta = Object.freeze({
         categories, maps, classes, drives, wheels, kartTypes, detailKeys,
