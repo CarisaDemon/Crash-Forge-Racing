@@ -112,6 +112,7 @@ footer{border-top:1px solid #343a41;padding:22px 0 36px;color:#8d959d;font-size:
 "use strict";
 let allMods=[];
 let filter="All";
+let liveFeedUnavailable=false;
 const safeUrl = value => { try{ const u=new URL(String(value||""));return u.protocol==="https:" && !u.username && !u.password ? u.href : null; }catch{return null;} };
 const el=(tag,cls,text)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=String(text);return n;};
 const container=id=>document.getElementById(id);
@@ -170,7 +171,7 @@ async function start(){
  const results=await Promise.allSettled([
   fetch("https://mjvpkerobjgoldmimyxz.supabase.co/functions/v1/forge-publications",{cache:"no-store"})
    .then(r=>{if(!r.ok)throw Error("HTTP "+r.status);return r.json();})
-   .catch(()=>fetch("./catalog.json",{cache:"no-store"}).then(r=>{if(!r.ok)throw Error("HTTP "+r.status);return r.json();})),
+   .catch(()=>{liveFeedUnavailable=true;return fetch("./catalog.json",{cache:"no-store"}).then(r=>{if(!r.ok)throw Error("HTTP "+r.status);return r.json();});}),
   fetch("./config.json",{cache:"no-store"}).then(r=>r.ok?r.json():{})
  ]);
  setupSubmission(results[1].status==="fulfilled"?results[1].value:{});
@@ -190,7 +191,7 @@ async function start(){
  container("modsCount").textContent=String(allMods.length);
  container("authorsCount").textContent=String(new Set(allMods.map(m=>m.author).filter(Boolean)).size);
  container("updatedAt").textContent=String(data.updated_at||"—");
- container("feedState").textContent="CATALOG LOADED";
+ container("feedState").textContent=liveFeedUnavailable?"LIVE FEED OFFLINE / STATIC FALLBACK":"LIVE PUBLIC CATALOG";
  renderMods();renderNews(data.news);
 }
 container("search").addEventListener("input",renderMods);
