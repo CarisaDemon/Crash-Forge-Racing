@@ -1,0 +1,7 @@
+{
+  "supabase_url": "",
+  "supabase_publishable_key": "",
+  "max_upload_mb": 50,
+  "auth_provider": "github",
+  "storage_bucket": "forge-mod-queue"
+}
