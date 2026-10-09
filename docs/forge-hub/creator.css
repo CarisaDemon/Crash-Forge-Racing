@@ -172,3 +172,35 @@ p{margin:7px 0}
  padding:3px 7px;margin-left:9px;font-weight:800;letter-spacing:.05em}
 .moderator-member .btn{flex-shrink:0}
 @media(max-width:550px){.moderator-member{flex-wrap:wrap}.moderator-admin-form .btn{width:100%}}
+
+
+/* Owner-only moderator audit log. Scrolling remains usable at 4:3/windowed sizes. */
+.moderator-audit-toolbar{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin:16px 0}
+.moderator-audit-toolbar .moderation-search{flex:1;min-width:min(205px,100%)}
+.moderator-audit-toolbar select,.moderator-audit-toolbar input{
+ width:100%;min-height:40px;background:#0c1116;color:#e4e8eb;border:1px solid #43515f;
+ padding:10px 12px;outline:0
+}
+.moderator-audit-toolbar select:focus,.moderator-audit-toolbar input:focus{border-color:#ff6a00}
+.moderator-audit-scroll{max-width:100%;overflow-x:auto;border:1px solid #35414c;background:#0a1116}
+.moderator-audit-scroll:focus{outline:1px solid #df7428;outline-offset:3px}
+.moderator-audit-table{border-collapse:collapse;min-width:860px;width:100%;table-layout:fixed;font-size:12px}
+.moderator-audit-table th{background:#15212b;color:#ffb476;text-align:left;letter-spacing:.07em;font-size:10px;font-weight:850;padding:11px;position:sticky;top:0}
+.moderator-audit-table th:nth-child(1){width:17%}
+.moderator-audit-table th:nth-child(2){width:15%}
+.moderator-audit-table th:nth-child(3){width:15%}
+.moderator-audit-table th:nth-child(4){width:19%}
+.moderator-audit-table th:nth-child(5){width:14%}
+.moderator-audit-table th:nth-child(6){width:20%}
+.moderator-audit-table td{padding:12px 11px;vertical-align:top;border-bottom:1px solid #27343d;overflow-wrap:anywhere;white-space:pre-wrap}
+.moderator-audit-table tr:last-child td{border-bottom:0}
+.moderator-audit-table tbody tr:nth-child(even){background:#111920}
+.moderator-audit-table .audit-action{color:#ffb476;font-weight:750}
+.moderator-audit-table .audit-actor{font-weight:800}
+.moderator-audit-table .audit-detail{color:#b2c0c9}
+.moderator-audit-footer{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-top:14px}
+@media(max-width:590px){
+ .moderator-audit-toolbar{display:grid;grid-template-columns:1fr}
+ .moderator-audit-toolbar .btn{width:100%}
+ .moderator-audit-footer .btn{width:100%}
+}
