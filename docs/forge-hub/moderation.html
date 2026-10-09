@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="Forge Hub private moderation: review creator submissions and verify ZIP packages.">
 <title>Moderation | Crash Forge: Racing</title>
-<link rel="stylesheet" href="./creator.css">
+<link rel="stylesheet" href="./creator.css?v=20261009_audit_1">
 </head>
 <body>
 <header class="topbar"><div class="wrap nav">
@@ -44,6 +44,33 @@
 <p class="moderation-message" id="moderatorAdminMessage" role="status" aria-live="polite"></p>
 <div id="moderatorRoster" class="moderator-roster" aria-live="polite"><p class="muted">Checking moderator roster...</p></div>
 </section>
+<section id="moderatorAuditPanel" class="panel accent hidden" style="margin-bottom:22px">
+<div class="panel-head"><h2>Moderator Audit Log</h2><span class="meta">OWNER ONLY / PRIVATE</span></div>
+<p class="muted">Track moderator actions: who acted, when, which mod or account was affected, the previous and new state, and any review or takedown notes. New activity is recorded from the audit feature's activation; earlier actions cannot be reconstructed.</p>
+<div class="moderator-audit-toolbar">
+<label class="moderation-search">ACTION TYPE
+<select id="moderatorAuditFilter">
+<option value="all">ALL ACTIONS</option>
+<option value="reviews">APPROVALS / REJECTIONS</option>
+<option value="holds">LOCK / UNLOCK</option>
+<option value="releases">PUBLISH / UNPUBLISH</option>
+<option value="accounts">MODERATOR ACCESS</option>
+<option value="downloads">ZIP DOWNLOAD REQUESTS</option>
+</select>
+</label>
+<label class="moderation-search">SEARCH
+<input id="moderatorAuditSearch" type="search" maxlength="120" placeholder="Moderator, mod, action or note...">
+</label>
+<button id="moderatorAuditRefresh" class="btn secondary" type="button">REFRESH AUDIT</button>
+</div>
+<div class="moderator-audit-scroll" role="region" aria-label="Moderator actions table" tabindex="0">
+<div id="moderatorAuditEntries" aria-live="polite"><p class="muted">Loading moderation activity...</p></div>
+</div>
+<div class="moderator-audit-footer">
+<span id="moderatorAuditStatus" class="caption" role="status" aria-live="polite">Only the owner can view this private history.</span>
+<button id="moderatorAuditMore" type="button" class="btn secondary" disabled>LOAD OLDER ENTRIES</button>
+</div>
+</section>
 <section class="panel accent">
 <div class="panel-head"><h2>Submission Queue</h2><span class="meta" id="queueTotal">PRIVATE / MODERATORS ONLY</span></div>
 <div class="moderation-overview" aria-label="Submission counts">
@@ -69,12 +96,12 @@
 <div class="notice info" style="margin-top:18px">
 <strong>Publication is a separate action.</strong>
 Approve updates private review status only. Publish verifies the ZIP again, copies it to public release storage and adds it to the live website, creator profile and launcher catalog.
-Third-party game assets, including CNK resources, require redistribution permission before public release.
+For mods using assets from any game, creators should work from their own legitimate original game files and credit the source in Mod Notes. Owning a copy or crediting the game does not automatically grant redistribution rights; public content may be removed after a valid rights-holder complaint.
 </div>
 </div>
 </main>
 <footer class="footer"><div class="wrap">Crash Forge: Racing / Forge Hub • Verified moderator actions • Private ZIP review • No automatic public release.</div></footer>
 <script src="./mod-taxonomy.js"></script>
-<script type="module" src="./moderation.js"></script>
+<script type="module" src="./moderation.js?v=20261009_audit_1"></script>
 </body>
 </html>
