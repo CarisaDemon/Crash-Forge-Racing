@@ -4,5 +4,5 @@
   "max_upload_mb": 50,
   "auth_provider": "github",
   "storage_bucket": "forge-mod-queue",
-  "oauth_enabled": false
+  "oauth_enabled": true
 }
