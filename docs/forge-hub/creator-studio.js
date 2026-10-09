@@ -485,10 +485,24 @@ async function submitMod(event) {
         syncControls();
     }
 }
+async function updateModerationNavigation() {
+    const link = el("moderationLink");
+    link.classList.add("hidden");
+    if (!client || !activeUser) return;
+    try {
+        // The Supabase RPC checks the signed-in user's verified GitHub
+        // provider identity. Hiding this link alone is NOT an access control.
+        const result = await client.rpc("forge_is_moderator");
+        if (!result.error && result.data === true) {
+            link.classList.remove("hidden");
+        }
+    } catch { /* The private moderation link stays hidden. */ }
+}
 async function refreshSession(session) {
     const previousUserId = activeUser && activeUser.id;
     activeUser = session && session.user || null;
     activeProfile = null;
+    el("moderationLink").classList.add("hidden");
     if (!activeUser) {
         showProfile();
         showOfflineMods();
@@ -506,6 +520,7 @@ async function refreshSession(session) {
         showProfile();
         notice("GitHub identity linked. Your submissions remain private until moderator approval.", "ok");
         await loadMyMods();
+        await updateModerationNavigation();
     } catch (err) {
         notice("Could not verify your GitHub creator identity: " + String(err.message || err), "info");
         showProfile();
