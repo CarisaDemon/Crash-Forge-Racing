@@ -39,6 +39,7 @@
 <div class="mod-stat"><strong id="countPending">—</strong><span>PENDING</span></div>
 <div class="mod-stat"><strong id="countApproved">—</strong><span>APPROVED</span></div>
 <div class="mod-stat"><strong id="countRejected">—</strong><span>REJECTED</span></div>
+<div class="mod-stat"><strong id="countPublished">—</strong><span>PUBLISHED</span></div>
 </div>
 <div class="moderation-toolbar">
 <div class="moderation-filters" role="group" aria-label="Filter requests">
@@ -46,15 +47,16 @@
 <button class="mod-filter" type="button" data-state="pending" aria-pressed="false">PENDING</button>
 <button class="mod-filter" type="button" data-state="approved" aria-pressed="false">APPROVED</button>
 <button class="mod-filter" type="button" data-state="rejected" aria-pressed="false">REJECTED</button>
+<button class="mod-filter" type="button" data-state="published" aria-pressed="false">PUBLISHED</button>
 </div>
 <label class="moderation-search"><span>SEARCH</span><input type="search" id="reviewSearch" placeholder="Mod title or creator..." maxlength="120"></label>
 </div>
 <div id="reviewList" class="moderation-list" aria-live="polite"><div class="empty">Loading submissions...</div></div>
-<p class="caption" id="queueLimitNote">Showing the latest 200 requests. Approved status does not publish ZIP files or add mods to the public catalog.</p>
+<p class="caption" id="queueLimitNote">Showing the latest 200 requests. Approve keeps the ZIP private. Publish is a separate moderator action requiring documented distribution rights.</p>
 </section>
 <div class="notice info" style="margin-top:18px">
 <strong>Publication is a separate action.</strong>
-Approving a submission updates its private review status only. It does not place its ZIP on a public download URL or make it appear in the launcher.
+Approve updates private review status only. Publish verifies the ZIP again, copies it to public release storage and adds it to the live website, creator profile and launcher catalog.
 Third-party game assets, including CNK resources, require redistribution permission before public release.
 </div>
 </div>
