@@ -60,20 +60,18 @@ function refreshCategoryFields() {
                               ["wheelMetadata", "Wheels"]]) {
         el(id).classList.toggle("hidden", category !== kind);
     }
-    const showWheels = category === "Kart" && el("kartDrive").value === "Wheeled";
-    el("wheelSetupWrap").classList.toggle("hidden", !showWheels);
-    el("wheelSetup").disabled = !showWheels;
+    el("kartType").disabled = category !== "Kart";
+    const kind = MOD_META.kartTypes.find(value => value.id === el("kartType").value);
+    el("kartTypeHelp").textContent = kind ? kind.help : "Choose a kart type.";
     el("racerClass").disabled = category !== "Character";
     el("mapKind").disabled = category !== "Track";
-    el("kartDrive").disabled = category !== "Kart";
 }
 function detailsFromForm(strict = false) {
     const category = el("modType").value;
     return MOD_META.normalize(category, {
         map_kind: el("mapKind").value,
         racer_class: el("racerClass").value,
-        kart_drive: el("kartDrive").value,
-        wheel_setup: el("wheelSetup").value
+        ...(category === "Kart" ? MOD_META.fromKartType(el("kartType").value) : {})
     }, strict);
 }
 function applyTypeDetails(item) {
@@ -81,8 +79,8 @@ function applyTypeDetails(item) {
     const details = MOD_META.normalize(kind, item, false);
     if (details.map_kind) el("mapKind").value = details.map_kind;
     if (details.racer_class) el("racerClass").value = details.racer_class;
-    if (details.kart_drive) el("kartDrive").value = details.kart_drive;
-    if (details.wheel_setup) el("wheelSetup").value = details.wheel_setup;
+    const kartKind = MOD_META.toKartType(details);
+    if (kartKind) el("kartType").value = kartKind;
     refreshCategoryFields();
 }
 
@@ -293,13 +291,11 @@ function showSubmissionEditor(row, item) {
     const desc = make("textarea"); desc.value=item.description; desc.maxLength=3000;
     const patchMeta = {};
     const fieldInputs = {};
+    let kartTypeSelect = null;
     const metaSchema = item.category === "Track" ?
         [["map_kind", "Map type", MOD_META.maps]] :
         item.category === "Character" ?
-        [["racer_class", "Stats class", MOD_META.classes]] :
-        item.category === "Kart" ?
-        [["kart_drive", "Kart design", MOD_META.drives],
-         ["wheel_setup", "Wheel setup (Wheeled only)", MOD_META.wheels]] : [];
+        [["racer_class", "Stats class", MOD_META.classes]] : [];
     for (const [key, label, options] of metaSchema) {
         const line = make("div", "field");
         const selector = make("select");
@@ -311,6 +307,26 @@ function showSubmissionEditor(row, item) {
         selector.value = options.includes(item[key]) ? item[key] : options[0];
         fieldInputs[key] = selector;
         line.append(make("label", "", label), selector);
+        editor.append(line);
+    }
+    if (item.category === "Kart") {
+        const line = make("div", "field");
+        kartTypeSelect = make("select");
+        for (const type of MOD_META.kartTypes) {
+            const option = make("option", "", type.label);
+            option.value = type.id;
+            kartTypeSelect.append(option);
+        }
+        kartTypeSelect.value = MOD_META.toKartType(item) || "modular_body";
+        line.append(make("label", "", "Kart type"), kartTypeSelect);
+        const help = make("p", "caption");
+        const updateHelp = () => {
+            const kind = MOD_META.kartTypes.find(t => t.id === kartTypeSelect.value);
+            help.textContent = kind ? kind.help : "";
+        };
+        kartTypeSelect.addEventListener("change", updateHelp);
+        updateHelp();
+        line.append(help);
         editor.append(line);
     }
     for (const [text, input] of [["Name",title],["Version",version],["Description / Mod Notes",desc]]) {
@@ -334,6 +350,8 @@ function showSubmissionEditor(row, item) {
             const changed = {};
             for (const key of MOD_META.detailKeys)
                 changed[key] = fieldInputs[key] ? fieldInputs[key].value : null;
+            if (kartTypeSelect)
+                Object.assign(changed, MOD_META.fromKartType(kartTypeSelect.value));
             updatedMeta = MOD_META.normalize(item.category, changed, true);
         } catch (err) {
             message(String(err.message || err));
@@ -630,7 +648,7 @@ el("saveProfileBtn").closest("form").addEventListener("submit",saveProfile);
 el("modPackage").addEventListener("change",checkPackage);
 el("modType").addEventListener("change",refreshCategoryFields);
 el("racerClass").addEventListener("change",refreshCategoryFields);
-el("kartDrive").addEventListener("change",refreshCategoryFields);
+el("kartType").addEventListener("change",refreshCategoryFields);
 el("modForm").addEventListener("submit",submitMod);
 el("draftBtn").addEventListener("click",saveDraft);
 el("clearBtn").addEventListener("click",clearDraft);
