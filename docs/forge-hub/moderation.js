@@ -26,6 +26,11 @@ let published = new Map();
 let publishedReady = false;
 let publicApiKey = "";
 let isOwner = false;
+const AUDIT_PAGE_SIZE = 50;
+let auditEntries = [];
+let auditCursor = null;
+let auditHasMore = true;
+let auditBusy = false;
 const PUBLICATION_URL = "https://mjvpkerobjgoldmimyxz.supabase.co/functions/v1/forge-publications";
 
 function banner(text, state = "info") {
@@ -110,11 +115,110 @@ async function manageModerator(login, action, button) {
             " can now review submissions." : " no longer has moderator access.");
         if (action === "grant") get("moderatorGithub").value = "";
         await loadModeratorRoster();
+        await loadModeratorAudit(true);
     } catch (error) {
         feedback.textContent = "Moderator update failed: " + String(error.message || error);
     } finally {
         busy = false;
         button.disabled = false;
+    }
+}
+const AUDIT_GROUPS = {
+    reviews:["approved","rejected","approval_cancelled","approval_revoked","status_changed"],
+    holds:["publication_locked","publication_unlocked"],
+    releases:["published","republished","unpublished"],
+    accounts:["moderator_added","moderator_removed"],
+    downloads:["zip_download_requested"]
+};
+function renderModeratorAudit() {
+    if (!isOwner) return;
+    const filter = get("moderatorAuditFilter").value;
+    const query = get("moderatorAuditSearch").value.trim().toLowerCase();
+    const allowed = AUDIT_GROUPS[filter] || null;
+    const visible = auditEntries.filter(item =>
+        (!allowed || allowed.includes(item.event_type)) &&
+        (!query || [
+            item.actor_login,item.actor_github_id,item.actor_role,
+            item.event_type,item.target_title,item.target_id,
+            item.before_state,item.after_state,item.details
+        ].some(x => String(x == null ? "" : x).toLowerCase().includes(query)))
+    );
+    const target = get("moderatorAuditEntries");
+    target.replaceChildren();
+    if (!visible.length) {
+        target.append(node("p", "muted", auditEntries.length ?
+            "No loaded audit events match these filters." :
+            "No audit events recorded yet. Actions performed before audit activation are not backfilled."));
+    } else {
+        const table = node("table", "moderator-audit-table");
+        const head = node("thead");
+        const headRow = node("tr");
+        for (const header of ["DATE / TIME","MODERATOR","ACTION","TARGET","STATE CHANGE","NOTES / DETAILS"]) {
+            const th = node("th", "", header);
+            th.scope = "col";
+            headRow.append(th);
+        }
+        head.append(headRow);
+        const body = node("tbody");
+        for (const item of visible) {
+            const tr = node("tr");
+            const date = item.happened_at ?
+                new Date(item.happened_at).toLocaleString() : "Unknown date";
+            const actor = item.actor_login ?
+                "@" + item.actor_login : (item.actor_github_id ?
+                "GitHub #" + item.actor_github_id : "System / unknown");
+            const change = item.before_state || item.after_state ?
+                String(item.before_state || "—") + " → " +
+                String(item.after_state || "—") : "—";
+            const columns = [
+                [date,""],
+                [actor + " (" + String(item.actor_role || "unknown") + ")","audit-actor"],
+                [String(item.event_type || "").replace(/_/g," ").toUpperCase(),"audit-action"],
+                [String(item.target_title || item.target_id || "—"),""],
+                [change,""],
+                [String(item.details || "—"),"audit-detail"]
+            ];
+            for (const [value, className] of columns) tr.append(node("td",className,value));
+            body.append(tr);
+        }
+        table.append(head,body);
+        target.append(table);
+    }
+    get("moderatorAuditStatus").textContent = visible.length +
+        " matching entries / " + auditEntries.length + " loaded. " +
+        (auditHasMore ? "Older records available." : "End of available history.");
+    get("moderatorAuditMore").disabled = auditBusy || !auditHasMore;
+}
+async function loadModeratorAudit(reset = false) {
+    if (!isOwner || !client || auditBusy) return;
+    auditBusy = true;
+    const refresh = get("moderatorAuditRefresh");
+    const more = get("moderatorAuditMore");
+    refresh.disabled = more.disabled = true;
+    if (reset) {
+        auditEntries = [];
+        auditCursor = null;
+        auditHasMore = true;
+    }
+    get("moderatorAuditStatus").textContent = "Loading private moderator activity...";
+    try {
+        const response = await client.rpc("forge_list_moderation_activity", {
+            p_limit:AUDIT_PAGE_SIZE, p_before_id:auditCursor
+        });
+        if (response.error) throw response.error;
+        const batch = Array.isArray(response.data) ? response.data : [];
+        auditEntries.push(...batch);
+        if (batch.length) auditCursor = batch[batch.length - 1].event_id;
+        auditHasMore = batch.length === AUDIT_PAGE_SIZE;
+        auditBusy = false;
+        renderModeratorAudit();
+    } catch (error) {
+        auditBusy = false;
+        get("moderatorAuditStatus").textContent =
+            "Audit history unavailable: " + String(error.message || error);
+        more.disabled = true;
+    } finally {
+        refresh.disabled = false;
     }
 }
 function countStatuses() {
@@ -528,6 +632,12 @@ async function downloadSubmission(item, button, message) {
     button.textContent = "VERIFYING PRIVATE ZIP...";
     message.textContent = "Reading the private package and verifying SHA-256...";
     try {
+        const audit = await client.rpc("forge_log_moderator_download", {
+            p_submission_id:item.id
+        });
+        if (audit.error || audit.data !== true) {
+            throw new Error("Download audit could not be recorded. Please retry.");
+        }
         // Supabase RLS only lets the verified moderator read others' ZIPs.
         const result = await client.storage.from("forge-mod-queue").download(item.zip_path);
         if (result.error) throw result.error;
@@ -654,6 +764,7 @@ async function loadQueue() {
         " private requests. Approve is review-only; Publish requires a separate " +
         "rights declaration and uploads an approved ZIP to the public catalog.";
     render();
+    if (isOwner) await loadModeratorAudit(true);
 }
 
 async function initialize() {
@@ -689,6 +800,7 @@ async function initialize() {
         if (ownerResult.error) throw ownerResult.error;
         isOwner = ownerResult.data === true;
         get("moderatorAdminPanel").classList.toggle("hidden", !isOwner);
+        get("moderatorAuditPanel").classList.toggle("hidden", !isOwner);
         get("signInHelp").classList.add("hidden");
         get("reviewPanel").classList.remove("hidden");
         banner(isOwner ?
@@ -721,6 +833,10 @@ get("moderatorAddForm").addEventListener("submit", event => {
     }
     manageModerator(login, "grant", get("moderatorAddButton"));
 });
+get("moderatorAuditFilter").addEventListener("change", renderModeratorAudit);
+get("moderatorAuditSearch").addEventListener("input", renderModeratorAudit);
+get("moderatorAuditRefresh").addEventListener("click", () => loadModeratorAudit(true));
+get("moderatorAuditMore").addEventListener("click", () => loadModeratorAudit(false));
 get("reviewSearch").addEventListener("input", render);
 get("refreshReviews").addEventListener("click", loadQueue);
 initialize();
