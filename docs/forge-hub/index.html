@@ -102,7 +102,7 @@ footer{border-top:1px solid #343a41;padding:22px 0 36px;color:#8d959d;font-size:
 <section class="panel">
   <div class="section-head"><h2>Created a mod?</h2><span class="micro">SHARE YOUR CREATION</span></div>
   <p class="muted">Submit your project for review. Published mods must be compatible with Crash Forge: Racing and have redistribution permission.</p>
-  <div class="steps"><span>01 / Prepare a ZIP package</span><span>02 / Host an HTTPS download</span><span>03 / Submit for review</span><span>04 / Approval and release</span></div>
+  <div class="steps"><span>01 / Prepare a ZIP package</span><span>02 / Submit privately</span><span>03 / Moderator review</span><span>04 / Separate public release</span></div>
   <div class="actions" id="submitFooter"><a class="btn secondary" href="./studio.html">PREPARE MY MOD ↗</a></div>
 </section>
 </main>
@@ -121,7 +121,7 @@ function link(text,url,css="small-link"){const u=safeUrl(url);if(!u)return null;
 function renderMods(){
  const target=container("modList"),q=container("search").value.trim().toLocaleLowerCase();
  const items=allMods.filter(m=>(filter==="All"||m.type===filter)&&[m.title,m.author,m.description,window.ForgeModMeta.summary(m.type,m)].join(" ").toLocaleLowerCase().includes(q));
- if(!items.length){showEmpty(target,allMods.length?"No matching mods":"No approved public mods yet.",allMods.length?"Try another search or category.":"Once the first submissions are approved, they will appear here and in the launcher.");return;}
+ if(!items.length){showEmpty(target,allMods.length?"No matching mods":"No published community mods yet.",allMods.length?"Try another search or category.":"Only publicly released mods appear here and in the launcher.");return;}
  clear(target);
  for(const mod of items){
   const card=el("article","mod-card"),top=el("div","cardtop"),left=el("div");
@@ -168,7 +168,9 @@ function setupSubmission(config){
 }
 async function start(){
  const results=await Promise.allSettled([
-  fetch("./catalog.json",{cache:"no-store"}).then(r=>{if(!r.ok)throw Error("HTTP "+r.status);return r.json();}),
+  fetch("https://mjvpkerobjgoldmimyxz.supabase.co/functions/v1/forge-publications",{cache:"no-store"})
+   .then(r=>{if(!r.ok)throw Error("HTTP "+r.status);return r.json();})
+   .catch(()=>fetch("./catalog.json",{cache:"no-store"}).then(r=>{if(!r.ok)throw Error("HTTP "+r.status);return r.json();})),
   fetch("./config.json",{cache:"no-store"}).then(r=>r.ok?r.json():{})
  ]);
  setupSubmission(results[1].status==="fulfilled"?results[1].value:{});
