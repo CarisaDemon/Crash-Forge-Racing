@@ -156,3 +156,19 @@ p{margin:7px 0}
 .moderation-publish .moderation-publish-button{justify-self:start;max-width:100%}
 @media(max-width:800px){.moderation-overview{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:510px){.moderation-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.moderation-publish,.moderation-published,.moderation-publication-blocked{padding:12px}}
+
+
+/* Owner-only moderator management */
+.moderator-admin-form{display:flex;flex-wrap:wrap;align-items:end;gap:12px;margin:18px 0}
+.moderator-admin-form .moderation-search{flex:1;min-width:min(220px,100%)}
+.moderator-admin-form .btn{min-height:40px}
+.moderator-roster{margin-top:14px;border:1px solid #34414b;background:#0c1318}
+.moderator-member{display:flex;align-items:center;justify-content:space-between;gap:13px;
+ padding:14px 16px;border-bottom:1px solid #34414b;min-width:0}
+.moderator-member:last-child{border-bottom:0}
+.moderator-member strong{color:#f2e9e2;overflow-wrap:anywhere}
+.moderator-member .caption{margin:5px 0 0}
+.moderator-role{font-size:10px;color:#ffb581;border:1px solid #71513a;
+ padding:3px 7px;margin-left:9px;font-weight:800;letter-spacing:.05em}
+.moderator-member .btn{flex-shrink:0}
+@media(max-width:550px){.moderator-member{flex-wrap:wrap}.moderator-admin-form .btn{width:100%}}
