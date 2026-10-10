@@ -482,10 +482,9 @@ function appendPublicationControls(card, item) {
         "You are responsible for reviewing the description and verifying that the proposed public release is appropriate."));
     const basisLabel = node("label", "moderation-field");
     basisLabel.append(node("span", "meta", gameRip ?
-        "ORIGINAL SOURCE / REVIEW NOTES (40–1000 CHARACTERS)" :
-        "RIGHTS EVIDENCE (40–1000 CHARACTERS)"));
+        "ORIGINAL SOURCE / REVIEW NOTES (OPTIONAL, MAX 1000 CHARACTERS)" :
+        "RIGHTS EVIDENCE (OPTIONAL, MAX 1000 CHARACTERS)"));
     const basis = node("textarea");
-    basis.minLength = 40;
     basis.maxLength = 1000;
     basis.placeholder = gameRip ?
         "Identify the original game and any relevant context for this community mod." :
@@ -580,8 +579,8 @@ async function publishSubmission(item, evidence, license, confirmed, button, fee
         feedback.textContent = "Only approved and unlocked requests can be published.";
         return;
     }
-    if (!confirmed || basis.length < 40 || basis.length > 1000) {
-        feedback.textContent = "Confirm rights and provide 40–1000 characters of evidence before publishing.";
+    if (!confirmed || basis.length > 1000) {
+        feedback.textContent = "Confirm redistribution rights. Optional notes must be at most 1000 characters.";
         return;
     }
     if (!window.confirm(license === "Game rip - source credited" ?
