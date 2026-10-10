@@ -48,13 +48,15 @@ test("reviewed update automatically promotes only after approval", () => {
   assert.match(moderation, /approved revision|approved and updated|Approved and updated/i);
 });
 
-test("ordinary verified moderators may publish, unpublish stays owner-only", () => {
-  assert.match(edge, /client\.rpc\("forge_is_moderator"\)/);
-  assert.match(edge, /if\(action==="unpublish"\)\{\n  \/\/ Owner-only takedowns/);
-  assert.match(edge, /client\.rpc\("forge_is_owner"\)/);
+test("verified moderators may publish and unpublish while moderator roster stays owner-only", () => {
+  assert.ok(edge.includes('client.rpc("forge_is_moderator")'));
+  assert.ok(edge.includes('if(action==="unpublish")'));
+  assert.ok(!edge.includes('client.rpc("forge_is_owner")'));
   const block = moderation.slice(moderation.indexOf("function appendPublicationControls"),
     moderation.indexOf("async function sendReleaseRequest"));
-  assert.ok(!block.includes("Only the primary owner can publish this ZIP publicly."));
+  assert.ok(!block.includes("Only the primary owner can publish"));
+  assert.ok(!block.includes("Only the primary owner can unpublish"));
+  assert.ok(moderation.includes('if (!isOwner || !client) return;'));
 });
 
 test("old public ZIP stays alive until atomic catalog replacement", () => {
@@ -80,5 +82,28 @@ test("native track pair archives remain allowed, executable archives blocked", (
 
 test("HTML cache-busts both updated scripts", () => {
   assert.match(studioHTML, /creator-studio\.js\?v=20261010_revisions_1/);
-  assert.match(modHTML, /moderation\.js\?v=20261010_revisions_1/);
+  assert.ok(modHTML.includes("moderation.js?v=20261010_moderator_unpublish_1"));
+});
+
+test("moderators get UNPUBLISH controls and can reverse approval safely", () => {
+  const controls = moderation.slice(
+    moderation.indexOf("function appendPublicationControls("),
+    moderation.indexOf("async function sendReleaseRequest"));
+  assert.ok(controls.includes('"UNPUBLISH (KEEP APPROVED)"'));
+  assert.ok(!controls.includes("if (!isOwner) {"));
+  assert.ok(!controls.includes("Only the primary owner can unpublish"));
+  assert.ok(moderation.includes("if (note.length < 8 || note.length > 500)"));
+  assert.ok(moderation.includes("cancel.disabled = reject.disabled = !publishedReady;"));
+});
+
+test("backend verifies moderator and logs removal reason through trusted SQL", () => {
+  const moderatorAccess = edge.indexOf('client.rpc("forge_is_moderator")');
+  const unpublishAction = edge.indexOf('if(action==="unpublish")');
+  const reasonCheck = edge.indexOf("if(reason.length<8||reason.length>500)");
+  const auditCall = edge.indexOf('admin.rpc("forge_remove_publication"');
+  assert.ok(moderatorAccess >= 0 && moderatorAccess < unpublishAction);
+  assert.ok(unpublishAction < reasonCheck && reasonCheck < auditCall);
+  assert.ok(!edge.slice(unpublishAction,edge.indexOf('if(action!=="publish")'))
+    .includes('client.rpc("forge_is_owner")'));
+  assert.ok(edge.includes('p_submission_id:id,p_reason:reason,p_moderator_id:user.id'));
 });

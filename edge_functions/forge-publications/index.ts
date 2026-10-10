@@ -153,11 +153,9 @@ async function publish(request,admin,cfg){
  if(!UUID.test(id))return send({error:"Invalid submission ID"},400);
  const action=String(req?.action||"publish").trim();
  if(action==="unpublish"){
-  // Owner-only takedowns remain restricted, even when normal moderators
-  // may review and release approved community submissions.
-  const owner=await client.rpc("forge_is_owner");
-  if(owner.error||owner.data!==true)
-   return send({error:"Only the primary owner may remove a public release"},403);
+  // OAuth-verified moderators (including the owner) may withdraw public
+  // releases. The trusted SQL function rechecks membership and audits
+  // moderator ID plus the mandatory takedown reason.
   const reason=String(req?.reason||"").trim();
   if(reason.length<8||reason.length>500)
    return send({error:"A takedown reason (8-500 characters) is required"},400);

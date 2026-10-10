@@ -379,8 +379,7 @@ function appendApprovalReversalControls(card, item) {
     const info = node("p", "moderation-message");
     info.setAttribute("role", "status");
     cancel.type = reject.type = "button";
-    cancel.disabled = reject.disabled = !publishedReady ||
-        (published.has(item.id) && !isOwner);
+    cancel.disabled = reject.disabled = !publishedReady;
     cancel.addEventListener("click", () =>
         reviewSubmission(item, "pending", note.value, false, [cancel, reject], info));
     reject.addEventListener("click", () =>
@@ -425,11 +424,8 @@ function appendPublicationControls(card, item) {
         link.rel = "noopener noreferrer";
         section.append(link);
         section.append(node("p", "caption", "Published to Forge Hub; also visible on the creator profile and in the online launcher catalog."));
-        if (!isOwner) {
-            section.append(node("p", "caption", "Only the primary owner can unpublish an active public release."));
-            card.append(section);
-            return;
-        }
+        // All verified moderators can withdraw a public ZIP.
+        // The server revalidates OAuth, requires a reason and logs who removed it.
         const unpublishReason = node("textarea");
         unpublishReason.maxLength = 500;
         unpublishReason.placeholder = "Why is this public release being removed? (8-500 characters)";
@@ -824,7 +820,7 @@ async function initialize() {
         get("reviewPanel").classList.remove("hidden");
         banner(isOwner ?
             "Owner verified. You can manage moderators and review Forge Hub submissions." :
-            "Moderator verified. You can review and publish approved mods; only the owner manages moderators and takedowns.", "ok");
+            "Moderator verified. You can approve, publish and unpublish mods; only the owner manages moderator accounts.", "ok");
         if (isOwner) await loadModeratorRoster();
         await loadQueue();
     } catch (error) {
