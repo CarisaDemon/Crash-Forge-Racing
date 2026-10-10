@@ -645,6 +645,24 @@ async function submitMod(event) {
     submitting = true;
     syncControls();
     const uuid = crypto.randomUUID();
+    /* First release gets a stable forge ID. Revisions retain the ID of the
+       existing public listing, rather than generating a new mod identity. */
+    let webModId = "forge-" + uuid.replace(/-/g, "");
+    if (revision) {
+        const published = await client.from("forge_public_mods")
+            .select("id,submission_id")
+            .eq("submission_id", revision.id).maybeSingle();
+        if (published.error) {
+            message("Could not verify the original mod ID: " + published.error.message);
+            submitting = false; syncControls(); return;
+        }
+        if (published.data) webModId = published.data.id;
+        else {
+            /* A prior approved (but unpublished) revision can still use its
+               own initial submission identity. */
+            webModId = "forge-" + revision.id.replace(/-/g, "");
+        }
+    }
     const zipPath = activeUser.id + "/" + uuid + ".zip";
     let zipUploaded = false;
     try {
@@ -652,7 +670,11 @@ async function submitMod(event) {
         // The upload body must also be application/zip. On Windows the selected
         // File usually has type application/x-zip-compressed, which some Storage
         // multipart encoders send instead of the explicit contentType option.
-        const zipBody = normalizedZipFile(packageInfo.file);
+        /* Normalize ZIP before submitting: web ID is embedded in native INI
+           and SHA-256 always identifies the actual uploaded bytes. */
+        const wrapped = await window.ForgePackageIds.prepare(
+            packageInfo.file,draft.category,webModId,draft.version);
+        const zipBody = normalizedZipFile(wrapped.file);
         const uploaded = await client.storage.from("forge-mod-queue").upload(
             zipPath, zipBody, {
                 cacheControl: "0", upsert:false, contentType:"application/zip"
@@ -661,6 +683,7 @@ async function submitMod(event) {
         if (uploaded.error) throw uploaded.error;
         zipUploaded = true;
         const recorded = await client.from("mod_submissions").insert({
+            id:uuid,
             title:draft.title,
             category:draft.category,
             mod_version:draft.version,
@@ -668,14 +691,14 @@ async function submitMod(event) {
             ...validatedMeta,
             zip_path:zipPath,
             original_filename:packageInfo.file.name.slice(0,180),
-            sha256:packageInfo.hash,
-            file_size_bytes:packageInfo.file.size,
+            sha256:wrapped.hash,
+            file_size_bytes:wrapped.file.size,
             replaces_submission_id:revision ? revision.id : null
         }).select("id").single();
         if (recorded.error) throw recorded.error;
         message(revision ?
-            "Update submitted! Status: PENDING REVIEW. The previous public version remains available until moderators approve and publish this ZIP." :
-            "Submission saved privately! Status: PENDING REVIEW. Publication requires moderator approval.");
+            "Update submitted with ID " + webModId + ". Status: PENDING REVIEW. Your existing ID is unchanged." :
+            "Submitted! Permanent web ID: " + webModId + ". The ZIP already contains it. Pending moderator approval.");
         try {localStorage.removeItem(DRAFT_KEY);} catch {}
         form.reset();
         revisionTarget = null;

@@ -96,7 +96,7 @@
 <p id="fileDetails" class="caption">Choose your ZIP to prepare a checksum.</p><p id="fileHash" class="caption"></p></div>
 <div class="field" style="margin-top:16px"><label class="checkbox-row"><input id="rightsConsent" type="checkbox" required>I created these assets or have the right to distribute them. No scripts, executables or private files are included.</label></div>
 <div class="form-actions"><button type="submit" class="btn" id="submitBtn" disabled>SUBMIT FOR REVIEW</button><button type="button" class="btn secondary" id="draftBtn">SAVE DRAFT</button><button type="button" class="btn ghost" id="clearBtn">CLEAR DRAFT</button></div>
-<p class="caption">Saved drafts contain text only. ZIP packages are never uploaded without explicitly submitting.</p>
+<p class="caption">On submission, Forge Hub assigns a permanent web ID and writes it into each native INI inside the uploaded ZIP. Later versions keep the original ID. Saved drafts contain text only.</p>
 <div id="formMessage" role="status"></div>
 </form>
 </section>
@@ -105,6 +105,8 @@
 </main>
 <footer class="footer"><div class="wrap">Crash Forge: Racing / Forge Hub • Creator accounts are linked to GitHub • Public release requires moderation.</div></footer>
 <script src="./mod-taxonomy.js?v=20261009_kart_1"></script>
-<script type="module" src="./creator-studio.js?v=20261010_private_creator_v2"></script>
+<script src="./vendor/jszip-3.10.1.min.js"></script>
+<script src="./forge-package-ids.js?v=20261010_id_at_upload"></script>
+<script type="module" src="./creator-studio.js?v=20261010_id_at_upload"></script>
 </body>
 </html>

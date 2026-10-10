@@ -5,8 +5,8 @@ import {readFileSync} from "node:fs";
 
 const root=new URL("../",import.meta.url);
 const read=relative=>readFileSync(new URL(relative,root),"utf8");
-const source=read("docs/creator-studio.js");
-const html=read("docs/studio.html");
+const source=read("docs/forge-hub/creator-studio.js");
+const html=read("docs/forge-hub/studio.html");
 const migration=read("database/004_private_creator_submissions.sql");
 
 function functionSource(name,next) {
@@ -34,7 +34,7 @@ test("web uses the private database view and filters both owner and dismissal",(
  assert.match(fetchFunction,/\.is\("creator_dismissed_at", null\)/);
  assert.match(fetchFunction,/item\.owner_id === ownerId && item\.creator_dismissed_at === null/);
  assert.doesNotMatch(fetchFunction,/client\.from\("mod_submissions"\)/);
- assert.match(html,/creator-studio\.js\?v=20261010_private_creator_v2/);
+ assert.match(html,/creator-studio\.js\?v=20261010_id_at_upload/);
 });
 
 function fixture(rows,user="creator-a",deferred=null) {
