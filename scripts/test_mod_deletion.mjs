@@ -78,6 +78,6 @@ test("no accidental public downloads or revision resurrection", () => {
 });
 
 test("both pages cache-bust the fresh JavaScript", () => {
-  assert.ok(studioHTML.includes("creator-studio.js?v=20261010_deleted_notices_1"));
+  assert.ok(studioHTML.includes("creator-studio.js?v=20261010_private_creator_v2"));
   assert.ok(modHTML.includes("moderation.js?v=20261010_permanent_deletion_1"));
 });

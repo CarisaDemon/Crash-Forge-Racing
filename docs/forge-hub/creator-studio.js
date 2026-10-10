@@ -25,6 +25,7 @@ let profileSaving = false;
 let editInProgress = false;
 let revisionTarget = null;
 let mySubmissions = [];
+let myModsLoadSerial = 0;
 
 const safeGithubHandle = name =>
     /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/.test(String(name || ""));
@@ -170,6 +171,9 @@ function renderLocalDraft() {
     el("myModsList").prepend(row);
 }
 function showOfflineMods() {
+    // Invalidate in-flight queries so an old account cannot render after sign-out.
+    myModsLoadSerial += 1;
+    mySubmissions = [];
     el("myModsList").replaceChildren(
         make("div", "empty", "Private ZIP uploads are not connected yet. Use MY GITHUB SUBMISSIONS for requests sent through GitHub, or save a local draft.")
     );
@@ -284,8 +288,14 @@ function addModRow(item) {
         const remove = make("button", "btn ghost", "REMOVE FROM MY STUDIO");
         remove.type = "button";
         remove.disabled = !item.zip_deleted_at;
-        remove.addEventListener("click", () => dismissDeletedSubmission(item, remove));
-        row.append(remove);
+        const feedback = make("p", "caption");
+        feedback.setAttribute("role", "status");
+        feedback.setAttribute("aria-live", "polite");
+        remove.addEventListener("click", () =>
+            dismissDeletedSubmission(item, remove, feedback));
+        const controls = make("div");
+        controls.append(remove, feedback);
+        row.append(controls);
         return row;
     }
     if (item.status === "pending") {
@@ -315,22 +325,36 @@ function addModRow(item) {
     }
     return row;
 }
-async function dismissDeletedSubmission(item, button) {
-    if (!client || !activeUser || !item.deleted_at || !item.zip_deleted_at) return;
+async function dismissDeletedSubmission(item, button, feedback) {
+    const ownerId = activeUser && activeUser.id;
+    if (!client || !ownerId || ownerId !== item.owner_id ||
+        !item.deleted_at || !item.zip_deleted_at) {
+        feedback.textContent = "Only the creator can hide a fully deleted mod.";
+        return;
+    }
     if (!window.confirm("Remove the DELETED notice for " + item.title +
         " from your Creator Studio? Your ZIP is already gone; " +
         "the private moderation audit will be retained.")) return;
     button.disabled = true;
+    feedback.textContent = "Removing your deleted mod notice...";
     try {
+        // This security-definer RPC also verifies owner_id = auth.uid().
+        // It archives the creator-facing entry, NEVER deletes audit records.
         const result = await client.rpc("forge_dismiss_deleted_submission",
             {p_submission_id:item.id});
         if (result.error || result.data !== true)
             throw result.error || new Error("Server did not confirm dismissal.");
+        if (!activeUser || activeUser.id !== ownerId) return;
+        // Give immediate visible confirmation even if refreshing is slow.
+        mySubmissions = mySubmissions.filter(mod => mod.id !== item.id);
+        button.closest(".mod-row")?.remove();
+        feedback.textContent = "Removed from your Creator Studio.";
         message("Deleted mod notice removed from your Creator Studio.");
         await loadMyMods();
     } catch (error) {
         button.disabled = false;
-        message("Could not remove notice: " + String(error.message || error));
+        feedback.textContent = "Could not remove: " + String(error.message || error);
+        message(feedback.textContent);
     }
 }
 
@@ -428,14 +452,23 @@ function showSubmissionEditor(row, item) {
 async function loadMyMods() {
     if (!client || !activeUser || !activeProfile) {showOfflineMods();return;}
     el("myModsLabel").textContent = "LOADING";
-    const result = await client.from("mod_submissions")
-        .select("id,title,category,mod_version,description,map_kind,racer_class,kart_drive,wheel_setup,status,moderator_note,created_at,replaces_submission_id,deleted_at,deleted_by,deletion_reason,zip_deleted_at,creator_dismissed_at")
+    const ownerId = activeUser.id;
+    const requestId = ++myModsLoadSerial;
+    // A server-side owner-only VIEW; moderators' full review permissions
+    // are intentionally unavailable in Creator Studio.
+    const result = await client.from("forge_my_submissions")
+        .select("id,owner_id,title,category,mod_version,description,map_kind,racer_class,kart_drive,wheel_setup,status,moderator_note,created_at,replaces_submission_id,deleted_at,deleted_by,deletion_reason,zip_deleted_at,creator_dismissed_at")
+        .eq("owner_id", ownerId)
+        .is("creator_dismissed_at", null)
         .order("created_at", {ascending:false}).limit(50);
+    if (!activeUser || activeUser.id !== ownerId || requestId !== myModsLoadSerial)
+        return;
     if (result.error) {
         el("myModsList").replaceChildren(make("div","empty","Failed to load private submissions: "+result.error.message));
         renderLocalDraft(); return;
     }
-    mySubmissions = result.data || [];
+    mySubmissions = (result.data || []).filter(item =>
+        item.owner_id === ownerId && item.creator_dismissed_at === null);
     const ids = mySubmissions.map(item => item.id);
     let publiclyReleased = new Set();
     if (ids.length) {
@@ -445,6 +478,8 @@ async function loadMyMods() {
             publiclyReleased = new Set((visible.data || []).map(x => x.submission_id));
         }
     }
+    if (!activeUser || activeUser.id !== ownerId || requestId !== myModsLoadSerial)
+        return;
     const target = el("myModsList");
     target.replaceChildren();
     for (const item of mySubmissions)
@@ -681,6 +716,14 @@ async function updateModerationNavigation() {
 async function refreshSession(session) {
     const previousUserId = activeUser && activeUser.id;
     activeUser = session && session.user || null;
+    if (previousUserId !== (activeUser && activeUser.id)) {
+        // Prevent one signed-in creator's results appearing for another.
+        myModsLoadSerial += 1;
+        mySubmissions = [];
+        revisionTarget = null;
+        el("myModsList").replaceChildren(
+            make("div", "empty", "Loading this GitHub account's own mods..."));
+    }
     activeProfile = null;
     el("moderationLink").classList.add("hidden");
     if (!activeUser) {
