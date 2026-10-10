@@ -23,6 +23,8 @@ let packageInfo = null;
 let submitting = false;
 let profileSaving = false;
 let editInProgress = false;
+let revisionTarget = null;
+let mySubmissions = [];
 
 const safeGithubHandle = name =>
     /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/.test(String(name || ""));
@@ -51,6 +53,8 @@ function syncControls() {
     el("biography").disabled = !connected;
     el("refreshBtn").disabled = !connected;
     el("submitBtn").disabled = !connected || submitting || !packageInfo;
+    el("submitBtn").textContent = revisionTarget ?
+        "SUBMIT UPDATE FOR REVIEW" : "SUBMIT FOR REVIEW";
 }
 function refreshCategoryFields() {
     const category = el("modType").value;
@@ -125,6 +129,7 @@ function saveDraft() {
 function clearDraft() {
     try { localStorage.removeItem(DRAFT_KEY); } catch {}
     el("modForm").reset();
+    revisionTarget = null;
     el("modVersion").value = "1.0";
     refreshCategoryFields();
     packageInfo = null;
@@ -154,7 +159,9 @@ function renderLocalDraft() {
     const action = make("button", "btn ghost", "EDIT DRAFT");
     action.type = "button";
     action.addEventListener("click", () => {
+        revisionTarget = null;
         applyDraft(draft);
+        syncControls();
         el("upload").scrollIntoView({behavior: "smooth", block: "start"});
     });
     row.append(body, action);
@@ -251,6 +258,10 @@ function addModRow(item) {
         " / " + (item.created_at ? new Date(item.created_at).toLocaleDateString() : "")));
     info.append(make("p", "mod-type-detail", MOD_META.summary(item.category, item)));
     if (item.moderator_note) info.append(make("p", "", "Review note: " + item.moderator_note));
+    if (item.replaces_submission_id) {
+        info.append(make("p", "caption",
+            "Revision of a previously approved mod. This ZIP needs new moderator approval."));
+    }
     const status = make("span", "status-chip " +
         (item.status === "pending" ? "pending" : item.status === "rejected" ? "rejected" : "verified"),
         String(item.status || "unknown").toUpperCase());
@@ -275,7 +286,11 @@ function addModRow(item) {
             el("modDescription").value = item.description;
             el("modVersion").value = item.mod_version;
             applyTypeDetails({...item, category:item.category});
-            message("Prepare a new ZIP and increase the version before re-submitting for review.");
+            revisionTarget = {id:item.id,title:item.title,
+                category:item.category,mod_version:item.mod_version};
+            syncControls();
+            message("Updating " + item.title + " from v" + item.mod_version +
+                ". Enter a NEW version and select its ZIP. Current public downloads remain online until the update is approved and released.");
             el("upload").scrollIntoView({behavior:"smooth"});
         });
         row.append(newVersion);
@@ -377,13 +392,14 @@ async function loadMyMods() {
     if (!client || !activeUser || !activeProfile) {showOfflineMods();return;}
     el("myModsLabel").textContent = "LOADING";
     const result = await client.from("mod_submissions")
-        .select("id,title,category,mod_version,description,map_kind,racer_class,kart_drive,wheel_setup,status,moderator_note,created_at")
+        .select("id,title,category,mod_version,description,map_kind,racer_class,kart_drive,wheel_setup,status,moderator_note,created_at,replaces_submission_id")
         .order("created_at", {ascending:false}).limit(50);
     if (result.error) {
         el("myModsList").replaceChildren(make("div","empty","Failed to load private submissions: "+result.error.message));
         renderLocalDraft(); return;
     }
-    const ids = (result.data || []).map(item => item.id);
+    mySubmissions = result.data || [];
+    const ids = mySubmissions.map(item => item.id);
     let publiclyReleased = new Set();
     if (ids.length) {
         const visible = await client.from("forge_public_mods")
@@ -394,9 +410,58 @@ async function loadMyMods() {
     }
     const target = el("myModsList");
     target.replaceChildren();
-    for (const item of result.data || []) {
+    for (const item of mySubmissions)
         item.is_published = publiclyReleased.has(item.id);
-        target.append(addModRow(item));
+
+    // Group revisions in the same mod card. The currently public version
+    // stays visible while a new ZIP waits for review/public release.
+    const indexed = new Map(mySubmissions.map(item => [item.id,item]));
+    const groups = new Map();
+    const lineage = item => {
+        let node = item;
+        const seen = new Set();
+        while (node.replaces_submission_id && indexed.has(node.replaces_submission_id)
+            && !seen.has(node.id)) {
+            seen.add(node.id);
+            node = indexed.get(node.replaces_submission_id);
+        }
+        return node.id;
+    };
+    for (const item of mySubmissions) {
+        const root = lineage(item);
+        if (!groups.has(root)) groups.set(root, []);
+        groups.get(root).push(item);
+    }
+    for (const group of groups.values()) {
+        const latest = group[0]; // database order is newest first
+        const publicBase = group.find(item => item.is_published);
+        const base = publicBase || group.find(item => item.status === "approved") || latest;
+        const card = addModRow(base);
+        if (latest.id !== base.id) {
+            const state = latest.status.toUpperCase();
+            const statusText = "UPDATE v" + latest.mod_version + " — " + state +
+                (publicBase && publicBase.id !== latest.id ?
+                ". Public v" + publicBase.mod_version + " stays available until the update is published." :
+                ". This version is still in private review.");
+            card.append(make("p", "caption", statusText));
+            if (latest.status === "pending" || latest.status === "approved") {
+                if (latest.status === "pending") {
+                    const edit = make("button", "btn ghost", "EDIT PENDING UPDATE");
+                    edit.type = "button";
+                    edit.addEventListener("click", () => showSubmissionEditor(card, latest));
+                    card.append(edit);
+                }
+                const controls = [...card.querySelectorAll("button")];
+                for (const button of controls) {
+                    if (button.textContent === "NEW VERSION") {
+                        button.textContent = latest.status === "pending" ?
+                            "UPDATE UNDER REVIEW" : "UPDATE AWAITING PUBLIC RELEASE";
+                        button.disabled = true;
+                    }
+                }
+            }
+        }
+        target.append(card);
     }
     if (!result.data || !result.data.length) {
         target.append(make("div","empty","No private submissions yet. Your first mod can be submitted below."));
@@ -465,6 +530,42 @@ async function submitMod(event) {
         message(String(err.message || err));
         return;
     }
+    // NEW VERSION explicitly targets an existing approved submission.
+    // One exact title/category match can also be confirmed to prevent
+    // accidentally uploading a second independent listing.
+    let revision = revisionTarget;
+    if (!revision) {
+        const matches = mySubmissions.filter(item => item.status === "approved" &&
+            item.title.toLowerCase() === draft.title.toLowerCase() &&
+            item.category === draft.category);
+        if (matches.length === 1) {
+            if (!window.confirm("This mod already exists. Submit this ZIP as a new version of " +
+                draft.title + " instead of creating a second public mod?")) {
+                message("Upload cancelled. Use NEW VERSION on the existing mod to update it.");
+                return;
+            }
+            revision = {id:matches[0].id,title:matches[0].title,
+                category:matches[0].category,mod_version:matches[0].mod_version};
+        } else if (matches.length > 1) {
+            message("Multiple mods have this name. Choose NEW VERSION on the exact existing mod first.");
+            return;
+        }
+    }
+    if (revision) {
+        if (mySubmissions.some(item => item.status === "pending" &&
+            item.replaces_submission_id === revision.id)) {
+            message("An update for this mod is already pending. Edit that submission or wait for review.");
+            return;
+        }
+        if (draft.title !== revision.title || draft.category !== revision.category) {
+            message("Keep the original mod name and category for a version update.");
+            return;
+        }
+        if (draft.version === revision.mod_version) {
+            message("Enter a new version number before uploading this update.");
+            return;
+        }
+    }
     submitting = true;
     syncControls();
     const uuid = crypto.randomUUID();
@@ -492,12 +593,16 @@ async function submitMod(event) {
             zip_path:zipPath,
             original_filename:packageInfo.file.name.slice(0,180),
             sha256:packageInfo.hash,
-            file_size_bytes:packageInfo.file.size
+            file_size_bytes:packageInfo.file.size,
+            replaces_submission_id:revision ? revision.id : null
         }).select("id").single();
         if (recorded.error) throw recorded.error;
-        message("Submission saved privately! Status: PENDING REVIEW. Publication requires moderator approval.");
+        message(revision ?
+            "Update submitted! Status: PENDING REVIEW. The previous public version remains available until moderators approve and publish this ZIP." :
+            "Submission saved privately! Status: PENDING REVIEW. Publication requires moderator approval.");
         try {localStorage.removeItem(DRAFT_KEY);} catch {}
         form.reset();
+        revisionTarget = null;
         el("modVersion").value="1.0";
         refreshCategoryFields();
         packageInfo=null;

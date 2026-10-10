@@ -1,7 +1,7 @@
 /* Forge Hub moderator UI.
-   This page offers no client-side admin privilege: trusted GitHub OAuth
-   identity is verified by Supabase SQL; RLS protects all other creators.
-   Approval updates review status only, and NEVER publishes a ZIP publicly. */
+   Trusted GitHub OAuth identity and server-side RLS enforce privileges.
+   Approval remains private for new mods; when an approved revision targets
+   a live public mod, moderators can safely promote the reviewed ZIP. */
 "use strict";
 
 const get = id => document.getElementById(id);
@@ -297,6 +297,18 @@ function makeCard(item) {
     );
     card.append(details);
 
+    if (item.replaces_submission_id) {
+        const replaced = entries.find(row => row.id === item.replaces_submission_id);
+        const oldPublic = published.get(item.replaces_submission_id);
+        const detail = node("div", "inset");
+        detail.append(node("strong", "", "UPDATE FOR EXISTING MOD"));
+        detail.append(node("p", "caption", oldPublic ?
+            "Replaces the public v" + (replaced?.mod_version || "previous") +
+            " after approval and publication. The old download stays online meanwhile." :
+            "Updates a previous approved submission. This new ZIP must be reviewed independently."));
+        card.append(detail);
+    }
+
     const message = node("p", "moderation-message");
     message.setAttribute("role", "status");
     const download = node("button", "btn secondary", "DOWNLOAD / VERIFY ZIP");
@@ -322,7 +334,9 @@ function makeCard(item) {
                 " I have checked the package and verified the creator has redistribution rights (required to approve)."));
         review.append(rightsLabel);
         const actions = node("div", "form-actions");
-        const approve = node("button", "btn", "APPROVE");
+        const approve = node("button", "btn",
+            item.replaces_submission_id && published.has(item.replaces_submission_id) ?
+            "APPROVE & UPDATE PUBLIC MOD" : "APPROVE");
         const reject = node("button", "btn ghost", "REJECT");
         approve.type = reject.type = "button";
         approve.addEventListener("click", () =>
@@ -452,10 +466,9 @@ function appendPublicationControls(card, item) {
         card.append(node("p", "caption", "Publication status unavailable. Retry when the public catalog reconnects."));
         return;
     }
-    if (!isOwner) {
-        card.append(node("p", "caption", "Reviewed and unlocked. Only the primary owner can publish this ZIP publicly."));
-        return;
-    }
+    // Verified moderators, not just the primary owner, may publish an
+    // independently approved and unlocked ZIP. The server rechecks GitHub
+    // identity and keeps unpublishing restricted to the owner.
     const section = node("div", "moderation-publish");
     section.append(node("h4", "", "PUBLIC RELEASE — SEPARATE FROM APPROVAL"));
     const holdButton = node("button", "btn ghost", "RELOCK PUBLICATION");
@@ -469,7 +482,6 @@ function appendPublicationControls(card, item) {
         "Publishing makes the ZIP downloadable by everyone. Publish only original creations or content with explicit written redistribution permission."));
     const sourceNotes = String(item.description || "").trim();
     const gameRip = /\b(ripped|extracted|ported|taken)\s+from\s+\S+/i.test(sourceNotes);
-    const releaseLabel = gameRip ? "Game rip - source credited" : "All rights reserved";
     const source = node("div", "moderation-source-credit");
     source.append(
         node("strong", "", gameRip ? "GAME ASSET / ORIGINAL SOURCE CREDITED" : "CREATOR RELEASE"),
@@ -492,35 +504,20 @@ function appendPublicationControls(card, item) {
     if (gameRip) basis.value = ("Original source credited by creator: " + sourceNotes).slice(0,1000);
     basisLabel.append(basis);
     section.append(basisLabel);
-    const licenseLabel = node("label", "moderation-field");
-    licenseLabel.append(node("span", "meta", "PUBLIC RELEASE LICENSE"));
-    const license = node("select", "moderation-license");
-    for (const [value, title] of (gameRip ? [
-        ["Game rip - source credited", "Game rip — original source credited"]
-    ] : [
-        ["All rights reserved", "All rights reserved — permission verified"],
-        ["CC-BY-4.0", "Creative Commons Attribution 4.0"],
-        ["CC0-1.0", "Creative Commons Zero 1.0"]
-    ])) {
-        const option = node("option", "", title);
-        option.value = value;
-        license.append(option);
-    }
-    licenseLabel.append(license);
-    section.append(licenseLabel);
+    section.append(node("p", "caption",
+        "License selection removed for simplicity. Public metadata will say 'Community upload - rights unverified'. This does NOT claim permission from the game's copyright holder."));
     const confirmation = node("label", "checkbox-row");
     const checkbox = node("input");
     checkbox.type = "checkbox";
-    confirmation.append(checkbox, document.createTextNode(gameRip ?
-        " I reviewed the source attribution and understand credit is not a license. I accept responsibility for this public release and will honor valid takedown requests." :
-        " I verified the creator has rights to distribute these files publicly."));
+    confirmation.append(checkbox, document.createTextNode(
+        " I reviewed the sources and any required permission. I confirm this release may be distributed publicly, understand attribution alone is not permission, and will address valid takedown requests."));
     section.append(confirmation);
     const resultMessage = node("p", "moderation-message");
     resultMessage.setAttribute("role", "status");
     const button = node("button", "btn moderation-publish-button", "PUBLISH TO FORGE HUB");
     button.type = "button";
     button.addEventListener("click", () =>
-        publishSubmission(item, basis.value, license.value, checkbox.checked, button, resultMessage));
+        publishSubmission(item, basis.value, checkbox.checked, button, resultMessage));
     section.append(button, resultMessage);
     card.append(section);
 }
@@ -572,7 +569,7 @@ async function unpublishSubmission(item, reason, button, feedback) {
         button.disabled = false;
     }
 }
-async function publishSubmission(item, evidence, license, confirmed, button, feedback) {
+async function publishSubmission(item, evidence, confirmed, button, feedback) {
     if (!client || !currentUser || busy || !publishedReady || published.has(item.id)) return;
     const basis = String(evidence || "").trim();
     if (item.status !== "approved" || item.publication_blocked) {
@@ -583,9 +580,8 @@ async function publishSubmission(item, evidence, license, confirmed, button, fee
         feedback.textContent = "Confirm redistribution rights. Optional notes must be at most 1000 characters.";
         return;
     }
-    if (!window.confirm(license === "Game rip - source credited" ?
-        "This ZIP includes original game assets. Attribution alone is not permission to redistribute them. Publish the ZIP publicly anyway under your responsibility?" :
-        "This makes the ZIP publicly downloadable. Have you verified your distribution rights?")) return;
+    if (!window.confirm(
+        "This ZIP will be publicly downloadable. Are you satisfied that the release is authorized? Credits alone do not grant permission.")) return;
     busy = true;
     button.disabled = true;
     const oldLabel = button.textContent;
@@ -605,7 +601,7 @@ async function publishSubmission(item, evidence, license, confirmed, button, fee
             },
             body: JSON.stringify({
                 action: "publish", submission_id: item.id,
-                moderator_notes: basis, license, publish_confirmed: true
+                moderator_notes: basis, publish_confirmed: true
             })
         });
         const data = await response.json().catch(() => ({}));
@@ -683,7 +679,11 @@ async function reviewSubmission(item, decision, note, rightsConfirmed, buttons, 
         return;
     }
     const publicRelease = published.has(item.id);
-    const confirmText = decision === "approved" ?
+    const replacingLive = decision === "approved" && !!item.replaces_submission_id &&
+        published.has(item.replaces_submission_id);
+    const confirmText = replacingLive ?
+        "Approve this revision and replace the live ZIP/version AFTER server verification? The old public version stays live if publication fails." :
+        decision === "approved" ?
         "Approve this PRIVATE request? You must have verified the creator's content rights. This does not publish its ZIP." :
         decision === "pending" ?
         "Cancel this approval and return the mod to Pending review? The creator will be able to revise the submission." :
@@ -714,8 +714,28 @@ async function reviewSubmission(item, decision, note, rightsConfirmed, buttons, 
             result.data[0].review_status !== decision) {
             throw new Error("Server did not confirm the requested state.");
         }
-        banner("Review saved: " + item.title + " → " + decision.toUpperCase() +
-            ". This does not publish any files.", "ok");
+        let outcome = "Review saved: " + item.title + " → " + decision.toUpperCase() +
+            ". This did not publish a new ZIP.";
+        if (replacingLive) {
+            try {
+                const release = await sendReleaseRequest({
+                    action:"publish", submission_id:item.id,
+                    moderator_notes:trimmed, publish_confirmed:true
+                });
+                if (release.published !== true)
+                    throw new Error("The server did not confirm the public update.");
+                outcome = "Approved and updated the existing public mod to v" +
+                    item.mod_version + ". Its public ID was preserved.";
+                if (release.archive_cleanup_pending)
+                    outcome += " WARNING: old public ZIP cleanup remains pending.";
+            } catch (error) {
+                outcome = "Approved the update, but could not replace the public download: " +
+                    String(error.message || error) +
+                    ". The previous version stays published; retry PUBLISH on this approved revision.";
+            }
+        }
+        banner(outcome, replacingLive && !outcome.startsWith("Approved and updated") ?
+            "info" : "ok");
         await loadQueue();
     } catch (error) {
         message.textContent = "Review failed: " + (error.message || String(error));
@@ -760,8 +780,8 @@ async function loadQueue() {
     }
     get("refreshReviews").disabled = false;
     get("queueLimitNote").textContent = "Showing the latest " + MAX_VISIBLE +
-        " private requests. Approve is review-only; Publish requires a separate " +
-        "rights declaration and uploads an approved ZIP to the public catalog.";
+        " private requests. Approval is private; authorized moderators may publish " +
+        "an approved ZIP separately. New versions update the original public listing.";
     render();
     if (isOwner) await loadModeratorAudit(true);
 }
@@ -804,7 +824,7 @@ async function initialize() {
         get("reviewPanel").classList.remove("hidden");
         banner(isOwner ?
             "Owner verified. You can manage moderators and review Forge Hub submissions." :
-            "Moderator verified. You can review submissions but cannot manage moderator accounts.", "ok");
+            "Moderator verified. You can review and publish approved mods; only the owner manages moderators and takedowns.", "ok");
         if (isOwner) await loadModeratorRoster();
         await loadQueue();
     } catch (error) {

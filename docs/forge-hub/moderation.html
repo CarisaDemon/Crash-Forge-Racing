@@ -91,17 +91,17 @@
 <label class="moderation-search"><span>SEARCH</span><input type="search" id="reviewSearch" placeholder="Mod title or creator..." maxlength="120"></label>
 </div>
 <div id="reviewList" class="moderation-list" aria-live="polite"><div class="empty">Loading submissions...</div></div>
-<p class="caption" id="queueLimitNote">Showing the latest 200 requests. Approve keeps the ZIP private. Publish is a separate moderator action requiring documented distribution rights.</p>
+<p class="caption" id="queueLimitNote">Showing the latest 200 requests. Approved updates to live mods replace their public ZIP after verification; first-time publications remain a separate moderator action.</p>
 </section>
 <div class="notice info" style="margin-top:18px">
-<strong>Publication is a separate action.</strong>
-Approve updates private review status only. Publish verifies the ZIP again, copies it to public release storage and adds it to the live website, creator profile and launcher catalog.
+<strong>Protected release workflow.</strong>
+Verified moderators can publish approved mods. For updates to an already public mod, approval also securely verifies the replacement ZIP and updates the existing listing. The previous public ZIP stays available until the replacement succeeds.
 For mods using assets from any game, creators should work from their own legitimate original game files and credit the source in Mod Notes. Owning a copy or crediting the game does not automatically grant redistribution rights; public content may be removed after a valid rights-holder complaint.
 </div>
 </div>
 </main>
-<footer class="footer"><div class="wrap">Crash Forge: Racing / Forge Hub • Verified moderator actions • Private ZIP review • No automatic public release.</div></footer>
+<footer class="footer"><div class="wrap">Crash Forge: Racing / Forge Hub • Verified moderator actions • Private ZIP review • Versioned releases.</div></footer>
 <script src="./mod-taxonomy.js?v=20261009_kart_1"></script>
-<script type="module" src="./moderation.js?v=20261010_optional_rights_1"></script>
+<script type="module" src="./moderation.js?v=20261010_revisions_1"></script>
 </body>
 </html>
