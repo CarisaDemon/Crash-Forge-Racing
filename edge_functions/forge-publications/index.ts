@@ -172,6 +172,33 @@ async function publish(request,admin,cfg){
   if(result.error)return send({error:"Download removed, but listing removal must be retried: "+brief(result.error)},409);
   return send({removed:true,message:"Public ZIP and listing removed; private review remains intact"});
  }
+ if(action==="delete_submission"){
+  const reason=String(req?.reason||"").trim();
+  if(reason.length<8||reason.length>500)
+   return send({error:"Deletion reason must be 8-500 characters"},400);
+  // The trusted SQL function independently checks verified GitHub moderation.
+  // The public listing must already be withdrawn before permanent deletion.
+  const marked=await admin.rpc("forge_mark_submission_deleted",{
+   p_submission_id:id,p_reason:reason,p_moderator_id:user.id
+  });
+  if(marked.error)
+   return send({error:"Cannot delete mod: "+brief(marked.error)},409);
+  const privatePath=String(marked.data||"");
+  if(!/^[a-f0-9-]{36}\/[a-f0-9-]{36}\.zip$/.test(privatePath))
+   return send({error:"Deletion recorded, but unsafe ZIP path requires review"},409);
+  const cleanup=await admin.storage.from("forge-mod-queue").remove([privatePath]);
+  if(cleanup.error)
+   return send({error:"Deletion recorded; private ZIP cleanup failed: "+
+    brief(cleanup.error)+". Retry ZIP removal from Moderation.",deletion_recorded:true},409);
+  const confirmed=await admin.rpc("forge_complete_submission_deletion",{
+   p_submission_id:id,p_moderator_id:user.id
+  });
+  if(confirmed.error)
+   return send({error:"ZIP removed; confirmation failed: "+
+    brief(confirmed.error)+". Retry removal from Moderation.",deletion_recorded:true},409);
+  return send({deleted:true,zip_removed:true,creator_notified:true,
+   message:"Mod ZIP deleted. Creator will see the reason until they dismiss it."});
+ }
  if(action!=="publish")return send({error:"Unknown publication action"},400);
  // Never assign a permission claim or Creative Commons license
  // automatically. The public catalog explicitly marks unverified rights.

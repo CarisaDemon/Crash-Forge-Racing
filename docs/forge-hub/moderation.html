@@ -87,6 +87,7 @@
 <button class="mod-filter" type="button" data-state="approved" aria-pressed="false">APPROVED</button>
 <button class="mod-filter" type="button" data-state="rejected" aria-pressed="false">REJECTED</button>
 <button class="mod-filter" type="button" data-state="published" aria-pressed="false">PUBLISHED</button>
+<button class="mod-filter" type="button" data-state="deleted" aria-pressed="false">DELETED</button>
 </div>
 <label class="moderation-search"><span>SEARCH</span><input type="search" id="reviewSearch" placeholder="Mod title or creator..." maxlength="120"></label>
 </div>
@@ -95,13 +96,13 @@
 </section>
 <div class="notice info" style="margin-top:18px">
 <strong>Protected release workflow.</strong>
-Verified moderators can publish approved mods or remove public releases with a recorded reason. For updates to an already public mod, approval also securely verifies the replacement ZIP and updates the existing listing. The previous public ZIP stays available until the replacement succeeds.
+Verified moderators can publish approved mods, unpublish public releases, or permanently remove private ZIPs with a recorded reason. Removed mods remain visible to their creator as DELETED until the creator dismisses the notice. For updates to an already public mod, approval also securely verifies the replacement ZIP and updates the existing listing. The previous public ZIP stays available until the replacement succeeds.
 For mods using assets from any game, creators should work from their own legitimate original game files and credit the source in Mod Notes. Owning a copy or crediting the game does not automatically grant redistribution rights; public content may be removed after a valid rights-holder complaint.
 </div>
 </div>
 </main>
 <footer class="footer"><div class="wrap">Crash Forge: Racing / Forge Hub • Verified moderator actions • Private ZIP review • Versioned releases.</div></footer>
 <script src="./mod-taxonomy.js?v=20261009_kart_1"></script>
-<script type="module" src="./moderation.js?v=20261010_moderator_unpublish_1"></script>
+<script type="module" src="./moderation.js?v=20261010_permanent_deletion_1"></script>
 </body>
 </html>

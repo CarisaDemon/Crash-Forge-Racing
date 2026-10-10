@@ -229,11 +229,13 @@ function countStatuses() {
         ["countRejected", "rejected"],
         ["countPublished", "published"]
     ]) {
-        get(id).textContent = status === "all" ? entries.length :
+        get(id).textContent = status === "all" ?
+            entries.filter(item => !item.deleted_at).length :
             status === "published" ? published.size :
-            entries.filter(item => item.status === status).length;
+            entries.filter(item => item.deleted_at ? status === "deleted" : item.status === status).length;
     }
-    get("queueTotal").textContent = entries.length + " REQUESTS / PRIVATE";
+    get("queueTotal").textContent =
+        entries.filter(item => !item.deleted_at).length + " ACTIVE REQUESTS";
 }
 function ownerHandle(item) {
     const author = creators.get(item.owner_id);
@@ -244,10 +246,12 @@ function render() {
     countStatuses();
     const search = get("reviewSearch").value.trim().toLowerCase();
     const filtered = entries.filter(item =>
-        (activeFilter === "all" || (activeFilter === "published" ? published.has(item.id) : item.status === activeFilter)) &&
+        (activeFilter === "deleted" ? !!item.deleted_at :
+          !item.deleted_at && (activeFilter === "all" ||
+          (activeFilter === "published" ? published.has(item.id) : item.status === activeFilter))) &&
         (!search || [
             item.title, item.category, item.description,
-            item.original_filename, ownerHandle(item)
+            item.original_filename, item.id, ownerHandle(item)
         ].some(value => String(value || "").toLowerCase().includes(search)))
     );
     const target = get("reviewList");
@@ -274,6 +278,25 @@ function makeCard(item) {
         (item.status || "unknown").toUpperCase());
     header.append(left, status);
     card.append(header);
+    if (item.deleted_at) {
+        const notice = node("div", "inset");
+        notice.append(node("span", "status-chip rejected", "DELETED / ELIMINADO"));
+        notice.append(node("p", "caption", "Reason: " +
+            (item.deletion_reason || "Mod removed by moderation.")));
+        notice.append(node("p", "caption",
+            item.zip_deleted_at ? "Private ZIP deleted. Creator notified." :
+            "Private ZIP cleanup pending. Retry is required."));
+        const retry = node("button", "btn ghost", "RETRY ZIP DELETION");
+        retry.type = "button";
+        retry.disabled = !!item.zip_deleted_at;
+        const message = node("p", "moderation-message");
+        retry.addEventListener("click", () =>
+            deleteSubmission(item, item.deletion_reason || "Remove obsolete duplicate",
+                             retry, message, true));
+        if (!item.zip_deleted_at) notice.append(retry, message);
+        card.append(notice);
+        return card;
+    }
     const owner = creators.get(item.owner_id);
     if (owner && safeGithubLogin(owner.github_login)) {
         const link = node("a", "moderation-creator-link", "VIEW CREATOR ON GITHUB ↗");
@@ -355,6 +378,7 @@ function makeCard(item) {
     }
     if (item.status === "approved") appendApprovalReversalControls(card, item);
     appendPublicationControls(card, item);
+    appendPermanentDeletionControls(card, item);
     return card;
 }
 
@@ -517,6 +541,70 @@ function appendPublicationControls(card, item) {
     section.append(button, resultMessage);
     card.append(section);
 }
+function appendPermanentDeletionControls(card, item) {
+    const section = node("div", "moderation-review");
+    const publishedNow = published.has(item.id);
+    section.append(node("h4", "", "PERMANENT MOD DELETION"));
+    section.append(node("p", "caption", publishedNow ?
+        "UNPUBLISH this ZIP first. Permanent deletion removes its private ZIP " +
+        "but preserves a creator-facing notice and private audit history." :
+        "Delete the private ZIP and remove this mod from the review queue. " +
+        "Creator Studio will show DELETED and the reason until the creator hides the notice."));
+    const label = node("label", "moderation-field");
+    label.append(node("span", "meta", "REASON (REQUIRED)"));
+    const reason = node("textarea");
+    reason.maxLength = 500;
+    reason.placeholder = "Why was this mod removed? (8-500 characters)";
+    label.append(reason);
+    section.append(label);
+    const button = node("button", "btn ghost", "DELETE MOD & ZIP");
+    button.type = "button";
+    button.disabled = publishedNow || !publishedReady;
+    const feedback = node("p", "moderation-message");
+    feedback.setAttribute("role", "status");
+    button.addEventListener("click", () =>
+        deleteSubmission(item, reason.value, button, feedback, false));
+    section.append(button, feedback);
+    card.append(section);
+}
+
+async function deleteSubmission(item, textReason, button, feedback, retry) {
+    if (busy || !client || !currentUser) return;
+    const reason = String(textReason || "").trim();
+    if (reason.length < 8 || reason.length > 500) {
+        feedback.textContent = "A specific deletion reason (8-500 characters) is required.";
+        return;
+    }
+    if (!retry) {
+        if (!window.confirm("Permanently remove the private ZIP for " + item.title +
+            "? The author will see DELETED with this reason. The audit record remains.")) return;
+        if (window.prompt("Type DELETE to confirm removal of " + item.title, "") !== "DELETE")
+            return;
+    }
+    busy = true;
+    button.disabled = true;
+    feedback.textContent = retry ? "Retrying storage cleanup..." :
+        "Deleting private ZIP and recording the creator-facing notice...";
+    try {
+        const result = await sendReleaseRequest({
+            action:"delete_submission", submission_id:item.id, reason
+        });
+        if (result.deleted !== true || result.zip_removed !== true)
+            throw new Error("Server did not confirm ZIP deletion.");
+        banner("ZIP deleted: " + item.title + ". Author receives the reason in Creator Studio.", "ok");
+        await loadQueue();
+    } catch (error) {
+        feedback.textContent = "Deletion: " + String(error.message || error);
+        // The server marks a tombstone before deleting Storage. Reload so
+        // a partial cleanup is visible and can safely be retried.
+        await loadQueue();
+        banner("Deletion failed or needs storage cleanup. Check the DELETED tab.", "info");
+    } finally {
+        busy = false;
+        button.disabled = false;
+    }
+}
+
 async function sendReleaseRequest(payload) {
     const auth = await client.auth.getSession();
     const token = auth.data?.session?.access_token;
@@ -747,7 +835,8 @@ async function loadQueue() {
     const result = await client.from("mod_submissions").select(
         "id,owner_id,title,category,mod_version,description,map_kind,racer_class," +
         "kart_drive,wheel_setup,original_filename,zip_path,sha256,file_size_bytes," +
-        "status,moderator_note,created_at,reviewed_at,publication_blocked"
+        "status,moderator_note,created_at,reviewed_at,publication_blocked," +
+        "deleted_at,deletion_reason,deleted_by,zip_deleted_at"
     ).order("created_at", {ascending:false}).limit(MAX_VISIBLE);
     if (result.error) {
         banner("Could not read the review queue: " + result.error.message, "info");
@@ -776,8 +865,8 @@ async function loadQueue() {
     }
     get("refreshReviews").disabled = false;
     get("queueLimitNote").textContent = "Showing the latest " + MAX_VISIBLE +
-        " private requests. Approval is private; authorized moderators may publish " +
-        "an approved ZIP separately. New versions update the original public listing.";
+        " submissions. Deletion removes stored ZIPs, preserves private audit history " +
+        "and notifies creators. Use DELETED for storage cleanup retries.";
     render();
     if (isOwner) await loadModeratorAudit(true);
 }

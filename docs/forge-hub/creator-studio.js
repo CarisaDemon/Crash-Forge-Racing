@@ -270,6 +270,24 @@ function addModRow(item) {
         info.append(make("span", "status-chip verified", "PUBLISHED / PUBLIC DOWNLOAD"));
     }
     row.append(info);
+    if (item.deleted_at) {
+        // Do not offer Edit or New Version on a deleted submission.
+        status.textContent = "ELIMINADO / DELETED";
+        status.className = "status-chip rejected";
+        info.append(make("p", "inset",
+            "Deletion reason: " + (item.deletion_reason || "Removed by moderation")));
+        info.append(make("p", "caption",
+            "Removed " + new Date(item.deleted_at).toLocaleDateString() +
+            (item.zip_deleted_at ?
+                ". The ZIP has been deleted." :
+                ". Private ZIP cleanup is still pending.")));
+        const remove = make("button", "btn ghost", "REMOVE FROM MY STUDIO");
+        remove.type = "button";
+        remove.disabled = !item.zip_deleted_at;
+        remove.addEventListener("click", () => dismissDeletedSubmission(item, remove));
+        row.append(remove);
+        return row;
+    }
     if (item.status === "pending") {
         const controls = make("div");
         const edit = make("button", "btn ghost", "EDIT DETAILS");
@@ -297,6 +315,25 @@ function addModRow(item) {
     }
     return row;
 }
+async function dismissDeletedSubmission(item, button) {
+    if (!client || !activeUser || !item.deleted_at || !item.zip_deleted_at) return;
+    if (!window.confirm("Remove the DELETED notice for " + item.title +
+        " from your Creator Studio? Your ZIP is already gone; " +
+        "the private moderation audit will be retained.")) return;
+    button.disabled = true;
+    try {
+        const result = await client.rpc("forge_dismiss_deleted_submission",
+            {p_submission_id:item.id});
+        if (result.error || result.data !== true)
+            throw result.error || new Error("Server did not confirm dismissal.");
+        message("Deleted mod notice removed from your Creator Studio.");
+        await loadMyMods();
+    } catch (error) {
+        button.disabled = false;
+        message("Could not remove notice: " + String(error.message || error));
+    }
+}
+
 function showSubmissionEditor(row, item) {
     if (editInProgress) return;
     editInProgress = true;
@@ -392,7 +429,7 @@ async function loadMyMods() {
     if (!client || !activeUser || !activeProfile) {showOfflineMods();return;}
     el("myModsLabel").textContent = "LOADING";
     const result = await client.from("mod_submissions")
-        .select("id,title,category,mod_version,description,map_kind,racer_class,kart_drive,wheel_setup,status,moderator_note,created_at,replaces_submission_id")
+        .select("id,title,category,mod_version,description,map_kind,racer_class,kart_drive,wheel_setup,status,moderator_note,created_at,replaces_submission_id,deleted_at,deleted_by,deletion_reason,zip_deleted_at,creator_dismissed_at")
         .order("created_at", {ascending:false}).limit(50);
     if (result.error) {
         el("myModsList").replaceChildren(make("div","empty","Failed to load private submissions: "+result.error.message));
@@ -428,6 +465,10 @@ async function loadMyMods() {
         return node.id;
     };
     for (const item of mySubmissions) {
+        if (item.deleted_at) {
+            target.append(addModRow(item));
+            continue;
+        }
         const root = lineage(item);
         if (!groups.has(root)) groups.set(root, []);
         groups.get(root).push(item);
@@ -463,10 +504,10 @@ async function loadMyMods() {
         }
         target.append(card);
     }
-    if (!result.data || !result.data.length) {
+    if (!mySubmissions.length) {
         target.append(make("div","empty","No private submissions yet. Your first mod can be submitted below."));
     }
-    el("myModsLabel").textContent = String((result.data || []).length) + " SUBMISSIONS";
+    el("myModsLabel").textContent = String(mySubmissions.length) + " SUBMISSIONS";
     renderLocalDraft();
 }
 async function saveProfile(event) {

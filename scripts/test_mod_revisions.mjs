@@ -81,8 +81,8 @@ test("native track pair archives remain allowed, executable archives blocked", (
 });
 
 test("HTML cache-busts both updated scripts", () => {
-  assert.match(studioHTML, /creator-studio\.js\?v=20261010_revisions_1/);
-  assert.ok(modHTML.includes("moderation.js?v=20261010_moderator_unpublish_1"));
+  assert.match(studioHTML, /creator-studio\.js\?v=20261010_deleted_notices_1/);
+  assert.ok(modHTML.includes("moderation.js?v=20261010_permanent_deletion_1"));
 });
 
 test("moderators get UNPUBLISH controls and can reverse approval safely", () => {
