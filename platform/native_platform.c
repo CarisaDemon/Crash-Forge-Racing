@@ -1218,7 +1218,7 @@ void Platform_Init(const char *title, int width, int height)
 #endif
 
 	Platform_Log("[CTR Native] Initialising platform\n");
-	Platform_Log("[CTR Native] BUILD: V2.0.8_TRUE_3D_WHEEL_AXES\n");
+	Platform_Log("[CTR Native] BUILD: Crash Forge Racing %s EXPERIMENTAL\n", CTR_NATIVE_VERSION);
 	Platform_Log("[CTR Native] startup options: highRefresh=%d subpixel=%d filtering=%s wide=%d fullscreen=%d dithering=%s perfOverlay=%d\n",
 	             g_cfg_highRefreshPresentation, g_cfg_subpixelGeometry,
 	             g_cfg_bilinearFiltering ? "BILINEAR" : "NEAREST",

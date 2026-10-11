@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <platform/native_world.h>
+#endif
 
 enum
 {
@@ -59,6 +62,28 @@ enum
 
 void UI_JumpMeter_Update(struct Driver *driver)
 {
+	int meterElapsed = sdata->gGT->elapsedTimeMS;
+#if defined(CTR_NATIVE)
+	/* HUD presentation can run 200+ times/sec, but boost/stat/timer logic
+	 * belongs to the original 30 Hz race clock. Do not award landings,
+	 * accumulate stats, or decrement the jump timer multiple times for
+	 * the same simulated tick. Outside coherent races keep retail flow. */
+	if (NativeWorld_IsActive())
+	{
+		static const struct Driver *lastDriver[8];
+		static u32 lastTick[8];
+		const int id = driver != NULL ? (int)driver->driverID : -1;
+		if (id >= 0 && id < 8)
+		{
+			const u32 tick = sdata->frameCounter;
+			if (lastDriver[id] == driver && lastTick[id] == tick)
+				return;
+			lastDriver[id] = driver;
+			lastTick[id] = tick;
+		}
+		meterElapsed = 32;
+	}
+#endif
 	if ((driver->actionsFlagSet & ACTION_AIRBORNE) == 0)
 	{
 		if ((driver->actionsFlagSetPrevFrame & ACTION_AIRBORNE) == 0)
@@ -69,7 +94,7 @@ void UI_JumpMeter_Update(struct Driver *driver)
 			}
 			else
 			{
-				driver->jumpMeterTimer -= sdata->gGT->elapsedTimeMS;
+				driver->jumpMeterTimer -= meterElapsed;
 				if (driver->jumpMeterTimer < 0)
 				{
 					driver->jumpMeterTimer = 0;

@@ -34,6 +34,11 @@ int NativeGTE_GetStoredSubpixelFixed(const void *address, u32 packedSxy, s32 *x1
 int NativeGTE_GetStoredSubpixelFixedLocal(const void *address, u32 packedSxy, s32 *x16, s32 *y16);
 int NativeGTE_GetStoredDepth(const void *address, u32 packedSxy, u16 *depth);
 int NativeGTE_GetStoredVertexMetadata(const void *address, u32 packedSxy, s32 *x16, s32 *y16, u16 *depth);
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+/* B5 occurs inside the PS1 OT, BEFORE EndScene. Capture at the actual
+ * native-terrain draw to avoid false identical before/after comparisons. */
+void NativeRenderer_B5SnapshotStage(int stage);
+#endif
 
 #define NATIVE_GPU_LOG(fmt, ...)   Platform_Log("[CTR GPU] " fmt, ##__VA_ARGS__)
 #define NATIVE_GPU_ERROR(fmt, ...) Platform_LogError("[CTR GPU] [%s] - " fmt, __func__, ##__VA_ARGS__)
@@ -2868,7 +2873,9 @@ internal int ProcessPsyXPrims(P_TAG *polyTag)
 		{
 			if (NativeGpu_HasPendingSplits())
 				DrawAllSplits();
+			NativeRenderer_B5SnapshotStage(0);
 			NativeRenderer_LevelPCDrawQueued();
+			NativeRenderer_B5SnapshotStage(1);
 			static int markerSeen;
 			if(!markerSeen)
 			{

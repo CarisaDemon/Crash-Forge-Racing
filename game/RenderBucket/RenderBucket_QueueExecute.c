@@ -2,7 +2,9 @@
 #include <platform/native_world_math.h>
 #include <platform/native_gltf.h>
 #include <platform/native_obj.h>
+#include <platform/native_custom_tracks.h>
 #include <platform/native_gpu_model_qa.h>
+#include <platform/native_wheel_jobs.h>
 s32 NativeGpu_CorrectSubpixelNclip(const void *p0, const void *p1, const void *p2, s32 retailNclip);
 s32 NativeGpu_CorrectSubpixelNclipLocal(const void *p0, const void *p1, const void *p2, s32 retailNclip);
 int NativeGTE_GetStoredSubpixelFixedLocal(const void *address, u32 packedSxy, s32 *x16, s32 *y16);
@@ -1354,6 +1356,304 @@ static int RenderBucket_IsRacerInstance(const struct Instance *inst)
 	}
 	return 0;
 }
+/*
+ * Native racer visibility, before PS1 ordering-table allocation.
+ *
+ * The retail terrain BSP is a fast broadphase; exact, two-sided high-LOD
+ * terrain triangles determine whether a remote custom racer is hidden.
+ * Never rely on BSP boxes alone (they can hide a racer through open air).
+ * Conservative: all seven probes must be blocked; missing/invalid geometry
+ * or a camera close to the kart means draw normally.
+ *
+ * Does NOT modify terrain visibility, physics, PVS, depth order or LOD.
+ */
+struct RenderBucketOcclusionCache
+{
+    const struct Instance *inst;
+    const struct mesh_info *mesh;
+    u32 lastMs;
+    float cam[3];
+    float target[3];
+    u8 valid;
+    u8 hidden;
+    u8 consecutiveBlocked;
+};
+static struct RenderBucketOcclusionCache sRacerOcclusion[4][8];
+
+static int RenderBucket_OcclusionBoxRay(
+    const struct BoundingBox *box, const float a[3],
+    const float d[3], float maxT)
+{
+    const float lo[3] = {box->min.x, box->min.y, box->min.z};
+    const float hi[3] = {box->max.x, box->max.y, box->max.z};
+    float t0 = 0.0f, t1 = maxT;
+
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        if (fabsf(d[axis]) < 0.0001f)
+        {
+            if (a[axis] < lo[axis] || a[axis] > hi[axis]) return 0;
+        }
+        else
+        {
+            float inv = 1.0f / d[axis];
+            float nearT = (lo[axis] - a[axis]) * inv;
+            float farT = (hi[axis] - a[axis]) * inv;
+            if (nearT > farT) { float tmp = nearT; nearT = farT; farT = tmp; }
+            if (nearT > t0) t0 = nearT;
+            if (farT < t1) t1 = farT;
+            if (t0 > t1) return 0;
+        }
+    }
+    return 1;
+}
+
+static int RenderBucket_OcclusionTriangleRay(
+    const struct LevVertex *v0, const struct LevVertex *v1,
+    const struct LevVertex *v2, const float a[3],
+    const float d[3], float minT, float maxT)
+{
+    const float e1[3] = {
+        (float)v1->pos.x - v0->pos.x,
+        (float)v1->pos.y - v0->pos.y,
+        (float)v1->pos.z - v0->pos.z
+    };
+    const float e2[3] = {
+        (float)v2->pos.x - v0->pos.x,
+        (float)v2->pos.y - v0->pos.y,
+        (float)v2->pos.z - v0->pos.z
+    };
+    const float p[3] = {
+        d[1] * e2[2] - d[2] * e2[1],
+        d[2] * e2[0] - d[0] * e2[2],
+        d[0] * e2[1] - d[1] * e2[0]
+    };
+    const float det = e1[0]*p[0] + e1[1]*p[1] + e1[2]*p[2];
+    if (fabsf(det) < 0.00001f) return 0;
+    const float invDet = 1.0f / det;
+    const float t[3] = {a[0]-v0->pos.x, a[1]-v0->pos.y, a[2]-v0->pos.z};
+    const float u = (t[0]*p[0] + t[1]*p[1] + t[2]*p[2])*invDet;
+    if (u < -0.0001f || u > 1.0001f) return 0;
+    const float q[3] = {
+        t[1]*e1[2] - t[2]*e1[1],
+        t[2]*e1[0] - t[0]*e1[2],
+        t[0]*e1[1] - t[1]*e1[0]
+    };
+    const float v = (d[0]*q[0] + d[1]*q[1] + d[2]*q[2])*invDet;
+    if (v < -0.0001f || u+v > 1.0001f) return 0;
+    const float hitT = (e2[0]*q[0]+e2[1]*q[1]+e2[2]*q[2])*invDet;
+    return hitT > minT && hitT < maxT;
+}
+
+static int RenderBucket_OcclusionQuadRay(
+    const struct mesh_info *mesh, const struct QuadBlock *qb,
+    const float a[3], const float d[3], float minT, float maxT)
+{
+    /* Only solid world surfaces; no transparent water, triggers or kill planes. */
+    if (!(qb->quadFlags &
+          (QUADBLOCK_FLAG_GROUND | QUADBLOCK_FLAG_COLLISION_SURFACE)) ||
+        (qb->quadFlags & (QUADBLOCK_FLAG_NO_COLLISION_RESPONSE |
+                          QUADBLOCK_FLAG_TRIGGER | QUADBLOCK_FLAG_KILL_PLANE)))
+        return 0;
+    if (!RenderBucket_OcclusionBoxRay(&qb->bbox, a, d, maxT)) return 0;
+    static const u8 hiTriangles[8][3] = {
+        {0,4,5}, {4,6,5}, {6,4,1}, {5,6,2},
+        {8,6,7}, {7,3,8}, {1,7,6}, {2,6,8}
+    };
+    const int triangleCount = qb->index[2] == qb->index[3] ? 4 : 8;
+    for (int i = 0; i < triangleCount; ++i)
+    {
+        const u16 i0 = qb->index[hiTriangles[i][0]];
+        const u16 i1 = qb->index[hiTriangles[i][1]];
+        const u16 i2 = qb->index[hiTriangles[i][2]];
+        if (i0 >= mesh->numVertex || i1 >= mesh->numVertex ||
+            i2 >= mesh->numVertex)
+            continue;
+        if (RenderBucket_OcclusionTriangleRay(
+                &mesh->ptrVertexArray[i0], &mesh->ptrVertexArray[i1],
+                &mesh->ptrVertexArray[i2], a, d, minT, maxT))
+            return 1;
+    }
+    return 0;
+}
+
+static int RenderBucket_OcclusionRayBlocked(
+    const struct mesh_info *mesh, const float a[3], const float target[3])
+{
+    float d[3] = {target[0]-a[0], target[1]-a[1], target[2]-a[2]};
+    float dist2 = d[0]*d[0] + d[1]*d[1] + d[2]*d[2];
+    if (dist2 < 1400.0f*1400.0f) return 0; /* never cull near racers */
+    const float distance = sqrtf(dist2);
+    const float minT = 64.0f/distance;
+    const float maxT = 1.0f - 240.0f/distance;
+    if (maxT <= minT) return 0;
+
+    /* Explicit local stack: do not borrow PS1 scratchpad or mutate game BSP. */
+    u16 stack[128];
+    int count = 1, visited = 0;
+    stack[0] = 0;
+    while (count)
+    {
+        const u16 nodeIndex = stack[--count];
+        if (nodeIndex >= mesh->numBspNodes || ++visited > 24000)
+            return 0; /* malformed map / unexpected BSP: fail visible */
+        const struct BSP *node = mesh->bspRoot + nodeIndex;
+        if (!RenderBucket_OcclusionBoxRay(&node->box, a, d, maxT)) continue;
+        if ((node->flag & BSP_NODE_FLAG_LEAF) != 0)
+        {
+            if ((node->flag & BSP_LEAF_FLAG_WATER) != 0) continue;
+            const int n = node->data.leaf.numQuads;
+            const uintptr_t base = (uintptr_t)mesh->ptrQuadBlockArray;
+            const uintptr_t ptr = (uintptr_t)node->data.leaf.ptrQuadBlockArray;
+            if (n < 1 || n > mesh->numQuadBlock || ptr < base ||
+                (ptr-base) % sizeof(struct QuadBlock) != 0)
+                return 0;
+            const size_t first = (ptr-base) / sizeof(struct QuadBlock);
+            if (first >= (size_t)mesh->numQuadBlock ||
+                (size_t)n > (size_t)mesh->numQuadBlock-first)
+                return 0;
+            for (int i = 0; i < n; ++i)
+                if (RenderBucket_OcclusionQuadRay(
+                        mesh, &mesh->ptrQuadBlockArray[first+i],
+                        a, d, minT, maxT))
+                    return 1;
+        }
+        else
+        {
+            for (int child = 0; child < 2; ++child)
+            {
+                const u16 encoded = node->data.branch.childID[child];
+                if (encoded == BSP_CHILD_ID_NONE) continue;
+                const u16 idx = encoded & BSP_CHILD_ID_INDEX_MASK;
+                if (idx >= mesh->numBspNodes || count >= 128)
+                    return 0;
+                stack[count++] = idx;
+            }
+        }
+    }
+    return 0;
+}
+
+static int RenderBucket_OcclusionFullyBlocked(
+    const struct mesh_info *mesh, const struct ModelHeader *mh,
+    const float cam[3], const float center[3])
+{
+    float radius[3] = {
+        fminf(1300.0f, fmaxf(280.0f, fabsf((float)mh->scale.x)*0.60f)),
+        fminf(1900.0f, fmaxf(440.0f, fabsf((float)mh->scale.y)*0.65f)),
+        fminf(1300.0f, fmaxf(280.0f, fabsf((float)mh->scale.z)*0.60f))
+    };
+    /* The entire body/kart has to disappear before it is safe to skip it. */
+    for (int i = 0; i < 7; ++i)
+    {
+        float target[3] = {center[0], center[1], center[2]};
+        if (i > 0)
+        {
+            const int axis = (i-1)/2;
+            target[axis] += (i & 1) ? radius[axis] : -radius[axis];
+        }
+        if (!RenderBucket_OcclusionRayBlocked(mesh, cam, target))
+            return 0;
+    }
+    return 1;
+}
+
+/* Returns 1 only when this *custom racer* is safely occluded. */
+static int RenderBucket_RacerOcclusionCull(
+    const struct Instance *inst, const struct PushBuffer *pb, int playerIndex)
+{
+    static int markerChecked, disabled;
+#if defined(CTR_INTERNAL)
+    static u32 lastLogMs, attempts, tested, skipped;
+#endif
+    if (!markerChecked)
+    {
+        FILE *marker = fopen("debug/racer_occlusion.disable", "rb");
+        disabled = marker != NULL;
+        if (marker != NULL) fclose(marker);
+        markerChecked = 1;
+        Platform_Log("[RACER OCCLUSION] %s; 7-point solid terrain BSP test, 90ms cache\n",
+                     disabled ? "disabled for A/B" : "enabled");
+    }
+    if (disabled || playerIndex < 0 || playerIndex >= 4 ||
+        !inst || !pb || !sdata || !sdata->gGT ||
+        (inst->flags & SCREENSPACE_INSTANCE))
+        return 0;
+    const struct Model *model = inst->model;
+    if (!model || !model->headers ||
+        (model->headers[0].unk1 != NATIVE_OBJ_MODEL_MAGIC &&
+         model->headers[0].unk1 != NATIVE_GLTF_MODEL_MAGIC))
+        return 0;
+    const struct GameTracker *gt = sdata->gGT;
+    if (NativeCustomTracks_IsActiveRace()) return 0; /* no ghost retail geometry */
+    const struct mesh_info *mesh = gt->level1 ? gt->level1->ptr_mesh_info : NULL;
+    if (!mesh || !mesh->bspRoot || !mesh->ptrVertexArray ||
+        !mesh->ptrQuadBlockArray || mesh->numBspNodes < 1 ||
+        mesh->numBspNodes > 30000 || mesh->numQuadBlock < 1 ||
+        mesh->numQuadBlock > 40000 || mesh->numVertex < 1 ||
+        mesh->numVertex > 100000)
+        return 0;
+    int driverSlot = -1;
+    for (int i = 0; i < 8; ++i)
+        if (gt->drivers[i] && gt->drivers[i]->instSelf == inst)
+        { driverSlot = i; break; }
+    if (driverSlot < 0) return 0;
+
+    const float cam[3] = {(float)pb->pos.x, (float)pb->pos.y, (float)pb->pos.z};
+    const float center[3] = {
+        (float)inst->matrix.t[0], (float)inst->matrix.t[1],
+        (float)inst->matrix.t[2]
+    };
+    struct RenderBucketOcclusionCache *c =
+        &sRacerOcclusion[playerIndex][driverSlot];
+    const u32 now = SDL_GetTicks();
+    const int same = c->valid && c->inst == inst && c->mesh == mesh;
+    float motion = 0.0f;
+    if (same)
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            const float dc = cam[axis] - c->cam[axis];
+            const float dt = center[axis] - c->target[axis];
+            motion += dc*dc + dt*dt;
+        }
+
+#if defined(CTR_INTERNAL)
+    ++attempts;
+#endif
+    if (!same || motion > 130.0f*130.0f ||
+        (u32)(now-c->lastMs) >= 90u)
+    {
+        const int blocked = RenderBucket_OcclusionFullyBlocked(
+            mesh, &model->headers[0], cam, center);
+#if defined(CTR_INTERNAL)
+        ++tested;
+#endif
+        if (!same) {c->hidden = 0; c->consecutiveBlocked = 0;}
+        if (blocked)
+        {
+            if (c->consecutiveBlocked < 2) ++c->consecutiveBlocked;
+            if (c->consecutiveBlocked >= 2) c->hidden = 1;
+        }
+        else {c->hidden = 0; c->consecutiveBlocked = 0;}
+        c->inst = inst;
+        c->mesh = mesh;
+        c->lastMs = now;
+        for (int axis = 0; axis < 3; ++axis)
+        {c->cam[axis] = cam[axis]; c->target[axis] = center[axis];}
+        c->valid = 1;
+    }
+#if defined(CTR_INTERNAL)
+    if (c->hidden) ++skipped;
+    if ((u32)(now-lastLogMs) >= 10000u)
+    {
+        Platform_Log("[RACER OCCLUSION] queue=%u LOS-tests=%u culled=%u (10s, only custom racers)\n",
+                     attempts, tested, skipped);
+        attempts = tested = skipped = 0;
+        lastLogMs = now;
+    }
+#endif
+    return c->hidden;
+}
 #endif
 
 static struct ModelHeader *RenderBucket_SelectModelHeader(struct Instance *inst, struct PushBuffer *pb, int *lodIndexOut, int *lodExhaustedOut, int viewDepth)
@@ -2385,6 +2685,15 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 		idpp->instFlags = queuedFlags;
 		return rbi;
 	}
+
+#if defined(CTR_NATIVE)
+	/* Skip hidden distant custom racers BEFORE GTE, OT allocation and OBJ triangles. */
+	if (RenderBucket_RacerOcclusionCull(inst, pb, playerIndex))
+	{
+		idpp->instFlags = queuedFlags;
+		return rbi;
+	}
+#endif
 
 	if (queueState->lastPushBuffer != pb)
 	{
@@ -6016,6 +6325,19 @@ static void RenderBucket_DrawObj(struct RenderBucketDrawContext *ctx, const stru
     }
 #endif
 
+#if defined(CTR_NATIVE)
+    /* Stress-only CPU multithreading: wheel rotation/steer math runs on the
+     * existing SDL worker pool. Read-only meshes and a frame-local immutable
+     * copy of transforms; wait for completion BEFORE writing any GTE regs,
+     * primitive packets, or ordering-table links on the main thread.
+     * A NULL prepass preserves the exact original single-thread path. */
+    const struct NativeWheelPreparedTriangle *wheelPrepared = NULL;
+    if (mesh->wheelMask != 0 && !isCustomTrack && !isBodyPatch)
+        wheelPrepared = NativeWheelJobs_Prepare(
+            mesh, angles, sine, cosine, steerAngle, steerSin, steerCos,
+            drawOffsetScaled, attachedScale);
+#endif
+
     /* Emit native texture bindings inside the ordering table so each triangle
      * retains the game's viewport, track occlusion and draw ordering. */
     for (int i = 0; i < mesh->triangleCount; ++i) {
@@ -6217,6 +6539,21 @@ static void RenderBucket_DrawObj(struct RenderBucketDrawContext *ctx, const stru
             }
             else
             {
+#if defined(CTR_NATIVE)
+                if (wheelPrepared != NULL && wheel >= 0 && wheel < 4)
+                {
+                    /* Pure worker output; only the main thread touches GTE. */
+                    for (int j = 0; j < 3; ++j)
+                    {
+                        MTC2(RenderBucket_PackXY(
+                            wheelPrepared[i].pos[j][0],
+                            wheelPrepared[i].pos[j][1]), j * 2);
+                        MTC2(wheelPrepared[i].pos[j][2], j * 2 + 1);
+                    }
+                }
+                else
+#endif
+                {
                 const float *center = mesh->wheels[wheel].center;
                 for (int j = 0; j < 3; ++j)
                 {
@@ -6250,6 +6587,7 @@ static void RenderBucket_DrawObj(struct RenderBucketDrawContext *ctx, const stru
 
                     MTC2(RenderBucket_PackXY((s16)x, (s16)y), j * 2);
                     MTC2((s16)z, j * 2 + 1);
+                }
                 }
             }
 

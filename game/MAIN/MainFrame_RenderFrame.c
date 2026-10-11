@@ -472,6 +472,25 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 		}
 	}
 
+	/*
+	 * Crash Forge: Racing - public experimental build stamp.
+	 * Render from the native UI pass so the label remains visible in
+	 * submenus and at any host FPS (the 30 Hz menu logic is unchanged).
+	 * __DATE__/__TIME__ refer to this binary's actual compilation, not
+	 * the current clock. The build number is shared with --version.
+	 */
+	if ((gGT->gameMode1 & MAIN_MENU) != 0 &&
+	    LOAD_IsOpen_MainMenu() &&
+	    sdata->ptrActiveMenu != NULL)
+	{
+		static const char buildLabel[] =
+			"EXPERIMENTAL  BUILD v" CTR_NATIVE_VERSION;
+		static const char dateLabel[] =
+			__DATE__ "  " __TIME__;
+		DecalFont_DrawLine(buildLabel, 8, 198, FONT_SMALL, ORANGE);
+		DecalFont_DrawLine(dateLabel, 8, 211, FONT_SMALL, WHITE);
+	}
+
 	/* Keep menu chrome usable while paused/options are open, but remove it
 	   together with the live HUD when H is hiding gameplay overlays. */
 	if (!Platform_GetHudHidden() || sdata->ptrActiveMenu != 0)

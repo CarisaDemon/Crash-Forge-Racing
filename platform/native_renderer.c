@@ -680,6 +680,41 @@ static void NativeRenderer_CaptureGameViewportPPM(const char *path)
 	free(pixels);
 }
 
+/* Correct QA capture for a native B5 OT marker. The regular EndScene
+ * before/after snapshots both happen AFTER B5, so matching hashes did NOT
+ * establish PS1-versus-GPU visual parity. This test captures immediately
+ * around the actual resident terrain draw, after flushing preceding OT.
+ * Only runs in internal stress QA when the explicit marker is present. */
+void NativeRenderer_B5SnapshotStage(int stage)
+{
+    static int checked, enabled, count, armed, completed;
+    if (!checked)
+    {
+        FILE *f = fopen("debug/level_pc_b5_capture.enable", "rb");
+        enabled = (f != NULL);
+        if (f) fclose(f);
+        checked = 1;
+    }
+    if (!enabled || completed || !NativePerf_IsStressTestMeasuring())
+        return;
+    if (stage == 0)
+    {
+        if (++count == 240)
+        {
+            NativeRenderer_CaptureGameViewportPPM("debug/level_pc_B5_before.ppm");
+            armed = 1;
+            Platform_Log("[LEVEL PC GPU] B5 QA captured pre-native-terrain OT stage; NOT a complete PS1 reference frame\n");
+        }
+    }
+    else if (stage == 1 && armed)
+    {
+        NativeRenderer_CaptureGameViewportPPM("debug/level_pc_B5_after.ppm");
+        completed = 1;
+        armed = 0;
+        Platform_Log("[LEVEL PC GPU] B5 QA captured post-native-terrain OT stage; compare the actual on-screen native draw\n");
+    }
+}
+
 static int NativeRenderer_LevelPCShouldCaptureSnapshot(void)
 {
 	static int checked=0,enabled=0,series=0,written=0,seen=0;

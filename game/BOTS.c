@@ -6,6 +6,8 @@
 #include <VehiclePartRegistry.h>
 #include <RacerLoadout.h>
 #include <platform/native_obj.h>
+#include <platform/native_gltf.h>
+#include <NativeRacerVisual.h>
 #include <NativeReserves.h>
 #include <SDL3/SDL.h>
 
@@ -58,6 +60,156 @@ static int BOTS_NativeLoadoutRange(int count)
 	return (int)(BOTS_NativeLoadoutRandom() % (u32)count);
 }
 
+
+/* Arcade-only: always make a new choice from ENABLED, ACTUALLY LOADABLE mods.
+ * Keeping data.characterIDs[driverID] as the "retail" random option made a
+ * custom pick permanent: the next race reused that same previous custom ID.
+ * Adventure, battle, Time Trial and stress-test policy are not changed. */
+static s16 s_nativeArcadeLastCharacter[RACER_LOADOUT_MAX_DRIVERS];
+static s16 s_nativeArcadeLastKart[RACER_LOADOUT_MAX_DRIVERS];
+static u8 s_nativeArcadeLoadoutValid[RACER_LOADOUT_MAX_DRIVERS];
+
+static int BOTS_NativeArcadePickCharacter(int driverID)
+{
+    const int count = CharacterRegistry_GetModCount();
+    const int hasKart = VehiclePartRegistry_GetCount(VEHICLE_PART_KART) > 0;
+    const int first = BOTS_NativeLoadoutRange(count);
+    const int last = s_nativeArcadeLastCharacter[driverID];
+
+    /* Body-only mods go first when a custom kart is installed. Otherwise,
+     * prefer self-contained legacy racers rather than a kartless body. */
+    for (int priority = 0; priority < 2; ++priority)
+    {
+        int firstValid = -1;
+        for (int i = 0; i < count; ++i)
+        {
+            const struct CharacterDef *candidate =
+                CharacterRegistry_GetByRosterIndex(16 + ((first + i) % count));
+            struct Model *model;
+            int modular;
+            if (candidate == NULL ||
+                (candidate->flags & CHARACTER_REGISTRY_FLAG_RETAIL))
+                continue;
+            modular = CharacterRegistry_IsModularBody(candidate->id) != 0;
+            if (priority == 0 && modular != hasKart) continue;
+            if (priority == 1 && modular == hasKart) continue;
+
+            /* Registry metadata alone is not enough: an invalid/missing
+             * model would silently display its retail fallback. */
+            model = NativeRacerVisual_ResolveModel(candidate->id);
+            if (model == NULL ||
+                (NativeObj_GetMesh(model) == NULL &&
+                 !NativeGltf_IsModel(model)))
+                continue;
+            if (firstValid < 0) firstValid = candidate->id;
+            if (!s_nativeArcadeLoadoutValid[driverID] ||
+                candidate->id != last)
+                return candidate->id;
+        }
+        if (firstValid >= 0) return firstValid;
+    }
+    return -1;
+}
+
+static int BOTS_NativeArcadePickPart(int kind, int driverID)
+{
+    const int count = VehiclePartRegistry_GetCount(kind);
+    const int start = BOTS_NativeLoadoutRange(count);
+    const int last = s_nativeArcadeLastKart[driverID];
+    int firstValid = -1;
+    for (int i = 0; i < count; ++i)
+    {
+        const struct VehiclePartDef *part =
+            VehiclePartRegistry_GetByIndex(kind, (start+i) % count);
+        struct Model *model;
+        const struct NativeObjMesh *mesh;
+        if (part == NULL) continue;
+        model = NativeObj_LoadVehiclePart(kind, part->id);
+        mesh = model ? NativeObj_GetMesh(model) : NULL;
+        if (mesh == NULL || mesh->triangleCount < 1 ||
+            (kind == VEHICLE_PART_WHEELS &&
+             (mesh->wheelMask & 0xfu) != 0xfu))
+            continue;
+        if (firstValid < 0) firstValid = part->id;
+        if (kind != VEHICLE_PART_KART ||
+            !s_nativeArcadeLoadoutValid[driverID] ||
+            part->id != last)
+            return part->id;
+    }
+    return firstValid; /* One valid kart: repetitions are intentional. */
+}
+
+static void BOTS_NativeArcadeCustomLoadout(int driverID)
+{
+    int characterID = BOTS_NativeArcadePickCharacter(driverID);
+    int kartID = RACER_LOADOUT_ORIGINAL;
+    int wheelID = RACER_LOADOUT_ORIGINAL;
+    const int modCount = CharacterRegistry_GetModCount();
+    if (characterID < 0)
+    {
+        /* An install with NO usable custom racer must remain playable;
+         * do not retain last race's (possibly removed) custom character. */
+        characterID = CharacterRegistry_GetDriverPackID(
+            data.characterIDs[driverID]);
+        Platform_Log("[ARCADE BOT] bot=%d no loadable custom character (%d registered); retail fallback unavoidable\n",
+                     driverID, modCount);
+    }
+
+    RacerLoadout_ResetSlot(driverID, characterID);
+    RacerLoadout_SetCharacter(driverID, characterID);
+
+    if (characterID >= 16 &&
+        CharacterRegistry_IsModularBody(characterID))
+    {
+        kartID = BOTS_NativeArcadePickPart(VEHICLE_PART_KART, driverID);
+        if (kartID >= 0)
+            RacerLoadout_SetKart(driverID, kartID);
+        else
+            Platform_Log("[ARCADE BOT] bot=%d modular character=%d has no valid custom kart\n",
+                         driverID, characterID);
+    }
+    else if (characterID >= 16)
+    {
+        /* Legacy combined custom racer already contains its own kart. */
+        Platform_Log("[ARCADE BOT] bot=%d legacy combined custom racer=%d (kart built into model)\n",
+                     driverID, characterID);
+    }
+
+    if (characterID >= 16 &&
+        CharacterRegistry_IsModularBody(characterID))
+    {
+        const int wheelCount = VehiclePartRegistry_GetCount(VEHICLE_PART_WHEELS);
+        if (wheelCount > 0 && BOTS_NativeLoadoutRange(wheelCount + 1) > 0)
+        {
+            const int chosen = BOTS_NativeArcadePickPart(
+                VEHICLE_PART_WHEELS, driverID);
+            if (chosen >= 0) wheelID = chosen;
+        }
+        /* Retail wheels are explicitly allowed in Arcade. */
+        RacerLoadout_SetWheels(driverID, wheelID);
+    }
+
+    if (kartID >= 0)
+    {
+        const int colors = VehiclePartRegistry_GetColorCount(kartID);
+        if (colors > 1)
+            RacerLoadout_SetKartColor(driverID,
+                BOTS_NativeLoadoutRange(colors));
+    }
+
+    if (characterID >= 16)
+    {
+        s_nativeArcadeLastCharacter[driverID] = (s16)characterID;
+        s_nativeArcadeLastKart[driverID] = (s16)kartID;
+        s_nativeArcadeLoadoutValid[driverID] = 1;
+    }
+    else s_nativeArcadeLoadoutValid[driverID] = 0;
+
+    Platform_Log("[ARCADE BOT] bot=%d customCount=%d selected=%d kart=%d wheels=%d mode=custom-only\n",
+                 driverID,modCount,characterID,kartID,wheelID);
+    BOTS_NativeLogResolvedLoadout(driverID, "arcade");
+}
+
 static void BOTS_NativeRandomizeLoadout(int driverID)
 {
 	struct GameTracker *gGT = sdata->gGT;
@@ -77,6 +229,14 @@ static void BOTS_NativeRandomizeLoadout(int driverID)
 	/* Human slots are never changed here. */
 	if (driverID < gGT->numPlyrCurrGame)
 		return;
+
+	/* Arcade bots never use the previous race's selection as a retail candidate.
+	 * Stress test dispatches separately in BOTS_Driver_Init. */
+	if ((gGT->gameMode1 & ARCADE_MODE) != 0)
+	{
+		BOTS_NativeArcadeCustomLoadout(driverID);
+		return;
+	}
 
 	characterID = data.characterIDs[driverID];
 	modCount = CharacterRegistry_GetModCount();

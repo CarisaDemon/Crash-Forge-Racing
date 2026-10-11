@@ -1,5 +1,8 @@
 #include <common.h>
 #include <NativeReserves.h>
+#if defined(CTR_NATIVE)
+#include <platform/native_world.h>
+#endif
 
 #define NATIVE_RESERVES_SLOT_COUNT 8
 #define NATIVE_RESERVES_RETAIL_MIRROR_MAX 0x7fff
@@ -152,17 +155,18 @@ void NativeReserves_Decrement(struct Driver *driver, int elapsed)
         return;
 
 #if defined(CTR_NATIVE)
-    /* Platform_GetHighRefreshMode() always returns 1 in today's native
-     * render loop, EVEN at the user-selected 30 FPS cap. Test the actual
-     * FPS limit so the 30 FPS reference path remains byte-for-byte retail. */
-    if (Platform_GetFPSLimitMode() != PLATFORM_FPS_LIMIT_30)
+    /* Coherent racing/battle physics already runs exactly ONCE per original
+     * 32-unit game tick at every presentation FPS (30, 200, Unlimited).
+     * Scaling that 32 by 24/25 only at high refresh made boost expire at a
+     * different rate compared with 30 FPS and let held pads refill faster
+     * than the logical drain. Never scale a fixed-step simulation tick.
+     *
+     * Keep the fractional 24/25 conversion only for the legacy host-slice
+     * fallback outside coherent races. The old fractional remainder is
+     * cleared when returning to a coherent world or a 30 FPS baseline. */
+    if (Platform_GetFPSLimitMode() != PLATFORM_FPS_LIMIT_30 &&
+        !NativeWorld_IsActive())
     {
-        /* Retail drains 32 reserve units per 30 Hz logic tick = 960/sec.
-         * Host clock is ~1000 units/sec; draining its unscaled delta ran
-         * ~4.17% faster at unlimited FPS. The coherent fixed-step world
-         * consumes 32-unit ticks at 31.25 Hz; the SAME conversion applies.
-         * Carry fractional units so 5ms render frames never round to zero
-         * or overcharge high-refresh gameplay. 30 FPS remains bit-exact. */
         struct NativeReservesSlot *slot = NativeReserves_Ensure(driver);
         if (slot != NULL)
         {
@@ -171,6 +175,12 @@ void NativeReserves_Decrement(struct Driver *driver, int elapsed)
             elapsed = (int)(scaled / 25LL);
             slot->highRefreshFraction = (s32)(scaled % 25LL);
         }
+    }
+    else
+    {
+        struct NativeReservesSlot *slot = NativeReserves_Ensure(driver);
+        if (slot != NULL)
+            slot->highRefreshFraction = 0;
     }
 #endif
     if (elapsed <= 0)

@@ -365,11 +365,35 @@ static int NativeRenderer_LevelPCEnsureShader(void)
  * vertex stage transforms world-space quadblock vertices directly on the GPU.
  * This is NOT the shipping path yet: transparencies/OT ordering must be
  * validated before any of the retail packet writers can be skipped. */
+static int NativeRenderer_LevelPCAffineWorldQAEnabled(void)
+{
+#if defined(CTR_GPU_EXPERIMENTAL_RENDER) && defined(CTR_INTERNAL)
+    static int checked, enabled;
+    if (!checked)
+    {
+        FILE *f = fopen("debug/level_pc_affine_uv_qa.enable", "rb");
+        enabled = (f != NULL);
+        if (f) fclose(f);
+        checked = 1;
+        if (enabled)
+            Platform_Log("[LEVEL PC GPU] experimental affine PS1-style world interpolation enabled\n");
+    }
+    return enabled;
+#else
+    return 0;
+#endif
+}
+
 static int NativeRenderer_LevelPCEnsureMaterialShader(int mode)
 {
 	struct NativeLevelPCMesh *pc = &s_nativeLevelPC;
 	static const char vs[] =
 		"#version 140\n"
+        "#ifdef CFR_AFFINE_LEVEL_VARYINGS\n"
+        "#define CFR_AFFINE_QUALIFIER noperspective\n"
+        "#else\n"
+        "#define CFR_AFFINE_QUALIFIER\n"
+        "#endif\n"
 		"in vec4 a_position;\n"
 		"in vec4 a_texcoord;\n"
 		"in vec4 a_color;\n"
@@ -380,12 +404,12 @@ static int NativeRenderer_LevelPCEnsureMaterialShader(int mode)
 		"uniform float u_wide;\n"
 		"uniform int u_depthInterop;\n"
 		"uniform float u_depthScale;\n"
-		"out vec4 v_texcoord;\n"
-		"out vec3 v_texcoord_persp;\n"
-		"out vec4 v_color;\n"
-		"out vec4 v_page_clut;\n"
-		"out vec2 v_ditherCoord;\n"
-		"out float v_z;\n"
+		"CFR_AFFINE_QUALIFIER out vec4 v_texcoord;\n"
+		"CFR_AFFINE_QUALIFIER out vec3 v_texcoord_persp;\n"
+		"CFR_AFFINE_QUALIFIER out vec4 v_color;\n"
+		"CFR_AFFINE_QUALIFIER out vec4 v_page_clut;\n"
+		"CFR_AFFINE_QUALIFIER out vec2 v_ditherCoord;\n"
+		"CFR_AFFINE_QUALIFIER out float v_z;\n"
 		"void main() {\n"
 		" vec3 eye=u_viewM*a_position.xyz + u_viewT;\n"
 		" float nearZ=max(1.0,u_screen*0.5+1.0);\n"
@@ -411,6 +435,11 @@ static int NativeRenderer_LevelPCEnsureMaterialShader(int mode)
 		"#define varying in\n"
 		"#define texture2D texture\n"
 		"out vec4 fragColor;\n";
+    static const char fragHeaderAffine[] =
+        "#version 140\n"
+        "#define varying noperspective in\n"
+        "#define texture2D texture\n"
+        "out vec4 fragColor;\n";
 	const char *shaderBody[3] = {gte_shader_4, gte_shader_8, gte_shader_16};
 	const char *fragmentSources[4] = {
 		fragHeader, gpu_shader_common, GPU_DITHERING, NULL
@@ -419,8 +448,25 @@ static int NativeRenderer_LevelPCEnsureMaterialShader(int mode)
 	GLint ok=0;
 	if (mode < 0 || mode >= NATIVE_LEVEL_PC_TEXTURE_MODES) return 0;
 	if (pc->textureProgram[mode] != 0) return 1;
+    /* PS1 GT4 textures are affine in screen space. The original experimental
+     * shader used GLSL smooth interpolation, which introduces perspective
+     * warping on walls/track faces. Compare exact same GPU path with an
+     * opt-in, GL 3.3 noperspective varying shader. No shipping path changes. */
+    const int affineQA = NativeRenderer_LevelPCAffineWorldQAEnabled();
+    char affineVertex[sizeof(vs) + 80];
+    const char *vsSource = vs;
+    if (affineQA)
+    {
+        const char *version = "#version 140\n";
+        const size_t prefix = strlen(version);
+        memcpy(affineVertex, version, prefix);
+        snprintf(affineVertex + prefix, sizeof(affineVertex) - prefix,
+            "#define CFR_AFFINE_LEVEL_VARYINGS 1\n%s", vs + prefix);
+        vsSource = affineVertex;
+    }
+    fragmentSources[0] = affineQA ? fragHeaderAffine : fragHeader;
 	fragmentSources[3] = shaderBody[mode];
-	vertex=NativeRenderer_LevelPCCompileShader(GL_VERTEX_SHADER,vs);
+	vertex=NativeRenderer_LevelPCCompileShader(GL_VERTEX_SHADER,vsSource);
 	if (!vertex) return 0;
 	fragment=glCreateShader(GL_FRAGMENT_SHADER);
 	glShaderSource(fragment,4,fragmentSources,NULL);
