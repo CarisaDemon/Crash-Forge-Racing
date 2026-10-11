@@ -43,6 +43,37 @@ async function api(payload,accessToken=""){
   if(!response.ok)throw Error(safeMessage(result.error||"Request rejected"));
   return result;
 }
+async function verifiedBrowserSession(){
+  // getSession() only reads the cached JWT from storage. A signed-out
+  // browser can still display a valid-looking profile while GoTrue rejects
+  // that revoked session_id with 403 session_not_found.
+  const {data,error}=await client.auth.getSession();
+  let session=data?.session || null;
+  if(error||!session)throw Error("Your Forge Hub session is no longer active. Sign in again.");
+  const proof=await client.auth.getUser(session.access_token);
+  if(!proof.error && proof.data?.user?.id===session.user?.id)return session;
+  // A verified user is mandatory before sending a one-time pairing approval.
+  // Attempt one local refresh; no password, token or OTP goes in the URL.
+  const renewed=await client.auth.refreshSession();
+  session=renewed.data?.session || null;
+  if(renewed.error||!session)
+    throw Error("This browser session was revoked. Sign in with GitHub or email again.");
+  const confirmation=await client.auth.getUser(session.access_token);
+  if(confirmation.error || confirmation.data?.user?.id!==session.user?.id)
+    throw Error("Forge Hub couldn't verify this session. Sign in again.");
+  return session;
+}
+
+async function displayVerifiedSession(session){
+  if(!session){await refreshProfile(null);return;}
+  try {
+    await refreshProfile(await verifiedBrowserSession());
+  } catch(error) {
+    // Do not mistake a locally cached user object for active server login.
+    await refreshProfile(null);
+    status("Your previous Forge Hub session is no longer valid. Sign in again to connect the launcher.");
+  }
+}
 async function refreshProfile(session){
   activeSession=session;
   const signed=!!(session&&session.user);
@@ -203,15 +234,23 @@ async function approve(){
   if(!validPair||!client||busy)return;
   busy=true;
   try{
-    const {data,error}=await client.auth.getSession();
-    if(error||!data.session)throw Error("Sign in first");
+    const session=await verifiedBrowserSession();
     // No silent auto-approval: this request occurs only on the user's click.
+    // Never authorize from a revoked JWT merely because its saved expiry
+    // has not elapsed.
     await api({action:"pair_approve",id:pairId,code:pairCode},
-              data.session.access_token);
+              session.access_token);
     get("approve").disabled=true;
     status("Launcher authorized! Return to Crash Forge; it will connect automatically.",true);
   }catch(error){
-    status("Could not authorize launcher: "+safeMessage(error));
+    const message=safeMessage(error);
+    if(/session|sign in/i.test(message)){
+      await refreshProfile(null);
+      status("Could not authorize launcher: "+message+
+        " Use CONTINUE WITH GITHUB or sign in again, then reopen the launcher link.");
+    }else{
+      status("Could not authorize launcher: "+message);
+    }
   }finally{busy=false;}
 }
 async function setup(){
@@ -238,9 +277,9 @@ async function setup(){
     });
     const {data,error}=await client.auth.getSession();
     if(error)throw error;
-    await refreshProfile(data.session);
+    await displayVerifiedSession(data.session);
     client.auth.onAuthStateChange((_event,session)=>{
-      window.setTimeout(()=>refreshProfile(session),0);
+      window.setTimeout(()=>displayVerifiedSession(session),0);
     });
     if(!validPair && !data.session)status("Sign in or register to connect your account.");
   }catch(error){
@@ -255,7 +294,9 @@ get("registerForm").addEventListener("submit",register);
 get("saveUsername").addEventListener("click",saveUsername);
 get("signOut").addEventListener("click",async()=>{
   if(client){
-    const {error}=await client.auth.signOut();
+    // Logout from this browser only: global is Supabase's default and
+    // revokes the independent Windows launcher and Mod Packager sessions.
+    const {error}=await client.auth.signOut({scope:"local"});
     if(error)status("Sign-out failed: "+safeMessage(error));
     else{await refreshProfile(null);status("Signed out of the Forge Hub website.",true);}
   }
