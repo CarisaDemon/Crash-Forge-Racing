@@ -883,7 +883,7 @@ el("connectBtn").addEventListener("click", async () => {
 });
 el("disconnectBtn").addEventListener("click", async () => {
     if (!client) return;
-    const result = await client.auth.signOut();
+    const result = await client.auth.signOut({scope:"local"});
     if (result.error) notice("Sign-out failed: "+result.error.message);
     else await refreshSession(null);
 });
