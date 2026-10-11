@@ -204,3 +204,21 @@ p{margin:7px 0}
  .moderator-audit-toolbar .btn{width:100%}
  .moderator-audit-footer .btn{width:100%}
 }
+
+
+/* In-browser native Mod Packager, primary flow; advanced ZIP input remains optional. */
+.forge-packager{margin:19px 0;padding:17px;border:1px solid #8a471a;
+ background:linear-gradient(145deg,#18130f,#101923 80%);box-shadow:0 4px 18px #0005}
+.forge-packager h3{font:800 15px "Segoe UI",sans-serif;color:#ffb16b;letter-spacing:.075em;margin:0}
+.forge-packager .panel-head{margin:0 0 10px}
+.forge-packager input[type=file]{display:block;width:100%;max-width:100%;background:#0d1218;
+ color:#e4e7eb;padding:12px;border:1px solid #38444d;border-radius:4px}
+.forge-dropzone{margin:13px 0;border:1px dashed #865333;background:#100f0f;padding:18px;
+ color:#e1b58e;text-align:center;font-size:12px;letter-spacing:.03em}
+.forge-dropzone.dragging{border:2px solid #ff7a21;background:#2d1b0e;color:#ffcfab}
+.forge-dropzone:focus-visible{outline:2px solid #ff7a21;outline-offset:2px}
+.forge-existing-zip{margin:10px 0 18px;padding:12px 14px;border:1px solid #3b4147;background:#0e1419}
+.forge-existing-zip summary{cursor:pointer;font-weight:700;font-size:11px;color:#aeb5ba;
+ letter-spacing:.06em}
+.forge-existing-zip .field{margin:13px 0 0}
+@media(max-width:700px){.forge-packager{padding:12px}.forge-packager .form-actions{flex-wrap:wrap}}

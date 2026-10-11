@@ -20,6 +20,8 @@ let activeUser = null;
 let activeProfile = null;
 let activeConfig = null;
 let packageInfo = null;
+let packagerSources = [];
+let generatedPack = null;
 let submitting = false;
 let profileSaving = false;
 let editInProgress = false;
@@ -131,6 +133,10 @@ function clearDraft() {
     try { localStorage.removeItem(DRAFT_KEY); } catch {}
     el("modForm").reset();
     revisionTarget = null;
+    packagerSources = [];
+    generatedPack = null;
+    el("packagerMessage").textContent = "No assets selected. Build happens locally in your browser.";
+    el("downloadModZip").disabled = true;
     el("modVersion").value = "1.0";
     refreshCategoryFields();
     packageInfo = null;
@@ -217,6 +223,8 @@ function showProfile() {
 
 async function checkPackage() {
     const file = el("modPackage").files[0];
+    generatedPack = null;
+    el("downloadModZip").disabled = true;
     packageInfo = null;
     syncControls();
     if (!file) {
@@ -702,6 +710,10 @@ async function submitMod(event) {
         try {localStorage.removeItem(DRAFT_KEY);} catch {}
         form.reset();
         revisionTarget = null;
+        packagerSources = [];
+        generatedPack = null;
+        el("packagerMessage").textContent = "No assets selected. Build happens locally in your browser.";
+        el("downloadModZip").disabled = true;
         el("modVersion").value="1.0";
         refreshCategoryFields();
         packageInfo=null;
@@ -873,8 +885,104 @@ el("disconnectBtn").addEventListener("click", async () => {
 });
 el("refreshBtn").addEventListener("click",loadMyMods);
 el("saveProfileBtn").closest("form").addEventListener("submit",saveProfile);
+// Guided package workflow. No account is needed to build or download a ZIP.
+function chosenPackagerSources(files, source) {
+    packagerSources = Array.from(files || []);
+    generatedPack = null;
+    packageInfo = null;
+    el("modPackage").value = "";
+    el("downloadModZip").disabled = true;
+    el("packagerMessage").textContent = packagerSources.length ?
+       packagerSources.length + " " + source + " assets selected. Click BUILD & ATTACH ZIP." :
+       "No assets selected.";
+    setFileInfo("Build the ZIP before submitting for review.", "NOT BUILT");
+    syncControls();
+}
+el("modSourceFolder").addEventListener("change", event => {
+    el("modSourceFiles").value = "";
+    chosenPackagerSources(event.target.files, "folder");
+});
+el("modSourceFiles").addEventListener("change", event => {
+    el("modSourceFolder").value = "";
+    chosenPackagerSources(event.target.files, "selected");
+});
+const drop = el("packagerDropzone");
+drop.addEventListener("dragover", event => {
+    event.preventDefault();
+    drop.classList.add("dragging");
+});
+drop.addEventListener("dragleave", () => drop.classList.remove("dragging"));
+drop.addEventListener("drop", event => {
+    event.preventDefault();
+    drop.classList.remove("dragging");
+    el("modSourceFolder").value = "";
+    el("modSourceFiles").value = "";
+    chosenPackagerSources(event.dataTransfer?.files, "dropped");
+});
+el("buildModZip").addEventListener("click", async () => {
+    if (!packagerSources.length) {
+        el("packagerMessage").textContent = "Select files or a native mod folder first.";
+        return;
+    }
+    const title = el("modTitle").value.trim();
+    const version = el("modVersion").value.trim();
+    const button = el("buildModZip");
+    button.disabled = true;
+    el("packagerMessage").textContent = "Checking assets and packaging ZIP locally...";
+    try {
+        const pack = await window.ForgeModPackager.build({
+            files:packagerSources,category:el("modType").value,
+            title,version,description:el("modDescription").value.trim(),
+            author:activeProfile?.github_login || ""
+        });
+        const digest = await crypto.subtle.digest("SHA-256",await pack.file.arrayBuffer());
+        const hash = Array.from(new Uint8Array(digest), x=>x.toString(16).padStart(2,"0")).join("");
+        el("modPackage").value = "";
+        generatedPack = pack.file;
+        packageInfo = {file:pack.file,hash};
+        el("downloadModZip").disabled = false;
+        el("packagerMessage").textContent =
+            "ZIP READY: " + pack.fileCount + " assets, " +
+            (pack.size/1048576).toFixed(2) + " MiB. " +
+            "It is attached for review, but NOT uploaded. Click SUBMIT FOR REVIEW after signing in.";
+        setFileInfo(pack.file.name+" — validated native "+el("modType").value+" package",
+                    "READY","SHA-256: "+hash);
+    } catch(error) {
+        generatedPack = null;
+        packageInfo = null;
+        el("downloadModZip").disabled = true;
+        el("packagerMessage").textContent = "Package rejected: " + String(error.message||error);
+        setFileInfo(String(error.message||error), "REJECTED");
+    } finally {
+        button.disabled = false;
+        syncControls();
+    }
+});
+el("downloadModZip").addEventListener("click", () => {
+    if (generatedPack) window.ForgeModPackager.download(generatedPack);
+});
 el("modPackage").addEventListener("change",checkPackage);
-el("modType").addEventListener("change",refreshCategoryFields);
+for (const fieldId of ["modTitle", "modVersion", "modDescription"]) {
+    el(fieldId).addEventListener("input", () => {
+        if (!generatedPack) return;
+        generatedPack = null;
+        packageInfo = null;
+        el("downloadModZip").disabled = true;
+        el("packagerMessage").textContent = "Mod information changed. Rebuild the ZIP before submitting.";
+        setFileInfo("Rebuild ZIP after changing the mod data.", "NOT BUILT");
+        syncControls();
+    });
+}
+el("modType").addEventListener("change", () => {
+    refreshCategoryFields();
+    if (generatedPack) {
+        generatedPack = null; packageInfo = null;
+        el("downloadModZip").disabled = true;
+        el("packagerMessage").textContent = "Category changed. Rebuild ZIP to match the new category.";
+        setFileInfo("Rebuild the ZIP for this category.", "NOT BUILT");
+        syncControls();
+    }
+});
 el("racerClass").addEventListener("change",refreshCategoryFields);
 el("kartType").addEventListener("change",refreshCategoryFields);
 el("modForm").addEventListener("submit",submitMod);

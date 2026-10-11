@@ -91,7 +91,25 @@
 </div>
 <div class="field"><label for="modVersion">Version</label><input id="modVersion" value="1.0" maxlength="28" required></div>
 <div class="field"><label for="modDescription">Description / Mod Notes</label><textarea id="modDescription" minlength="10" maxlength="3000" placeholder="Describe your mod and credit the source of any assets, e.g. Model ripped from Crash Nitro Kart (CNK)." required></textarea><p class="caption">If you used assets from another game or creator, identify the original source here. The moderator can ask for clarification in a review note.</p></div>
-<div class="field"><label for="modPackage">ZIP package</label><input id="modPackage" type="file" accept=".zip,application/zip" required><p class="caption">Up to 50 MiB. SHA-256 fingerprint is calculated in your browser.</p></div>
+<section id="modPackager" class="forge-packager" aria-labelledby="modPackagerTitle">
+  <div class="panel-head"><h3 id="modPackagerTitle">MOD PACKAGER / BUILD ZIP</h3><span class="meta">NATIVE MOD / NO CONSOLE</span></div>
+  <p class="caption">01 / Choose Character, Kart, Wheels or Track above. 02 / Select mod assets or a whole mod folder. 03 / Click BUILD &amp; ATTACH ZIP. The archive is validated locally and only uploaded after you choose SUBMIT FOR REVIEW.</p>
+  <div class="inline-grid">
+    <div class="field"><label for="modSourceFolder">Mod folder (recommended)</label><input id="modSourceFolder" type="file" multiple webkitdirectory directory aria-describedby="packagerMessage"><p class="caption">Preserves relative texture folders; no ISO, executables or saves.</p></div>
+    <div class="field"><label for="modSourceFiles">Or choose individual files</label><input id="modSourceFiles" type="file" multiple accept=".obj,.mtl,.png,.jpg,.jpeg,.bmp,.tga,.ini,.cfg,.json,.txt,.md,.wav,.ogg,.cseq,.bin,.dds,.webp,.gif,.xml,.dat,.gltf,.glb,.lev,.vrm"><p class="caption">Native OBJ models or both LEV + VRM for tracks.</p></div>
+  </div>
+  <div id="packagerDropzone" tabindex="0" class="forge-dropzone">DROP MOD FILES HERE  •  or use either picker above</div>
+  <p class="caption" id="packagerMessage" role="status">No assets selected. Build happens locally in your browser.</p>
+  <div class="form-actions">
+    <button class="btn" type="button" id="buildModZip">BUILD &amp; ATTACH ZIP</button>
+    <button class="btn secondary" type="button" id="downloadModZip" disabled>DOWNLOAD ZIP</button>
+  </div>
+</section>
+<details class="forge-existing-zip"><summary>ALREADY HAVE A ZIP? / ADVANCED IMPORT</summary>
+<div class="field"><label for="modPackage">Use an existing ZIP instead</label>
+<input id="modPackage" type="file" accept=".zip,application/zip">
+<p class="caption">Advanced option: up to 50 MiB. A permanent web ID is still written at submission.</p></div>
+</details>
 <div class="inset"><div class="row"><span class="meta">PACKAGE VALIDATION</span><span class="pill" id="fileStatus">NO FILE</span></div>
 <p id="fileDetails" class="caption">Choose your ZIP to prepare a checksum.</p><p id="fileHash" class="caption"></p></div>
 <div class="field" style="margin-top:16px"><label class="checkbox-row"><input id="rightsConsent" type="checkbox" required>I created these assets or have the right to distribute them. No scripts, executables or private files are included.</label></div>
@@ -107,6 +125,7 @@
 <script src="./mod-taxonomy.js?v=20261009_kart_1"></script>
 <script src="./vendor/jszip-3.10.1.min.js"></script>
 <script src="./forge-package-ids.js?v=20261010_id_at_upload"></script>
-<script type="module" src="./creator-studio.js?v=20261011_launcher_accounts"></script>
+<script src="./forge-mod-packager.js?v=20261011_mod_builder_1"></script>
+<script type="module" src="./creator-studio.js?v=20261011_mod_builder_1"></script>
 </body>
 </html>
