@@ -99,6 +99,13 @@
     <div class="field"><label for="modSourceFiles">Or choose individual files</label><input id="modSourceFiles" type="file" multiple accept=".obj,.mtl,.png,.jpg,.jpeg,.bmp,.tga,.ini,.cfg,.json,.txt,.md,.wav,.ogg,.cseq,.bin,.dds,.webp,.gif,.xml,.dat,.gltf,.glb,.lev,.vrm"><p class="caption">Native OBJ models or both LEV + VRM for tracks.</p></div>
   </div>
   <div id="packagerDropzone" tabindex="0" class="forge-dropzone">DROP MOD FILES HERE  •  or use either picker above</div>
+  <section class="forge-visualizer" aria-label="Native mod model and texture preview">
+    <h4>LIVE MODEL &amp; TEXTURE PREVIEW</h4>
+    <canvas id="modPreviewCanvas" width="720" height="275" aria-label="Drag to rotate the model; scroll to zoom."></canvas>
+    <p id="modPreviewStatus" role="status" class="caption">Choose a native OBJ or LEV file to preview.</p>
+    <div id="modTextureThumbs" class="forge-texture-list" aria-label="Texture thumbnails and filenames"></div>
+    <p class="caption">OBJ previews show approximate geometry and sampled color. LEV previews show native geometry and vertex colors; VRM texture decoding and collision are not included.</p>
+  </section>
   <p class="caption" id="packagerMessage" role="status">No assets selected. Build happens locally in your browser.</p>
   <div class="form-actions">
     <button class="btn" type="button" id="buildModZip">BUILD &amp; ATTACH ZIP</button>
@@ -126,6 +133,7 @@
 <script src="./vendor/jszip-3.10.1.min.js"></script>
 <script src="./forge-package-ids.js?v=20261010_id_at_upload"></script>
 <script src="./forge-mod-packager.js?v=20261011_mod_builder_1"></script>
-<script type="module" src="./creator-studio.js?v=20261011_mod_builder_1"></script>
+<script src="./forge-mod-visualizer.js?v=20261011_model_preview_1"></script>
+<script type="module" src="./creator-studio.js?v=20261011_model_preview_1"></script>
 </body>
 </html>

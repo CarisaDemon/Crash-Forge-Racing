@@ -6,8 +6,14 @@ Creator Studio: https://carisademon.github.io/Crash-Forge-Racing/forge-hub/studi
 2. Enter the mod name, version, description and category details.
 3. Choose your native mod folder or the individual mod files.
 4. Click BUILD & ATTACH ZIP. All files are inspected and packaged in your browser.
-5. Optionally click DOWNLOAD ZIP to keep a local copy.
-6. Sign in with GitHub and click SUBMIT FOR REVIEW to send the package to the private review queue.
+5. Inspect the interactive 3D preview and texture thumbnails before submission.
+   Drag to rotate and scroll to zoom; this preview is read-only.
+   - Character, Kart and Wheels: native OBJ mesh preview.
+   - Track: LEV vertex-colored geometry; the VRM atlas and collisions are not decoded.
+   - The texture thumbnails are the actual selected image files, while the
+     model's preview shading/texture sampling is approximate.
+6. Optionally click DOWNLOAD ZIP to keep a local copy.
+7. Sign in with GitHub and click SUBMIT FOR REVIEW to send the package to the private review queue.
 
 Already have a valid ZIP? Expand ADVANCED IMPORT to use the original
 file uploader. No mod is published without review.

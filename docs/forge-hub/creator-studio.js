@@ -15,6 +15,10 @@ const DRAFT_KEY = "cfr.forge-hub.creator-draft.v1";
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const MOD_META = window.ForgeModMeta;
 if (!MOD_META) throw new Error("ForgeModMeta script must load before Creator Studio.");
+const modVisualizer = window.ForgeModVisualizer.browserPreview(
+    document.getElementById("modPreviewCanvas"),
+    document.getElementById("modPreviewStatus"),
+    document.getElementById("modTextureThumbs"));
 let client = null;
 let activeUser = null;
 let activeProfile = null;
@@ -896,6 +900,7 @@ function chosenPackagerSources(files, source) {
        packagerSources.length + " " + source + " assets selected. Click BUILD & ATTACH ZIP." :
        "No assets selected.";
     setFileInfo("Build the ZIP before submitting for review.", "NOT BUILT");
+    modVisualizer.selectSources(packagerSources, el("modType").value);
     syncControls();
 }
 el("modSourceFolder").addEventListener("change", event => {
@@ -975,6 +980,7 @@ for (const fieldId of ["modTitle", "modVersion", "modDescription"]) {
 }
 el("modType").addEventListener("change", () => {
     refreshCategoryFields();
+    modVisualizer.selectSources(packagerSources, el("modType").value);
     if (generatedPack) {
         generatedPack = null; packageInfo = null;
         el("downloadModZip").disabled = true;

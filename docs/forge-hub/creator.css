@@ -222,3 +222,21 @@ p{margin:7px 0}
  letter-spacing:.06em}
 .forge-existing-zip .field{margin:13px 0 0}
 @media(max-width:700px){.forge-packager{padding:12px}.forge-packager .form-actions{flex-wrap:wrap}}
+
+
+/* Browser OBJ/LEV preview shared by all four Forge native package types. */
+.forge-visualizer{margin:12px 0;padding:12px;background:#0f151d;
+ border:1px solid #3a4653;border-radius:5px}
+.forge-visualizer h4{margin:0 0 7px;color:#ffa666;font-size:13px;letter-spacing:.05em}
+.forge-visualizer canvas{display:block;width:100%;height:auto;max-height:370px;
+ background:#0a1119;touch-action:none;border:1px solid #263848;cursor:grab}
+.forge-visualizer canvas:active{cursor:grabbing}
+.forge-texture-list{display:flex;gap:8px;overflow-x:auto;margin:10px 0;
+ padding-bottom:4px;scrollbar-width:thin}
+.forge-texture-item{min-width:126px;max-width:190px;background:#161e28;
+ color:#ecf0f4;border:1px solid #3d4d60;cursor:pointer;
+ display:flex;align-items:center;gap:6px;text-align:left;padding:6px}
+.forge-texture-item:hover,.forge-texture-item:focus-visible{border-color:#ff7a21}
+.forge-texture-item img{width:48px;height:48px;object-fit:contain;
+ background:#222a35;flex-shrink:0}
+.forge-texture-item span{font-size:11px;word-break:break-word}
