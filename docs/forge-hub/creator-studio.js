@@ -830,6 +830,21 @@ async function initialize() {
         });
         const session = await client.auth.getSession();
         await refreshSession(session.data.session);
+        // Return verified browser logins to the optional Windows launcher
+        // pairing page. Never put sessions or passwords in this URL.
+        const accountReturn = sessionStorage.getItem("cfr_account_return");
+        if (session.data.session && accountReturn) {
+            sessionStorage.removeItem("cfr_account_return");
+            try {
+                const target = new URL(accountReturn, location.origin);
+                if (target.origin === location.origin &&
+                    target.pathname === "/Crash-Forge-Racing/forge-hub/account.html" &&
+                    !target.hash) {
+                    location.replace(target.pathname + target.search);
+                    return;
+                }
+            } catch { /* invalid stored destination: remain in Creator Studio */ }
+        }
         client.auth.onAuthStateChange((_event, value) => {
             // Avoid calling Supabase async operations synchronously inside an auth callback.
             window.setTimeout(() => refreshSession(value), 0);

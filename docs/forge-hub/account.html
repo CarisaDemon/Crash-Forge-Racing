@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Account | Crash Forge: Racing / Forge Hub</title>
+<link rel="stylesheet" href="./creator.css">
+<style>
+:root{--hot:#ff760c;--bg:#0b0e12;--line:#3e4650;--text:#f4f2ef}
+body{background:#0b0e12;color:var(--text);font-family:"Segoe UI",Arial,sans-serif}
+.account-shell{width:min(920px,92vw);margin:34px auto 64px}
+.account-top{padding:16px 0 22px;border-bottom:2px solid #ff760c}
+.account-title{font-size:clamp(28px,5vw,44px);margin:8px 0;color:#f5f3ee}
+.account-title span{color:#ff760c}
+.account-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:22px}
+.account-panel{background:#151a20;border:1px solid #38404a;padding:22px}
+.account-panel h2{font-size:20px;margin:0 0 16px;color:#ffaf75}
+.account-panel label{display:block;color:#bbc1c5;font-size:12px;margin-top:14px}
+.account-panel input{display:block;width:100%;font-size:15px;background:#0b0e12;border:1px solid #48505b;color:#f5f5f3;padding:12px;margin-top:5px;box-sizing:border-box}
+.account-panel input:focus{outline:1px solid #ff760c}
+.account-panel button{cursor:pointer;background:#252c35;border:1px solid #505864;color:#f5f5f3;font-weight:700;padding:12px 15px;font-size:12px;margin:10px 8px 0 0}
+.account-panel button.primary{background:#8e3604;border-color:#ff760c}
+.account-panel button:disabled{opacity:.4;cursor:default}
+.account-panel p{font-size:13px;line-height:1.5;color:#aeb5bd}
+.account-panel .auth-divider{border-top:1px solid #383f46;margin:20px 0}
+.status{padding:13px;margin-top:16px;background:#181f25;border-left:3px solid #ff760c;min-height:20px;color:#e7e8e5}
+.pair{background:#27190d;border:1px solid #925019;margin:16px 0;padding:16px}
+.pair strong{display:block;font:800 28px/1.4 Consolas,monospace;letter-spacing:.18em;color:#ffae67}
+.signed-user{font-size:18px;font-weight:700;word-break:break-all}
+.hidden{display:none!important}
+a{color:#ffb780}
+@media(max-width:680px){.account-grid{grid-template-columns:1fr}.account-panel{padding:16px}}
+</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap nav">
+<a class="logo" href="./index.html">CRASH <span>FORGE</span><small>RACING / FORGE HUB</small></a>
+<nav class="navlinks"><a href="./index.html">MODS</a><a href="./studio.html">CREATOR STUDIO</a></nav>
+</div></header>
+<main class="account-shell">
+<div class="account-top">
+<div class="eyebrow">ONE IDENTITY / WEBSITE + WINDOWS LAUNCHER</div>
+<h1 class="account-title">FORGE <span>ACCOUNT.</span></h1>
+<p class="muted">Sign in with a Forge Hub account or continue securely through GitHub. Your mods and creator identity remain linked to the same user.</p>
+</div>
+<div id="pairBox" class="pair hidden">
+<div class="eyebrow">CONNECT YOUR WINDOWS LAUNCHER</div>
+<p>Confirm that this one-time code matches the code shown in Crash Forge Launcher:</p>
+<strong id="pairCode"></strong>
+<p>Never approve a connection you didn't start. Confirming authorizes this launcher to sign in as your Forge Hub account.</p>
+<button class="btn" id="approve" type="button" disabled>AUTHORIZE THIS LAUNCHER</button>
+</div>
+<div class="account-grid">
+<section class="account-panel" id="loginBox">
+<h2>SIGN IN</h2>
+<form id="loginForm">
+<label for="loginId">USERNAME OR EMAIL</label>
+<input id="loginId" autocomplete="username" required maxlength="180">
+<label for="loginPassword">PASSWORD</label>
+<input id="loginPassword" type="password" autocomplete="current-password" required minlength="1">
+<button class="primary" type="submit">SIGN IN</button>
+</form>
+<div class="auth-divider"></div>
+<p>Sign in with your existing GitHub account on GitHub's official site. No GitHub password is entered here.</p>
+<button id="githubLogin" class="primary" type="button">CONTINUE WITH GITHUB ↗</button>
+</section>
+<section class="account-panel" id="registrationBox">
+<h2>CREATE ACCOUNT</h2>
+<form id="registerForm">
+<label for="registerName">USERNAME</label>
+<input id="registerName" autocomplete="username" required pattern="[a-z][a-z0-9_]{2,23}" maxlength="24">
+<label for="registerEmail">EMAIL</label>
+<input id="registerEmail" type="email" autocomplete="email" required>
+<label for="registerPassword">PASSWORD (8+ CHARACTERS)</label>
+<input id="registerPassword" type="password" autocomplete="new-password" minlength="8" required>
+<button class="primary" type="submit">REGISTER</button>
+</form>
+<p>When email confirmation is enabled, confirm your email before signing in. Pick your permanent username after verifying your address.</p>
+</section>
+<section class="account-panel hidden" id="profileBox">
+<h2>YOUR ACCOUNT</h2>
+<div class="signed-user" id="profileName"></div>
+<p id="profileEmail"></p>
+<p id="profileGitHub"></p>
+<label for="editUsername">USERNAME</label>
+<input id="editUsername" autocomplete="off" pattern="[a-z][a-z0-9_]{2,23}" maxlength="24">
+<button class="primary" type="button" id="saveUsername">SAVE USERNAME</button>
+<div class="auth-divider"></div>
+<button id="linkGitHub" type="button">LINK GITHUB ↗</button>
+<button id="openStudio" type="button">CREATOR STUDIO ↗</button>
+<button id="signOut" type="button">SIGN OUT</button>
+</section>
+</div>
+<div id="accountStatus" class="status" role="status" aria-live="polite">Connecting to Forge Hub accounts...</div>
+</main>
+<footer class="footer"><div class="wrap">Crash Forge: Racing • No GitHub passwords or desktop tokens are placed in browser URLs.</div></footer>
+<script type="module" src="./account.js"></script>
+</body></html>
