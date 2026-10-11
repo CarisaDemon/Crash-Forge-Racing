@@ -37,7 +37,7 @@ jobs:
           $exe='build_release/ctr_native.exe'
           if (!(Test-Path $exe)) { throw 'Game EXE missing' }
           $output = & $exe --version
-          if ($LASTEXITCODE -ne 0 -or $output -notmatch '2\.1\.0') { throw "Wrong game version: $output" }
+          if ($LASTEXITCODE -ne 0 -or $output -notmatch [regex]::Escape($ver)) { throw "Wrong game version: $output" }
           $bytes=[IO.File]::ReadAllBytes((Resolve-Path $exe))
           $off=[BitConverter]::ToInt32($bytes,0x3c)
           if ($bytes[$off+4] -ne 0x4c -or $bytes[$off+5] -ne 0x01) { throw 'Expected 32-bit x86 PE' }
