@@ -1360,17 +1360,30 @@ void COLL_FIXED_PlayerSearch(struct Thread *t, struct Driver *d)
 	struct Level *level = gGT->level1;
 	struct ScratchpadStruct *sps = CTR_SCRATCHPAD_PTR(struct ScratchpadStruct, 0x108);
 	s32 normalBlendWeight;
+#if defined(CTR_NATIVE)
+	int customTrackGroundHit = 0;
+#endif
 
 	COLL_FIXED_PlayerSearch_SetupSearch(sps, d);
 
-	if (d->underDriver != NULL)
+#if defined(CTR_NATIVE)
+	if (NativeObj_CustomTrack_IsActive())
 	{
-		COLL_FIXED_QUADBLK_TestTriangles(d->underDriver, sps);
+		customTrackGroundHit =
+			NativeObj_CustomTrack_FixedSearch(d, sps);
 	}
-
-	if ((sps->boolDidTouchQuadblock == 0) && (sps->ptr_mesh_info != NULL) && (sps->ptr_mesh_info->bspRoot != NULL))
+	else
+#endif
 	{
-		COLL_SearchBSP_CallbackPARAM(sps->ptr_mesh_info->bspRoot, &sps->bbox, COLL_FIXED_BSPLEAF_TestQuadblocks, sps);
+		if (d->underDriver != NULL)
+		{
+			COLL_FIXED_QUADBLK_TestTriangles(d->underDriver, sps);
+		}
+
+		if ((sps->boolDidTouchQuadblock == 0) && (sps->ptr_mesh_info != NULL) && (sps->ptr_mesh_info->bspRoot != NULL))
+		{
+			COLL_SearchBSP_CallbackPARAM(sps->ptr_mesh_info->bspRoot, &sps->bbox, COLL_FIXED_BSPLEAF_TestQuadblocks, sps);
+		}
 	}
 
 	struct Instance *inst = t->inst;
@@ -1387,6 +1400,33 @@ void COLL_FIXED_PlayerSearch(struct Thread *t, struct Driver *d)
 		inst->compressedNormalAndDriverIndex =
 		    INST_CompressNormalVectorAndDriverIndex(sps->hit.plane.normal.x, sps->hit.plane.normal.y, sps->hit.plane.normal.z, d->driverID);
 		d->quadBlockHeight = CTR_MipsSll(sps->Union.QuadBlockColl.hitPos.y, 8);
+#if defined(CTR_NATIVE)
+		/*
+		 * Retail ground geometry is also resolved by the moved-collision path.
+		 * Keep a small custom-track safety net so one missed sweep can never
+		 * leave the kart underneath the road. Only snap while descending.
+		 */
+		if (NativeObj_CustomTrack_IsActive() &&
+		    customTrackGroundHit &&
+		    d->velocity.y <= 0)
+		{
+			/*
+			 * CTR uses +Y upward: gravity drives velocity.y negative.
+			 * Resolve only when the kart is close to the road, so high jumps
+			 * still fall naturally while a one-frame tunnel-through is caught.
+			 */
+			const s32 customGroundDelta =
+			    CTR_MipsSubLo(d->posCurr.y, d->quadBlockHeight);
+			if (customGroundDelta >= -(96 << 8) &&
+			    customGroundDelta <=  (96 << 8))
+			{
+				d->posCurr.y = d->quadBlockHeight;
+				d->posPrev.y = d->quadBlockHeight;
+				d->velocity.y = 0;
+				d->ySpeed = 0;
+			}
+		}
+#endif
 		d->collisionFlags |= DRIVER_COLL_FLAG_TOUCHED_QUADBLOCK;
 
 		if ((quad->terrain_type == TERRAIN_MUD) || (quad->terrain_type == TERRAIN_WATER) || (quad->terrain_type == TERRAIN_FASTWATER))
@@ -1435,8 +1475,14 @@ void COLL_FIXED_PlayerSearch(struct Thread *t, struct Driver *d)
 				d->collisionFlags |= DRIVER_COLL_FLAG_GROUNDED;
 			}
 
-			if (d->currBlockTouching == NULL)
+			if (d->currBlockTouching == NULL
+#if defined(CTR_NATIVE)
+			    || (NativeObj_CustomTrack_IsActive() && customTrackGroundHit)
+#endif
+			)
 			{
+				/* The temporary Crash Cove shell must never retain a retail
+				   ground quad after the custom mesh was successfully probed. */
 				d->currBlockTouching = quad;
 				d->AxisAngle1_normalVec = sps->hit.plane.normal;
 			}
@@ -1450,7 +1496,19 @@ void COLL_FIXED_PlayerSearch(struct Thread *t, struct Driver *d)
 		d->terrainMeta2 = VehAfterColl_GetTerrain(TERRAIN_NONE);
 	}
 
+#if defined(CTR_NATIVE)
+    /* Assembly Lane's original N-Gage mesh is independent of Crash Cove's
+     * retail BSP, whose kill bound cannot be used as a track floor.
+     * At 1x native scale its lowest OBJ vertex is around Y=-147.
+     * If the kart leaves a driveable surface and drops below -256, request
+     * the normal mask grab and custom spawn rather than falling forever.
+     * A valid floor hit always keeps the driver far above this cutoff. */
+    if (NativeObj_CustomTrack_IsActive()
+            ? d->posCurr.y < CTR_MipsSll(-256, 8)
+            : d->posCurr.y < CTR_MipsSll(CTR_MipsSubLo(level->ptr_mesh_info->bspRoot->box.min.y, 0x40), 8))
+#else
 	if (d->posCurr.y < CTR_MipsSll(CTR_MipsSubLo(level->ptr_mesh_info->bspRoot->box.min.y, 0x40), 8))
+#endif
 	{
 		d->collisionFlags |= DRIVER_COLL_FLAG_MASK_GRAB_REQUEST;
 	}
@@ -2397,6 +2455,13 @@ void COLL_MOVED_PlayerSearch(struct Thread *t, struct Driver *d)
 
 		sps->Union.QuadBlockColl.searchFlags = (sps->Union.QuadBlockColl.searchFlags | COLL_SEARCH_TEST_INSTANCES) & ~COLL_SEARCH_REUSE_NORMALS;
 
+#if defined(CTR_NATIVE)
+		if (NativeObj_CustomTrack_IsActive())
+		{
+			NativeObj_CustomTrack_MovedSearch(d, sps);
+		}
+		else
+#endif
 		if ((gGT->level1 != NULL) && (gGT->level1->ptr_mesh_info != NULL) && (gGT->level1->ptr_mesh_info->bspRoot != NULL))
 		{
 			COLL_SearchBSP_CallbackPARAM(gGT->level1->ptr_mesh_info->bspRoot, &sps->bbox, COLL_MOVED_BSPLEAF_TestQuadblocks, sps);
@@ -2461,7 +2526,16 @@ void COLL_MOVED_PlayerSearch(struct Thread *t, struct Driver *d)
 				d->collisionFlags |= DRIVER_COLL_FLAG_MASK_GRAB_REQUEST;
 			}
 
-			COLL_MOVED_FindScrub(quad, sps->hit.triangleID, sps);
+#if defined(CTR_NATIVE)
+			if (NativeObj_CustomTrack_IsActive())
+			{
+				sps->Input1.scrubDepth = 0;
+			}
+			else
+#endif
+			{
+				COLL_MOVED_FindScrub(quad, sps->hit.triangleID, sps);
+			}
 
 			u32 scrubId;
 			if ((quad->quadFlags & QUADBLOCK_FLAG_GROUND) == 0)
@@ -2625,7 +2699,27 @@ u32 COLL_MOVED_ScrubImpact(struct Driver *d, struct Thread *t, struct Scratchpad
 
 		if ((scrubFlags & SCRUB_FLAG_KEEP_RESERVES) == 0)
 		{
-			d->reserves = 0;
+#if defined(CTR_NATIVE)
+			if (d->driverID == 0 && d->reserves != 0)
+			{
+				Platform_Log(
+					"[TURBODBG] reserves-cleared-by-scrub id=%d res=%d outside=%d fireCap=%d fireSpeed=%d speed=%d approx=%d dot=%d scrubFlags=0x%x step=0x%x normal=(%d,%d,%d)\n",
+					d->driverID,
+					NativeReserves_Get(d),
+					d->turbo_outsideTimer,
+					d->fireSpeedCap,
+					d->fireSpeed,
+					d->speed,
+					d->speedApprox,
+					(int)dot,
+					(unsigned int)scrubFlags,
+					(unsigned int)d->stepFlagSet,
+					(int)normal.x,
+					(int)normal.y,
+					(int)normal.z);
+			}
+#endif
+			NativeReserves_Set(d, 0);
 			d->turbo_outsideTimer = 0;
 		}
 

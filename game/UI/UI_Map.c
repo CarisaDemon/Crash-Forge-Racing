@@ -49,6 +49,17 @@ CTR_STATIC_ASSERT(UI_MAP_ARROW_ROT_FLAG == 0x1000);
 CTR_STATIC_ASSERT(UI_MAP_ICON_SCALE == 0x1000);
 CTR_STATIC_ASSERT(UI_MAP_ADV_ARROW_SCALE == 0x800);
 
+#if defined(CTR_NATIVE)
+static int s_nativeUIMapOffsetX = 0;
+static int s_nativeUIMapOffsetY = 0;
+
+void UI_Map_NativeSetScreenOffset(int offsetX, int offsetY)
+{
+	s_nativeUIMapOffsetX = offsetX;
+	s_nativeUIMapOffsetY = offsetY;
+}
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8004d614-0x8004d8b4.
 void UI_Map_DrawMap(struct Icon *mapTop, struct Icon *mapBottom, s16 posX, s16 posY, struct PrimMem *primMem, uint32_t *otMem, u32 colorID)
 {
@@ -224,6 +235,10 @@ void UI_Map_GetIconPos(struct UIMap *map, int *posX, int *posY)
 
 	*posX = map->iconStartX + addX;
 	*posY = map->iconStartY + addY - UI_MAP_ICON_Y_OFFSET;
+#if defined(CTR_NATIVE)
+	*posX += s_nativeUIMapOffsetX;
+	*posY += s_nativeUIMapOffsetY;
+#endif
 	return;
 }
 

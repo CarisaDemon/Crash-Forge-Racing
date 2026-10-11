@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#endif
 
 enum UIInstanceConstants
 {
@@ -293,6 +296,14 @@ void UI_INSTANCE_InitAll(void)
 	// If you're in Adventure Arena
 	if ((gameMode1 & ADVENTURE_ARENA) != 0)
 	{
+#if defined(CTR_NATIVE)
+		/* Hangout is not an Adventure-progress HUD. Do not even create the
+		 * floating relic/key/trophy models, otherwise hiding only their
+		 * numeric counters still leaves the three large icons on screen. */
+		if (NativeHangout_IsActive())
+			return;
+#endif
+
 		// is ignoring the return value of these calls intentional?
 		UI_INSTANCE_BirthWithThread(STATIC_RELIC, (int)UI_ThTick_Reward, UI_HUD_SLOT_RELIC, 1, 0, (int)sdata->s_relic1);
 		UI_INSTANCE_BirthWithThread(STATIC_KEY, (int)UI_ThTick_Reward, UI_HUD_SLOT_KEY, 1, 0, (int)sdata->s_key1);

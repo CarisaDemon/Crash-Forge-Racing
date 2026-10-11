@@ -603,6 +603,35 @@ typedef struct
 	uint32_t code[2];
 } DR_PSYX_TEX;
 
+/* Native textured GT3 packet. Unlike DR_PSYX_TEX + POLY_GT3 + reset,
+ * this keeps the override texture scoped to one polygon inside one OT node.
+ * The embedded POLY_GT3 intentionally retains its normal layout so the
+ * native parser can reuse ProcessGouraudPoly without a second decoder.
+ * uvFrac preserves high-resolution OBJ UVs beyond POLY_GT3's u8 fields. */
+#define DR_PSYX_TEX_GT3_FLAG_HIRES_UV       0x0001u
+#define DR_PSYX_TEX_GT3_FLAG_EXACT_METADATA 0x0002u
+typedef struct
+{
+	DECLARE_P_ADDR
+	uint32_t code[2];
+	POLY_GT3 poly;
+	int8_t uvFrac[3][2];
+	/* Native rigid OBJ sideband. XY stores the presentation base in POLY_GT3;
+	 * these signed bytes keep the exact 1/256-pixel residual, while depth
+	 * avoids a GTE metadata hash lookup in the renderer. */
+	int8_t xyFrac[3][2];
+	uint16_t depth[3];
+	uint16_t nativeFlags;
+} DR_PSYX_TEX_GT3;
+
+/* Native UI/image quad using one scoped override texture. */
+typedef struct
+{
+	DECLARE_P_ADDR
+	uint32_t code[2];
+	POLY_FT4 poly;
+} DR_PSYX_TEX_FT4;
+
 typedef struct
 {
 	DECLARE_P_ADDR

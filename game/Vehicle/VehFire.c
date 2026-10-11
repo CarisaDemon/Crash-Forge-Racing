@@ -107,6 +107,45 @@ Skip:
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8005abfc-0x8005b0c4.
 
+/* UI jump-meter rendering runs at monitor FPS, while the coherent world
+ * clock updates airborne flags at the original 30 Hz. At 200+ FPS the same
+ * airborne->grounded transition used to award the 960-unit hangtime boost
+ * once per render, often 6+ times per real landing. Ignore duplicate awards
+ * within a single original logic tick, without changing the jump-meter HUD,
+ * the display timer or legitimate later jumps/drift boosts. */
+#if defined(CTR_NATIVE)
+static const struct Driver *s_landingBoostDriver[8];
+static u32 s_landingBoostFrame[8];
+static u32 s_landingBoostSkipped[8];
+static int VehFire_NativeLandingGrantIsDuplicate(
+    const struct Driver *driver,int reserves,u32 type)
+{
+    int i;
+    u32 frame;
+    if (!driver || !sdata || !sdata->gGT ||
+        type != POWER_SLIDE_HANG_TIME || reserves != 960 ||
+        driver->jumpMeter < 640 ||
+        (driver->actionsFlagSet & ACTION_AIRBORNE) != 0 ||
+        (driver->actionsFlagSetPrevFrame & ACTION_AIRBORNE) == 0)
+        return 0;
+    i=(int)driver->driverID;
+    if(i<0 || i>=8)return 0;
+    frame=sdata->frameCounter;
+    if(s_landingBoostDriver[i]==driver && s_landingBoostFrame[i]==frame)
+    {
+        /* First duplicate is useful to diagnose, later ones summarized. */
+        if(++s_landingBoostSkipped[i]==1 ||
+           (s_landingBoostSkipped[i]%64u)==0)
+            Platform_Log("[RESERVE FIX] rejected duplicate landing boost id=%d tick=%u repeats=%u\n",
+                i,(unsigned)frame,(unsigned)s_landingBoostSkipped[i]);
+        return 1;
+    }
+    s_landingBoostDriver[i]=driver;
+    s_landingBoostFrame[i]=frame;
+    return 0;
+}
+#endif
+
 // param1 - driver
 // param2 - reserves to add
 // param3 - add type
@@ -121,12 +160,32 @@ void VehFire_Increment(struct Driver *driver, int reserves, u32 type, int fireLe
 	int oldOTT;
 
 	u32 addFlags;
+#if defined(CTR_NATIVE)
+	int nativeLogPadBoost = 0;
+	int nativePadReservesBefore = 0;
+	int nativePadOutsideBefore = 0;
+#endif
 	struct Turbo *turboObj;
 	struct Thread *turboThread;
 	struct Instance *turboInst1;
 	struct Instance *turboInst2;
 
 	struct GameTracker *gGT = sdata->gGT;
+#if defined(CTR_NATIVE)
+    if (VehFire_NativeLandingGrantIsDuplicate(driver,reserves,type))
+        return;
+	if ((type & FREEZE_RESERVES_ON_TURBO_PAD) != 0 &&
+	    driver->driverID == 0 &&
+	    driver->instSelf != NULL &&
+	    driver->instSelf->thread != NULL &&
+	    driver->instSelf->thread->modelIndex == DYNAMIC_PLAYER &&
+	    (driver->actionsFlagSetPrevFrame & ACTION_NEW_BOOST) == 0)
+	{
+		nativeLogPadBoost = 1;
+		nativePadReservesBefore = NativeReserves_Get(driver);
+		nativePadOutsideBefore = driver->turbo_outsideTimer;
+	}
+#endif
 	if (
 	    // if this is a turbo pad
 	    ((type & TURBO_PAD) != 0) &&
@@ -134,6 +193,21 @@ void VehFire_Increment(struct Driver *driver, int reserves, u32 type, int fireLe
 	    // racer is in accel prevention (holding square)
 	    ((driver->actionsFlagSet & ACTION_ACCEL_PREVENTION) != 0))
 	{
+#if defined(CTR_NATIVE)
+		if (nativeLogPadBoost)
+		{
+			Platform_Log(
+				"[TURBODBG] pad-suppressed-accel-prevention id=%d dt=%d grant=%d fire=0x%x res=%d outside=%d step=0x%x actions=0x%x\n",
+				driver->driverID,
+				gGT->elapsedTimeMS,
+				reserves,
+				fireLevel,
+				NativeReserves_Get(driver),
+				driver->turbo_outsideTimer,
+				(unsigned int)driver->stepFlagSet,
+				(unsigned int)driver->actionsFlagSet);
+		}
+#endif
 		// do nothing
 		return;
 	}
@@ -361,7 +435,7 @@ void VehFire_Increment(struct Driver *driver, int reserves, u32 type, int fireLe
 	        // Reserves are equal to zero
 	        // OR
 	        // speed cap has been raised
-	        (driver->reserves == 0) || (driver->fireSpeedCap < newFireSpeedCap)) ||
+	        (NativeReserves_Get(driver) == 0) || (driver->fireSpeedCap < newFireSpeedCap)) ||
 
 	    // OR
 
@@ -406,7 +480,7 @@ void VehFire_Increment(struct Driver *driver, int reserves, u32 type, int fireLe
 		if (oldOTT < reserves)
 		{
 			int reserveDelta = CTR_MipsSubLo(reserves, (u16)driver->turbo_outsideTimer);
-			driver->reserves = (s16)CTR_MipsAddLo((u16)driver->reserves, reserveDelta);
+			NativeReserves_Add(driver, reserveDelta);
 			driver->turbo_outsideTimer = (s16)reserves;
 		}
 	}
@@ -415,18 +489,40 @@ void VehFire_Increment(struct Driver *driver, int reserves, u32 type, int fireLe
 	else if ((type & SUPER_ENGINE) == 0)
 	{
 		// increase reserves BY param2
-		driver->reserves = (s16)CTR_MipsAddLo((u16)driver->reserves, reserves);
+		NativeReserves_Add(driver, reserves);
 	}
 
 	// super engine
 	else
 	{
 		// set reserves to reserves parameter instead of incrementing
-		if (driver->reserves < reserves)
+		if (NativeReserves_Get(driver) < reserves)
 		{
-			driver->reserves = (s16)reserves;
+			NativeReserves_Set(driver, reserves);
 		}
 	}
+
+#if defined(CTR_NATIVE)
+	if (nativeLogPadBoost)
+	{
+		Platform_Log(
+			"[TURBODBG] pad-boost id=%d dt=%d grant=%d fire=0x%x res=%d->%d outside=%d->%d fireCap=%d fireSpeed=%d speed=%d approx=%d step=0x%x actions=0x%x\n",
+			driver->driverID,
+			gGT->elapsedTimeMS,
+			reserves,
+			fireLevel,
+			nativePadReservesBefore,
+			NativeReserves_Get(driver),
+			nativePadOutsideBefore,
+			driver->turbo_outsideTimer,
+			driver->fireSpeedCap,
+			driver->fireSpeed,
+			driver->speed,
+			driver->speedApprox,
+			(unsigned int)driver->stepFlagSet,
+			(unsigned int)driver->actionsFlagSet);
+	}
+#endif
 
 	// player of any kind
 	if (driver->instSelf->thread->modelIndex == DYNAMIC_PLAYER)

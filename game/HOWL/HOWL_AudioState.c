@@ -1,6 +1,7 @@
 #include <common.h>
 #ifdef CTR_NATIVE
 #include <platform/native_custom_music.h>
+#include <NativeHangout.h>
 #endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8002d2f4-0x8002d4cc
@@ -39,6 +40,20 @@ void Audio_SetState(u32 state)
 
 		CseqMusic_StopAll();
 
+#ifdef CTR_NATIVE
+		/* Hangout is an isolated session, not a sixth Adventure music layer.
+		 * Retail N. Sanity Beach continues to load its original level geometry,
+		 * but the native music resolver must use level_99. The previous hub
+		 * left CSEQ's bookkeeping at song ID 0; reset it so Music_Adjust
+		 * actually calls CseqMusic_Start for the newly selected package. */
+		if (NativeHangout_IsActive())
+		{
+			Music_End();
+			Platform_Log("[Hangout] separate music session -> level_99 (no Adventure SongSet)\n");
+			Music_Adjust(0, 0, NULL, 0);
+			break;
+		}
+#endif
 		level = gGT->levelID;
 
 		// Level ID on Adventure Arena
@@ -140,6 +155,11 @@ void Audio_SetState_Safe(int state)
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8002d50c-0x8002d554
 void Audio_AdvHub_SwapSong(int levelID)
 {
+#if defined(CTR_NATIVE)
+	/* Never swap Hangout's independent CSEQ onto an Adventure hub layer. */
+	if (NativeHangout_IsActive())
+		return;
+#endif
 	if ((sdata->audioState == AUDIO_ADV_HUB) &&
 	    // If you're on a map in the Adventure Arena
 	    (levelID - GEM_STONE_VALLEY < 5))

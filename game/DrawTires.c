@@ -1,8 +1,14 @@
 #include <common.h>
 #if defined(CTR_NATIVE)
 #include <platform/native_obj.h>
+#include <platform/native_gpu_model_qa.h>
 #include <platform/native_log.h>
+#include <RacerLoadout.h>
+#include <CharacterRegistry.h>
+#include <VehiclePartRegistry.h>
 #include <math.h>
+/* Same exact subpixel GTE projection used for the rigid OBJ cull path. */
+int NativeGTE_GetCurrentSubpixelFixed(int fifoIndex, s32 *x16, s32 *y16);
 #endif
 
 static const u32 sDrawTiresSolidJumpTable[8] = {
@@ -131,17 +137,10 @@ static void DrawTiresSolid_BuildWheelLocalPairs(struct DrawTiresScratch *scratch
 	scratch->wheelLocal[2].center.x = wheelX;
 	scratch->wheelLocal[1].center.x = negWheelX;
 	scratch->wheelLocal[3].center.x = negWheelX;
-	scratch->wheelLocal[0].rim.x = wheelX - 0x1000;
-	scratch->wheelLocal[2].rim.x = wheelX - 0x1000;
-	scratch->wheelLocal[1].rim.x = negWheelX + 0x1000;
-	scratch->wheelLocal[3].rim.x = negWheelX + 0x1000;
 
 	int wheelY = (inst->scale.y * 0x40) >> 12;
 	for (int wheelIndex = 0; wheelIndex < 4; wheelIndex++)
-	{
 		scratch->wheelLocal[wheelIndex].center.y = wheelY;
-		scratch->wheelLocal[wheelIndex].rim.y = 0;
-	}
 
 	int wheelFrontZ = (inst->scale.z * 0xc7) >> 12;
 	scratch->wheelLocal[0].center.z.word = wheelFrontZ;
@@ -149,13 +148,76 @@ static void DrawTiresSolid_BuildWheelLocalPairs(struct DrawTiresScratch *scratch
 
 	int wheelRearZ = (inst->scale.z * -0x60) >> 12;
 	scratch->wheelLocal[2].center.z.word = wheelRearZ;
-	scratch->wheelLocal[2].rim.z.word = wheelRearZ;
 	scratch->wheelLocal[3].center.z.word = wheelRearZ;
-	scratch->wheelLocal[3].rim.z.word = wheelRearZ;
+
+#if defined(CTR_NATIVE)
+	/* Modular karts may override wheel centres in CTR local model units.
+	   Legacy karts omit [attachments] and keep the retail centres above. */
+	{
+		int kartID =
+			RacerLoadout_GetEffectiveKart((int)driver->driverID);
+
+		if (kartID >= 0)
+		{
+			for (int wheelIndex = 0; wheelIndex < 4; wheelIndex++)
+			{
+				float mount[3];
+
+				if (!VehiclePartRegistry_GetWheelMount(
+						kartID, wheelIndex, mount))
+					continue;
+
+				scratch->wheelLocal[wheelIndex].center.x =
+					(s16)lroundf(mount[0] * inst->scale.x / 4096.0f);
+				scratch->wheelLocal[wheelIndex].center.y =
+					(s16)lroundf(mount[1] * inst->scale.y / 4096.0f);
+				scratch->wheelLocal[wheelIndex].center.z.word =
+					(s16)lroundf(mount[2] * inst->scale.z / 4096.0f);
+			}
+		}
+	}
+#endif
+
+	/* Build the rim reference points from the final centres. With no custom
+	   attachments these are the same vectors used by the retail path. */
+	for (int wheelIndex = 0; wheelIndex < 4; wheelIndex++)
+	{
+		int sideOffset =
+			(wheelIndex == 0 || wheelIndex == 2) ?
+			-0x1000 : 0x1000;
+
+		scratch->wheelLocal[wheelIndex].rim.x =
+			scratch->wheelLocal[wheelIndex].center.x + sideOffset;
+		scratch->wheelLocal[wheelIndex].rim.y =
+			scratch->wheelLocal[wheelIndex].center.y - wheelY;
+		scratch->wheelLocal[wheelIndex].rim.z.word =
+			scratch->wheelLocal[wheelIndex].center.z.word;
+	}
 
 	scratch->otRangeNormal = idpp->otRangeNormal;
 	scratch->otRangeSecondary = idpp->otRangeSecondary;
-	scratch->wheelSize.word = (s16)driver->wheelSize;
+
+	/*
+	 * Old combined OBJ racers can legitimately suppress CTR's wheels with
+	 * wheelSize=0. Modular bodies cannot: their wheels are an independent kart
+	 * part. Keep a local retail-radius fallback so a stale spawn/menu value does
+	 * not make a selected 3D wheel pack vanish.
+	 */
+	{
+		int resolvedWheelSize = (int)driver->wheelSize;
+#if defined(CTR_NATIVE)
+		const int driverID = (int)driver->driverID;
+		if (resolvedWheelSize <= 0 &&
+			driverID >= 0 &&
+			driverID < RACER_LOADOUT_MAX_DRIVERS &&
+			CharacterRegistry_IsModularBody(data.characterIDs[driverID]) &&
+			NativeObj_ShouldReplaceRetailWheels(driver))
+		{
+			resolvedWheelSize = 0xccc;
+		}
+#endif
+		scratch->wheelSize.word = (s16)resolvedWheelSize;
+	}
 
 	struct TrigPair steering = DrawTiresSolid_TrigAngleSinCos(driver->wheelRotation << 2);
 	scratch->wheelLocal[0].rim.x = scratch->wheelLocal[0].center.x - steering.cos;
@@ -238,7 +300,7 @@ static void DrawTiresSolid_BuildWheelAxes(struct DrawTiresScratch *scratch)
 
 		gte_lcv1_b();
 		wheelLocal->center.z.word = centerZ;
-		int invLen = -(0x10000 / len);
+		int invLen = (len > 0) ? -(0x10000 / len) : 0;
 
 		int rimX = MFC2_S(9);
 		int rimY = MFC2_S(10);
@@ -267,7 +329,7 @@ static void DrawTiresSolid_BuildWheelAxes(struct DrawTiresScratch *scratch)
 
 		gte_sqr0_b();
 		len = Unknown_8006ef98(MFC2_S(25) + MFC2_S(26) + MFC2_S(27));
-		invLen = 0x10000 / len;
+		invLen = (len > 0) ? (0x10000 / len) : 0;
 
 		axisX = (axisX * invLen) >> 4;
 		MTC2(axisX, 9);
@@ -289,7 +351,7 @@ static void DrawTiresSolid_BuildWheelAxes(struct DrawTiresScratch *scratch)
 
 		gte_sqr0_b();
 		len = Unknown_8006ef98(MFC2_S(25) + MFC2_S(26) + MFC2_S(27));
-		invLen = (wheelSize * -(0x10000 / len)) >> 12;
+		invLen = (len > 0) ? ((wheelSize * -(0x10000 / len)) >> 12) : 0;
 
 		axisB->x = (axisX * invLen) >> 10;
 		axisB->y = (axisY * invLen) >> 10;
@@ -565,11 +627,43 @@ static int DrawTiresSolid_ProjectWheelQuads(struct DrawTiresScratch *scratch, st
 }
 
 #if defined(CTR_NATIVE)
-static u8 DrawTires3D_ClampU8(float value)
+/* Emit native wheel triangles with their exact projected XY/depth carried
+ * inside the B3 packet. Avoid six GTE metadata hash accesses per triangle
+ * (three lookups + three stores). Keep the same 1/256 pixel quantization as
+ * RenderBucket_EncodeProjectionAxis for fully consistent OBJ edges. */
+static void DrawTires3D_EncodeProjectionAxis(s32 value16, s16 *baseOut, s8 *fracOut)
 {
-	if (value <= 0.0f) return 0;
-	if (value >= 255.0f) return 255;
-	return (u8)value;
+	int q8;
+	int base;
+	int frac;
+
+	if (value16 >= 0)
+		q8 = (value16 + 0x80) >> 8;
+	else
+		q8 = -(((-value16) + 0x80) >> 8);
+
+	if (q8 >= 0)
+		base = (q8 + 0x80) >> 8;
+	else
+		base = -(((-q8) + 0x80) >> 8);
+
+	frac = q8 - (base * 256);
+	if (frac > 127)
+	{
+		base++;
+		frac -= 256;
+	}
+	else if (frac < -128)
+	{
+		base--;
+		frac += 256;
+	}
+
+	if (base < -32768) { base = -32768; frac = 0; }
+	else if (base > 32767) { base = 32767; frac = 0; }
+
+	*baseOut = (s16)base;
+	*fracOut = (s8)frac;
 }
 
 static void DrawTires3D_LinkRaw(u32 *ot, void *prim, u32 tag)
@@ -587,15 +681,16 @@ static int DrawTires3D_ProjectVertex(const struct NativeObjMesh *mesh,
                                      float spinCos,
                                      float steerSin,
                                      float steerCos,
+                                     float shapeScale,
                                      s16 *outX,
                                      s16 *outY,
                                      s16 *outZ)
 {
 	const struct NativeObjWheel *wheel = &mesh->wheels[wheelIndex];
 	const struct DrawTiresWheelLocal *local = &scratch->wheelLocal[wheelIndex];
-	const SVec3Slot *axisA = &scratch->tireAxisA[wheelIndex];
 
-	if ((inst == NULL) || (wheel->radius <= 0.0001f))
+	if ((inst == NULL) || (wheel->radius <= 0.0001f) ||
+		(shapeScale <= 0.0f))
 		return 0;
 
 	/* Reconstruct the authored wheel vertex and keep CTR's already-correct
@@ -605,9 +700,10 @@ static int DrawTires3D_ProjectVertex(const struct NativeObjMesh *mesh,
 
 	   Spin and steering happen in kart-local XYZ, then the offset is rotated by
 	   the actual kart matrix. This preserves real tire width/depth in 3D. */
-	float authoredX = vertex->p[0] * mesh->extent[0] / 1016.0f;
-	float authoredY = vertex->p[1] * mesh->extent[1] / 1016.0f;
-	float authoredZ = vertex->p[2] * mesh->extent[2] / 1016.0f;
+	/* extent/1016 is immutable per mesh and already cached at load time. */
+	float authoredX = vertex->p[0] * mesh->authPerNorm[0];
+	float authoredY = vertex->p[1] * mesh->authPerNorm[1];
+	float authoredZ = vertex->p[2] * mesh->authPerNorm[2];
 	float dx = authoredX - wheel->center[0];
 	float dy = authoredY - wheel->center[1];
 	float dz = authoredZ - wheel->center[2];
@@ -628,16 +724,8 @@ static int DrawTires3D_ProjectVertex(const struct NativeObjMesh *mesh,
 		localZ = steeredZ;
 	}
 
-	/* Reuse the radius CTR already calculated for this kart so placement/size
-	   stay identical to the successful v2.0.7 test. Scale all three authored
-	   axes uniformly, preserving the imported tire's real width. */
-	float targetRadius = sqrtf((float)axisA->x * axisA->x +
-	                           (float)axisA->y * axisA->y +
-	                           (float)axisA->z * axisA->z);
-	if (targetRadius <= 0.001f)
-		return 0;
-
-	float shapeScale = targetRadius / wheel->radius;
+	/* targetRadius/wheel->radius is constant for every vertex of the same
+	   wheel during this draw. The caller computes it once per wheel. */
 	localX *= shapeScale;
 	localY *= shapeScale;
 	localZ *= shapeScale;
@@ -658,9 +746,9 @@ static int DrawTires3D_ProjectVertex(const struct NativeObjMesh *mesh,
 	float y = local->center.y + worldY;
 	float z = local->center.z.lo + worldZ;
 
-	x = fmaxf(-32767.0f, fminf(32767.0f, x));
-	y = fmaxf(-32767.0f, fminf(32767.0f, y));
-	z = fmaxf(-32767.0f, fminf(32767.0f, z));
+	if (x < -32767.0f) x = -32767.0f; else if (x > 32767.0f) x = 32767.0f;
+	if (y < -32767.0f) y = -32767.0f; else if (y > 32767.0f) y = 32767.0f;
+	if (z < -32767.0f) z = -32767.0f; else if (z > 32767.0f) z = 32767.0f;
 	*outX = (s16)x;
 	*outY = (s16)y;
 	*outZ = (s16)z;
@@ -674,55 +762,221 @@ static int DrawTires3D_RenderOverride(struct DrawTiresScratch *scratch,
                                       struct PrimMem *primMem,
                                       int *primCount)
 {
-	const struct NativeObjMesh *mesh = NativeObj_GetRetailWheelOverrideMesh();
-	float angles[4] = {0};
-	const float steerAngle = NativeObj_GetWheelSteerAngle(inst);
-	const float steerSin = sinf(steerAngle);
-	const float steerCos = cosf(steerAngle);
+	const struct NativeObjMesh *mesh = NativeObj_GetWheelMeshForDriver(driver);
+	float angles[4] = {0, 0, 0, 0};
+	float spinSin[4] = {0, 0, 0, 0};
+	float spinCos[4] = {1, 1, 1, 1};
+	float shapeScale[4] = {0, 0, 0, 0};
+	float steerAngle = 0.0f;
+	float steerSin = 0.0f;
+	float steerCos = 1.0f;
 	int emitted = 0;
 	static int s_loggedSuccessful3DDraw;
 
 	if ((mesh == NULL) || (mesh->triangleCount <= 0))
 		return 0;
+	NativeGpuModel_StageMesh(mesh);
 
-	NativeObj_GetWheelAngles(inst, angles);
+	/* One wheel-state lookup and one trig/radius setup per wheel. The old path
+	   repeated these operations for every triangle/vertex. */
+	NativeObj_GetWheelState(inst, angles, &steerAngle);
+	if (steerAngle != 0.0f)
+	{
+		steerSin = sinf(steerAngle);
+		steerCos = cosf(steerAngle);
+	}
+
+	for (int w = 0; w < 4; ++w)
+	{
+		const struct NativeObjWheel *wheel = &mesh->wheels[w];
+		const SVec3Slot *axisA = &scratch->tireAxisA[w];
+
+		if ((mesh->wheelMask & (1u << w)) == 0 ||
+			wheel->radius <= 0.0001f)
+			continue;
+
+		if (angles[w] != 0.0f)
+		{
+			spinSin[w] = sinf(angles[w]);
+			spinCos[w] = cosf(angles[w]);
+		}
+
+		{
+			float targetRadius =
+				sqrtf((float)axisA->x * axisA->x +
+				      (float)axisA->y * axisA->y +
+				      (float)axisA->z * axisA->z);
+
+			if (targetRadius > 0.001f)
+				shapeScale[w] = targetRadius / wheel->radius;
+		}
+	}
+
+	/* Reuse the mesh projection cache for wheel vertices too. Each wheel
+	   gets its own generation because the same authored position would project
+	   differently after spin/steering. This preserves exact geometry while
+	   avoiding repeated transform+RTPS work for shared OBJ vertices. */
+	struct NativeObjMesh *projectionMesh = (struct NativeObjMesh *)mesh;
+	unsigned int projectionBase = 0;
+	if ((projectionMesh->projectionCache != NULL) &&
+		(projectionMesh->positionCount > 0))
+	{
+		if (projectionMesh->projectionGeneration > 0xfffffff8u)
+		{
+			memset(projectionMesh->projectionCache, 0,
+			       (size_t)projectionMesh->positionCount *
+			       sizeof(*projectionMesh->projectionCache));
+			projectionMesh->projectionGeneration = 0;
+		}
+		projectionBase = projectionMesh->projectionGeneration + 4u;
+		projectionMesh->projectionGeneration = projectionBase;
+	}
+
+	/* Wheel OBJ winding follows the same camera/mirror rule as custom bodies. */
+	const MATRIX *mvp = &idpp->mvp;
+	const s64 determinant =
+		(s64)mvp->m[0][0] * ((s64)mvp->m[1][1] * mvp->m[2][2] - (s64)mvp->m[1][2] * mvp->m[2][1]) -
+		(s64)mvp->m[0][1] * ((s64)mvp->m[1][0] * mvp->m[2][2] - (s64)mvp->m[1][2] * mvp->m[2][0]) +
+		(s64)mvp->m[0][2] * ((s64)mvp->m[1][0] * mvp->m[2][1] - (s64)mvp->m[1][1] * mvp->m[2][0]);
 
 	for (int i = 0; i < mesh->triangleCount; ++i)
 	{
 		const struct NativeObjTriangle *tri = &mesh->triangles[i];
-		if ((tri->wheel < 0) || (tri->wheel >= 4))
+		const int wheelIndex = tri->wheel;
+
+		if ((wheelIndex < 0) || (wheelIndex >= 4) ||
+			!tri->renderTextured || (tri->renderTexture == 0) ||
+			(shapeScale[wheelIndex] <= 0.0f))
 			continue;
 
-		const struct NativeObjMaterial *mat = &mesh->materials[tri->material];
-		if (mat->texture == 0)
-			continue;
-
-		float spinSin = sinf(angles[tri->wheel]);
-		float spinCos = cosf(angles[tri->wheel]);
-		s16 xyz[3][3];
+		u32 projectedSxy[3];
+		u16 projectedDepth[3];
+		s32 projectedX16[3], projectedY16[3];
+		struct NativeObjProjectedVertex *projectedCacheEntry[3] = {NULL, NULL, NULL};
 		int valid = 1;
+		int usedProjectionCache = projectionBase != 0;
 
-		for (int v = 0; v < 3; ++v)
+		if (usedProjectionCache)
 		{
-			valid &= DrawTires3D_ProjectVertex(mesh, scratch, inst, tri->wheel, &tri->v[v],
-			                                  spinSin, spinCos, steerSin, steerCos,
-			                                  &xyz[v][0], &xyz[v][1], &xyz[v][2]);
+			const unsigned int expectedGeneration =
+				projectionBase + (unsigned int)wheelIndex;
+
+			for (int v = 0; v < 3; ++v)
+			{
+				const int objIndex = tri->v[v].projectionIndex;
+				if ((objIndex < 0) || (objIndex >= projectionMesh->positionCount))
+				{
+					usedProjectionCache = 0;
+					break;
+				}
+
+				struct NativeObjProjectedVertex *cached =
+					&projectionMesh->projectionCache[objIndex];
+
+				if (cached->generation != expectedGeneration)
+				{
+					s16 x, y, z;
+					if (!DrawTires3D_ProjectVertex(
+							mesh, scratch, inst, wheelIndex, &tri->v[v],
+							spinSin[wheelIndex], spinCos[wheelIndex],
+							steerSin, steerCos, shapeScale[wheelIndex],
+							&x, &y, &z))
+					{
+						valid = 0;
+						break;
+					}
+
+					MTC2(CTR_PackS16Pair(x, y), 0);
+					MTC2((u16)z, 1);
+					gte_rtps_b();
+					cached->sxy = MFC2(14);
+					cached->depth = (u16)MFC2(19);
+					if (!NativeGTE_GetCurrentSubpixelFixed(
+							2, &cached->x16, &cached->y16))
+					{
+						cached->x16 = (s32)(s16)cached->sxy * 65536;
+						cached->y16 = (s32)(s16)(cached->sxy >> 16) * 65536;
+					}
+					/* Cache B3-ready screen coordinates alongside the GTE
+					 * result. Exact native packets no longer need to register
+					 * every wheel vertex in the legacy GTE metadata map. */
+					DrawTires3D_EncodeProjectionAxis(
+						cached->x16, &cached->packetX, &cached->packetXFrac);
+					DrawTires3D_EncodeProjectionAxis(
+						cached->y16, &cached->packetY, &cached->packetYFrac);
+					cached->generation = expectedGeneration;
+				}
+
+				projectedCacheEntry[v] = cached;
+				projectedSxy[v] = cached->sxy;
+				projectedDepth[v] = cached->depth;
+				projectedX16[v] = cached->x16;
+				projectedY16[v] = cached->y16;
+			}
 		}
+
 		if (!valid)
 			continue;
 
-		for (int v = 0; v < 3; ++v)
+		if (!usedProjectionCache)
 		{
-			MTC2(CTR_PackS16Pair(xyz[v][0], xyz[v][1]), v * 2);
-			MTC2((u16)xyz[v][2], v * 2 + 1);
-		}
-		gte_rtpt_b();
+			s16 xyz[3][3];
 
-		int sz0 = (int)MFC2(17);
-		int sz1 = (int)MFC2(18);
-		int sz2 = (int)MFC2(19);
+			for (int v = 0; v < 3; ++v)
+			{
+				valid &= DrawTires3D_ProjectVertex(
+					mesh, scratch, inst, wheelIndex, &tri->v[v],
+					spinSin[wheelIndex], spinCos[wheelIndex],
+					steerSin, steerCos, shapeScale[wheelIndex],
+					&xyz[v][0], &xyz[v][1], &xyz[v][2]);
+			}
+			if (!valid)
+				continue;
+
+			for (int v = 0; v < 3; ++v)
+			{
+				MTC2(CTR_PackS16Pair(xyz[v][0], xyz[v][1]), v * 2);
+				MTC2((u16)xyz[v][2], v * 2 + 1);
+			}
+			gte_rtpt_b();
+			projectedDepth[0] = (u16)MFC2(17);
+			projectedDepth[1] = (u16)MFC2(18);
+			projectedDepth[2] = (u16)MFC2(19);
+			CTR_GteStoreSXY3(
+				&projectedSxy[0], &projectedSxy[1], &projectedSxy[2]);
+			for (int v = 0; v < 3; ++v)
+			{
+				if (!NativeGTE_GetCurrentSubpixelFixed(
+						v, &projectedX16[v], &projectedY16[v]))
+				{
+					projectedX16[v] = (s32)(s16)projectedSxy[v] * 65536;
+					projectedY16[v] = (s32)(s16)(projectedSxy[v] >> 16) * 65536;
+				}
+			}
+		}
+
+		int sz0 = (int)projectedDepth[0];
+		int sz1 = (int)projectedDepth[1];
+		int sz2 = (int)projectedDepth[2];
 		if ((sz0 < 16) || (sz1 < 16) || (sz2 < 16))
 			continue;
+
+		/* Cull from exact fractional screen coordinates, not PS1 integer
+		 * pixels. Detailed 3D wheels have many genuine subpixel triangles:
+		 * rounding all three corners to whole pixels discarded visible faces
+		 * and made gaps/black patches appear as the kart rotated. Matching
+		 * the rigid OBJ cull also avoids running emulated GTE NCLIP per face. */
+		{
+			const float ax = (float)projectedX16[1] - (float)projectedX16[0];
+			const float ay = (float)projectedY16[1] - (float)projectedY16[0];
+			const float bx = (float)projectedX16[2] - (float)projectedX16[0];
+			const float by = (float)projectedY16[2] - (float)projectedY16[0];
+			const float area = ax * by - ay * bx;
+			const int facing = (area > 0.0f) - (area < 0.0f);
+			if (facing == 0 ||
+				(determinant != 0 && ((facing > 0) == (determinant > 0))))
+				continue;
+		}
 
 		int depth = ((sz0 + sz1 + sz2) / 3) / 32;
 		if (depth < idpp->depthOffset[0]) depth = idpp->depthOffset[0];
@@ -730,41 +984,79 @@ static int DrawTires3D_RenderOverride(struct DrawTiresScratch *scratch,
 		if (idpp->otRangeNormal == 0)
 			continue;
 
-		size_t bytes = sizeof(DR_PSYX_TEX) + sizeof(POLY_GT3) + sizeof(DR_PSYX_TEX);
+		/* Native wheel OBJ triangles use the same self-contained B3 packet as
+		   custom racer/kart geometry. This replaces the old bind + GT3 + reset
+		   triplet with one OT node, cutting parser/link traffic by roughly 3x
+		   while keeping the external texture scoped to this polygon. */
+		const size_t bytes = sizeof(DR_PSYX_TEX_GT3);
 		if ((char *)primMem->cursor + bytes >= (char *)primMem->guardEnd)
 			break;
 
-		DR_PSYX_TEX *bind = primMem->cursor;
-		POLY_GT3 *p = (POLY_GT3 *)(bind + 1);
-		DR_PSYX_TEX *reset = (DR_PSYX_TEX *)(p + 1);
-		memset(bind, 0, bytes);
-
-		bind->code[0] = 0xb1000000 | (mat->texture & 0xffffff);
-		bind->code[1] = 256 | (256 << 16);
-		reset->code[0] = 0xb1000000;
-		reset->code[1] = 256 | (256 << 16);
+		DR_PSYX_TEX_GT3 *packet = (DR_PSYX_TEX_GT3 *)primMem->cursor;
+		POLY_GT3 *p = &packet->poly;
+		/* The native B3 decoder only reads the fields initialized below.
+		 * A full packet memset for every wheel face is unnecessary. */
+		p->tag = 0;
+		p->clut = 0;
+		p->tpage = 0;
+		p->p1 = 0;
+		p->p2 = 0;
+		p->pad2 = 0;
+		packet->code[0] = 0xb3000000 | (tri->renderTexture & 0xffffff);
+		packet->code[1] = 256 | (256 << 16);
+		packet->nativeFlags = DR_PSYX_TEX_GT3_FLAG_HIRES_UV;
 
 		setPolyGT3(p);
-		CTR_GteStoreSXY3(&p->x0, &p->x1, &p->x2);
-
-		u8 *colors[3] = {&p->r0, &p->r1, &p->r2};
-		u8 *uv[3] = {&p->u0, &p->u1, &p->u2};
-		for (int v = 0; v < 3; ++v)
+		CtrGpu_WritePackedXY(&p->x0, projectedSxy[0]);
+		CtrGpu_WritePackedXY(&p->x1, projectedSxy[1]);
+		CtrGpu_WritePackedXY(&p->x2, projectedSxy[2]);
+		if (usedProjectionCache)
 		{
-			for (int c = 0; c < 3; ++c)
-				colors[v][c] = DrawTires3D_ClampU8(tri->v[v].color[c] * mat->color[c] * 128.0f);
+			/* Use the already-cached 16.16 screen coordinates and GTE
+			 * depth. The native decoder can consume them directly, without
+			 * touching the PS1 global SXY metadata hash tables. */
+			s16 *xy[3][2] = {
+				{&p->x0, &p->y0},
+				{&p->x1, &p->y1},
+				{&p->x2, &p->y2},
+			};
+			for (int v = 0; v < 3; ++v)
+			{
+				const struct NativeObjProjectedVertex *cached =
+					projectedCacheEntry[v];
+				*xy[v][0] = cached->packetX;
+				*xy[v][1] = cached->packetY;
+				packet->xyFrac[v][0] = cached->packetXFrac;
+				packet->xyFrac[v][1] = cached->packetYFrac;
+				packet->depth[v] = cached->depth;
+			}
+			packet->nativeFlags |= DR_PSYX_TEX_GT3_FLAG_EXACT_METADATA;
+		}
+		else
+		{
+			NativeGTE_CopySXYStore(&p->x0, &projectedSxy[0], projectedSxy[0]);
+			NativeGTE_CopySXYStore(&p->x1, &projectedSxy[1], projectedSxy[1]);
+			NativeGTE_CopySXYStore(&p->x2, &projectedSxy[2], projectedSxy[2]);
+		}
 
-			float u = fminf(1.0f, fmaxf(0.0f, tri->v[v].uv[0]));
-			float vv = 1.0f - fminf(1.0f, fmaxf(0.0f, tri->v[v].uv[1]));
-			uv[v][0] = DrawTires3D_ClampU8(u * 255.0f);
-			uv[v][1] = DrawTires3D_ClampU8(vv * 255.0f);
+		{
+			u8 *colors[3] = {&p->r0, &p->r1, &p->r2};
+			u8 *uv[3] = {&p->u0, &p->u1, &p->u2};
+
+			for (int v = 0; v < 3; ++v)
+			{
+				memcpy(colors[v], tri->v[v].renderColor, 3);
+				memcpy(uv[v], tri->v[v].renderUV, 2);
+				packet->uvFrac[v][0] = (int8_t)tri->v[v].renderUVFrac[0];
+				packet->uvFrac[v][1] = (int8_t)tri->v[v].renderUVFrac[1];
+			}
 		}
 
 		u32 *ot = (u32 *)idpp->otRangeNormal + depth;
-		DrawTires3D_LinkRaw(ot, reset, 0x02000000);
-		DrawTires3D_LinkRaw(ot, p, 0x09000000);
-		DrawTires3D_LinkRaw(ot, bind, 0x02000000);
-		primMem->cursor = (char *)bind + bytes;
+		DrawTires3D_LinkRaw(
+			ot, packet,
+			((u32)(sizeof(*packet) / sizeof(u32) - 1)) << 24);
+		primMem->cursor = (char *)packet + bytes;
 		(*primCount)++;
 		emitted++;
 	}
@@ -772,7 +1064,7 @@ static int DrawTires3D_RenderOverride(struct DrawTiresScratch *scratch,
 	if ((emitted > 0) && !s_loggedSuccessful3DDraw)
 	{
 		s_loggedSuccessful3DDraw = 1;
-		Platform_Log("[CTR Native] 3D wheels: emitted %d/%d triangles for retail kart\n",
+		Platform_Log("[CTR Native] 3D wheels: emitted %d/%d triangles for kart\n",
 		             emitted, mesh->triangleCount);
 	}
 
@@ -833,7 +1125,7 @@ static int DrawTiresSolid_StagePlayer(struct DrawTiresScratch *scratch, struct D
 		/* Retail Oxide intentionally has no tires. For normal retail karts,
 		   suppress the sprite pass only after at least one 3D triangle really
 		   reached the OT; otherwise preserve the original 2D fallback. */
-		if (driver->wheelSize <= 0)
+		if (scratch->wheelSize.word <= 0)
 			return 1;
 
 		if (DrawTires3D_RenderOverride(scratch, driver, inst, idpp, primMem, primCount))
@@ -974,9 +1266,74 @@ static void DrawTiresReflection_BuildWheelLocalPairs(struct DrawTiresScratch *sc
 	scratch->wheelLocal[3].center.z.word = wheelRearZ;
 	scratch->wheelLocal[3].rim.z.word = wheelRearZ;
 
+#if defined(CTR_NATIVE)
+	/* Keep CTR's reflection tire pass attached to the selected kart too.
+	   Custom 3D wheel sets skip this reflection-card pass entirely, but
+	   ORIGINAL/retail wheels still need to inherit each custom kart's mounts. */
+	{
+		int kartID =
+			RacerLoadout_GetEffectiveKart((int)driver->driverID);
+
+		if (kartID >= 0)
+		{
+			for (int wheelIndex = 0; wheelIndex < 4; wheelIndex++)
+			{
+				float mount[3];
+
+				if (!VehiclePartRegistry_GetWheelMount(
+						kartID, wheelIndex, mount))
+					continue;
+
+				scratch->wheelLocal[wheelIndex].center.x =
+					(s16)lroundf(mount[0] * inst->scale.x / 4096.0f);
+				scratch->wheelLocal[wheelIndex].center.y =
+					(s16)lroundf(mount[1] * inst->scale.y / 4096.0f);
+				scratch->wheelLocal[wheelIndex].center.z.word =
+					(s16)lroundf(mount[2] * inst->scale.z / 4096.0f);
+			}
+		}
+	}
+#endif
+
+	/* Rebuild reflection rim references from the final wheel centres. */
+	for (int wheelIndex = 0; wheelIndex < 4; wheelIndex++)
+	{
+		int sideOffset =
+			(wheelIndex == 0 || wheelIndex == 2) ?
+			-0x1000 : 0x1000;
+
+		scratch->wheelLocal[wheelIndex].rim.x =
+			scratch->wheelLocal[wheelIndex].center.x + sideOffset;
+		scratch->wheelLocal[wheelIndex].rim.y =
+			scratch->wheelLocal[wheelIndex].center.y - wheelY;
+		scratch->wheelLocal[wheelIndex].rim.z.word =
+			scratch->wheelLocal[wheelIndex].center.z.word;
+	}
+
 	scratch->otRangeNormal = idpp->otRangeNormal;
 	scratch->otRangeSecondary = idpp->otRangeSecondary;
-	scratch->wheelSize.word = (s16)driver->wheelSize;
+
+	/*
+	 * Old combined OBJ racers can legitimately suppress CTR's wheels with
+	 * wheelSize=0. Modular bodies cannot: their wheels are an independent kart
+	 * part. Keep a local retail-radius fallback so a stale spawn/menu value does
+	 * not make a selected 3D wheel pack vanish.
+	 */
+	{
+		int resolvedWheelSize = (int)driver->wheelSize;
+#if defined(CTR_NATIVE)
+		const int driverID = (int)driver->driverID;
+		if (resolvedWheelSize <= 0 &&
+			driverID >= 0 &&
+			driverID < RACER_LOADOUT_MAX_DRIVERS &&
+			CharacterRegistry_IsModularBody(data.characterIDs[driverID]) &&
+			NativeObj_ShouldReplaceRetailWheels(driver))
+		{
+			resolvedWheelSize = 0xccc;
+		}
+#endif
+		scratch->wheelSize.word = (s16)resolvedWheelSize;
+	}
 
 	struct TrigPair steering = DrawTiresSolid_TrigAngleSinCos(driver->wheelRotation << 2);
 	scratch->wheelLocal[0].rim.x = scratch->wheelLocal[0].center.x - steering.cos;
@@ -1061,7 +1418,7 @@ static void DrawTiresReflection_BuildWheelAxes(struct DrawTiresScratch *scratch)
 
 		gte_lcv1_b();
 		wheelLocal->center.z.word = centerZ;
-		int invLen = -(0x10000 / len);
+		int invLen = (len > 0) ? -(0x10000 / len) : 0;
 
 		int rimX = MFC2_S(9);
 		int rimY = -MFC2_S(10);
@@ -1090,7 +1447,7 @@ static void DrawTiresReflection_BuildWheelAxes(struct DrawTiresScratch *scratch)
 
 		gte_sqr0_b();
 		len = Unknown_8006ef98(MFC2_S(25) + MFC2_S(26) + MFC2_S(27));
-		invLen = 0x10000 / len;
+		invLen = (len > 0) ? (0x10000 / len) : 0;
 
 		axisX = (axisX * invLen) >> 4;
 		MTC2(axisX, 9);
@@ -1112,7 +1469,7 @@ static void DrawTiresReflection_BuildWheelAxes(struct DrawTiresScratch *scratch)
 
 		gte_sqr0_b();
 		len = Unknown_8006ef98(MFC2_S(25) + MFC2_S(26) + MFC2_S(27));
-		invLen = (wheelSize * -(0x10000 / len)) >> 12;
+		invLen = (len > 0) ? ((wheelSize * -(0x10000 / len)) >> 12) : 0;
 
 		axisB->x = (axisX * invLen) >> 10;
 		axisB->y = (axisY * invLen) >> 10;

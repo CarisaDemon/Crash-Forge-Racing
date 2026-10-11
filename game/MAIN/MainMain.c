@@ -1,4 +1,10 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+/* Keep sub-millisecond time from Unlimited loading frames instead of
+ * rounding every host frame up to one millisecond. */
+static double s_nativeLoadingTimeCarryMS = 0.0;
+#endif
 
 #if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
 #include <platform/native_perf.h>
@@ -22,8 +28,37 @@ static struct NativePerfFrameInfo MainPerf_FrameInfo(struct GameTracker *gGT)
 	info.vsyncTillFlip = sdata->vsyncTillFlip;
 	info.vSync_between_drawSync = gGT->vSync_between_drawSync;
 	info.frameTimer_VsyncCallback = gGT->frameTimer_VsyncCallback;
+	info.targetFPS = Platform_GetHighRefreshMode() ? Platform_GetHighRefreshTargetFPS() : 30;
+	info.fullscreen = Platform_GetFullscreenMode();
 
 	return info;
+}
+
+static int MainPerf_StressTestAllBotsFinished(struct GameTracker *gGT)
+{
+	int botCount = 0;
+
+	if ((gGT == NULL) ||
+	    (sdata->Loading.stage != LOAD_IDLE) ||
+	    ((gGT->gameMode1 & (START_OF_RACE | LOADING | MAIN_MENU)) != 0))
+	{
+		return 0;
+	}
+
+	for (int driverID = 0; driverID < 8; ++driverID)
+	{
+		struct Driver *driver = gGT->drivers[driverID];
+
+		if ((driver == NULL) || ((driver->actionsFlagSet & ACTION_BOT) == 0))
+			continue;
+
+		botCount++;
+
+		if ((driver->actionsFlagSet & ACTION_RACE_FINISHED) == 0)
+			return 0;
+	}
+
+	return botCount == 8;
 }
 
 static struct NativeReplaySchedulerFrameInfo MainReplayScheduler_FrameInfo(struct GameTracker *gGT)
@@ -91,6 +126,53 @@ u32 main(void)
 #endif
 
 		LOAD_NextQueuedFile();
+#if defined(CTR_NATIVE)
+		if (NativeHangout_ConsumeExitRequest())
+		{
+			NativeHangout_SetActive(0);
+			gGT->numPlyrNextGame = 1;
+			gGT->boolDemoMode = 0;
+			sdata->mainMenuState = MAIN_MENU_TITLE;
+			MainRaceTrack_RequestLoad(MAIN_MENU_LEVEL);
+			Platform_Log("[Hangout] clean exit requested -> main menu\n");
+		}
+		else if (NativeHangout_ConsumeLaunchRequest())
+		{
+			/* A hidden shortcut can launch Hangout while the title menu is still
+			 * alive. Kill the title scene and menu stack BEFORE clearing
+			 * MAIN_MENU, otherwise MM_Title_KillThread() refuses to destroy the
+			 * title objects and the old menu can survive over the hub. */
+			if ((gGT->gameMode1 & MAIN_MENU) != 0)
+			{
+				if (sdata->ptrActiveMenu != NULL)
+					RECTMENU_Hide(sdata->ptrActiveMenu);
+
+				MM_Title_KillThread();
+			}
+
+			sdata->ptrActiveMenu = NULL;
+			sdata->ptrDesiredMenu = NULL;
+			sdata->activeSubMenu = NULL;
+			RECTMENU_ClearInput();
+
+			/* Snapshot Adventure progress before changing the temporary hub state.
+			 * Hangout restores it on exit so the social sandbox cannot modify a
+			 * real Adventure profile or memcard progression. */
+			NativeHangout_SetActive(1);
+
+			gGT->gameMode1 &= ~(BATTLE_MODE | TIME_TRIAL | ARCADE_MODE |
+			                   ADVENTURE_CUP | RELIC_RACE | CRYSTAL_CHALLENGE |
+			                   END_OF_RACE | GAME_CUTSCENE | MAIN_MENU);
+			gGT->gameMode1 |= ADVENTURE_MODE;
+			gGT->gameMode2 &= ~(CUP_ANY_KIND);
+			gGT->numPlyrNextGame = 1;
+			gGT->podiumRewardID = NOFUNC;
+			gGT->boolDemoMode = 0;
+			sdata->advProgress.HubLevYouSavedOn = N_SANITY_BEACH;
+			MainRaceTrack_RequestLoad(N_SANITY_BEACH);
+			Platform_Log("[Hangout] loading hidden N. Sanity Beach social session\n");
+		}
+#endif
 		// NOTE(aalhendi): ASM-verified NTSC-U 926 0x8003c5d0-0x8003c5dc for per-frame XA pause handling.
 		CDSYS_XAPauseAtEnd();
 
@@ -142,6 +224,10 @@ u32 main(void)
 			// 10 = traffic lights
 			// 11 = racing
 
+#if defined(CTR_PRACTICE_FASTSTART)
+			/* Practice fast-start: skip race intro XA and traffic-light audio state. */
+			Audio_SetState_Safe(AUDIO_RACING);
+#else
 			// Arcade-Style track starts with intro cutscene
 			uVar12 = 9;
 
@@ -156,6 +242,7 @@ u32 main(void)
 			{
 				Audio_SetState_Safe(uVar12);
 			}
+#endif
 			sdata->mainGameState = 3;
 			gGT->clockEffectEnabled &= 0xfffe;
 			break;
@@ -175,6 +262,10 @@ u32 main(void)
 		// Main Gameplay Update
 		// Makes up all normal interaction with the game
 		case 3:
+#if defined(CTR_NATIVE)
+			if (sdata->Loading.stage == LOAD_IDLE)
+				s_nativeLoadingTimeCarryMS = 0.0;
+#endif
 
 			// if loading, or gameplay interrupted
 			if (sdata->Loading.stage != LOAD_IDLE)
@@ -186,9 +277,39 @@ u32 main(void)
 
 				iVar8 = sdata->Loading.stage;
 
-				// elapsed milliseconds per frame, locked 32 here
-				// impacts speed of flag wave during "loading...", but does not impact speed of flying text
-				gGT->elapsedTimeMS = 32;
+				// Loading used to force a 32 ms content step every host frame.
+				// At 200 Hz that made the checkered flag animate ~6.4x too fast.
+#if defined(CTR_NATIVE)
+				if (Platform_GetHighRefreshMode())
+				{
+					int loadingFPS = Platform_GetHighRefreshTargetFPS();
+					int loadingElapsed;
+					if (loadingFPS > 0)
+					{
+						s_nativeLoadingTimeCarryMS = 0.0;
+						loadingElapsed = (1000 + loadingFPS / 2) / loadingFPS;
+					}
+					else
+					{
+						/* At 2000+ FPS a frame lasts less than 1 ms. Rounding
+						 * every frame up to 1 ms speeds up the loading animation.
+						 * Carry the fractional milliseconds into later frames. */
+						double hostMs = Platform_GetLastFrameTimeMS();
+						double totalMs;
+						if (hostMs < 0.0) hostMs = 0.0;
+						if (hostMs > 64.0) hostMs = 64.0;
+						totalMs = hostMs + s_nativeLoadingTimeCarryMS;
+						loadingElapsed = (int)totalMs;
+						s_nativeLoadingTimeCarryMS = totalMs - (double)loadingElapsed;
+					}
+					/* Zero is valid: no whole millisecond passed this host frame. */
+					gGT->elapsedTimeMS = loadingElapsed;
+				}
+				else
+#endif
+				{
+					gGT->elapsedTimeMS = 32;
+				}
 
 				// if loading VLC
 				if (iVar8 == LOAD_VLC)
@@ -370,58 +491,93 @@ u32 main(void)
 			        // if game is not loading
 			        sdata->Loading.stage == LOAD_IDLE))
 			{
-				// All this code is for the 30-second timer within Demo Mode
-				// To see 30-second timer in Main Menu, go to FUN_00001604 in 230.c
-				// pressing (or holding) any button sets it to zero
-
-#if defined(CTR_NATIVE)
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+				if (NativePerf_IsStressTestActive())
 				{
-					int value = gGT->demoCountdownTimer - Platform_GetLegacy30HzTicks();
-					gGT->demoCountdownTimer = (value > 0) ? value : 0;
+					/* Measure only active racing, not loading or the start lights. */
+					if ((gGT->gameMode1 & START_OF_RACE) == 0)
+						NativePerf_StressTestBeginRace();
+
+					const int limitReached = NativePerf_StressTestReachedFrameLimit();
+					if (limitReached || MainPerf_StressTestAllBotsFinished(gGT))
+					{
+						Platform_Log("[PERF TEST] 8-bot run done (frameLimit=%d)\n", limitReached);
+						NativePerf_SetStressTestActive(0);
+						{
+							/* One-shot clean process exit for no-focus unattended profiling.
+							 * Never affect normal stress tests without an explicit marker. */
+							FILE *exit = fopen("debug/perf.exit_after_stress", "rb");
+							if (exit != NULL)
+							{
+								fclose(exit);
+								remove("debug/perf.exit_after_stress");
+								Platform_Log("[PERF TEST] completed, requesting clean exit\n");
+#if defined(CTR_PGO_GENERATE)
+								{
+									extern void __gcov_dump(void);
+									Platform_Log("[PERF TEST] saving GCC PGO counters\n");
+									__gcov_dump();
+								}
+#endif
+								Platform_RequestExit();
+							}
+						}
+#if defined(CTR_PGO_TRAINING)
+						{
+							FILE *pgoExit =
+								fopen("debug/pgo.exit_after_stress", "rb");
+							if (pgoExit != NULL)
+							{
+								fclose(pgoExit);
+								remove("debug/pgo.exit_after_stress");
+								Platform_Log("[PERF TEST] PGO training complete; clean exit\n");
+								Platform_RequestExit();
+							}
+						}
+#endif
+						gGT->boolDemoMode = 0;
+						gGT->numPlyrNextGame = 1;
+						sdata->mainMenuState = MAIN_MENU_TITLE;
+						MainRaceTrack_RequestLoad(MAIN_MENU_LEVEL);
+					}
 				}
+				else
+#endif
+				{
+					// Retail demo behavior: timed preview, any button exits.
+#if defined(CTR_NATIVE)
+					{
+						int value = gGT->demoCountdownTimer - Platform_GetLegacy30HzTicks();
+						gGT->demoCountdownTimer = (value > 0) ? value : 0;
+					}
 #else
-				gGT->demoCountdownTimer--;
+					gGT->demoCountdownTimer--;
 #endif
 
-				// check to see if time ran out
-				if (gGT->demoCountdownTimer < 1)
-				{
-					// leave demo mode, go to main menu
-					gGT->boolDemoMode = 0;
-					gGT->numPlyrNextGame = 1;
-					sdata->mainMenuState = MAIN_MENU_TITLE;
-
-				LAB_8003ce08:
-					MainRaceTrack_RequestLoad(MAIN_MENU_LEVEL);
-				}
-
-				// if time remains on the timer
-				else
-				{
-					// if any button is pressed by anyone
-					if (gGS->anyoneHeldCurr != 0)
+					if (gGT->demoCountdownTimer < 1)
 					{
-						// leave demo mode
+						gGT->boolDemoMode = 0;
+						gGT->numPlyrNextGame = 1;
+						sdata->mainMenuState = MAIN_MENU_TITLE;
+
+					LAB_8003ce08:
+						MainRaceTrack_RequestLoad(MAIN_MENU_LEVEL);
+					}
+					else if (gGS->anyoneHeldCurr != 0)
+					{
 						gGT->boolDemoMode = 0;
 						goto LAB_8003ce08;
 					}
-				}
 
-				// if numPlyrCurrGame is 1
-				if (gGT->numPlyrCurrGame == 1)
-				{
-					// Draw text near top of screen
-					uVar12 = 0x23;
-				}
+					if (gGT->numPlyrCurrGame == 1)
+						uVar12 = 0x23;
+					else
+						uVar12 = 100;
 
-				// if this is multiplayer
-				else
-				{
-					// draw text halfway to top of screen
-					uVar12 = 100;
+					DecalFont_DrawMultiLine(
+						sdata->lngStrings[LNG_DEMO_MODE_PRESS_ANY_BUTTON_TO_EXIT],
+						0x100, uVar12, 0x200, 2, 0xffff8000);
 				}
-
-				DecalFont_DrawMultiLine(sdata->lngStrings[LNG_DEMO_MODE_PRESS_ANY_BUTTON_TO_EXIT], 0x100, uVar12, 0x200, 2, 0xffff8000);
 			}
 
 			if ((gGT->gameMode1 & LOADING) == 0)
@@ -435,6 +591,7 @@ u32 main(void)
 #endif
 			}
 #if defined(CTR_NATIVE)
+			NativeHangout_Update(gGT);
 			if (!NativeWorld_IsActive()) sdata->frameCounter += Platform_GetLegacy30HzTicks();
 #endif
 
@@ -468,6 +625,16 @@ u32 main(void)
 
 
 			// if mask is talking in Adventure Hub
+#if defined(CTR_NATIVE)
+			if (NativeHangout_IsActive())
+			{
+				/* NativeHangout_Update() already clears the state; keep this
+				 * guard here too so the retail updater can never run in Hangout. */
+				sdata->boolDraw3D_AdvMask = 0;
+				sdata->AkuAkuHintState = 0;
+			}
+			else
+#endif
 			if (sdata->boolDraw3D_AdvMask != 0)
 			{
 				AH_MaskHint_Update();
@@ -643,8 +810,23 @@ void StateZero()
 	GAMEPROG_NewGame_OnBoot();
 	gGT->overlayIndex_null_notUsed = 0;
 
+#if defined(CTR_PRACTICE_FASTSTART)
+	/*
+	 * Stored special practice mode: direct-load Crash Cove with the normal
+	 * 1P Arcade gameplay/HUD, but without front-end intro or race countdown.
+	 * This is intentionally OFF in normal builds and kept separate from CSEQ.
+	 */
+	gGT->levelID = CRASH_COVE;
+	gGT->gameMode1 = (gGT->gameMode1 & GAME_MODE_VIBRATION_MASK) | ARCADE_MODE;
+	gGT->gameMode2 = 0;
+	gGT->boolDemoMode = 0;
+	gGT->numPlyrCurrGame = 1;
+	gGT->numPlyrNextGame = 1;
+	Platform_Log("[PRACTICE] fast-start target: level_03 CRASH_COVE (HUD enabled)\n");
+#else
 	gGT->levelID = NAUGHTY_DOG_CRATE;
 	// gGT->levelID = OXIDE_TRUE_ENDING;
+#endif
 
 	InitGeom();
 	SetGeomOffset(0x100, 0x78); // width/2, height/2
@@ -668,7 +850,9 @@ void StateZero()
 	DrawSync(0);
 
 	// Load Intro TIM for "SCEA Presents" from VRAM file
+#if !defined(CTR_PRACTICE_FASTSTART)
 	LOAD_VramFile(sdata->ptrBigfile1, 0x1fd, NULL, &vramSize, -1);
+#endif
 	MainInit_VRAMDisplay();
 
 	// \SOUNDS\KART.HWL;1
@@ -677,6 +861,7 @@ void StateZero()
 
 	VSyncCallback(MainDrawCb_Vsync);
 
+#if !defined(CTR_PRACTICE_FASTSTART)
 	Music_SetIntro();
 	CseqMusic_StopAll();
 	CseqMusic_Start(CSEQ_SONG_LEVEL, 0, NULL, 0, 0);
@@ -696,6 +881,13 @@ void StateZero()
 #endif
 		CDSYS_XAPauseAtEnd();
 	}
+#else
+	/*
+	 * No boot logo music/XA in the isolated CSEQ test build. Level loading
+	 * immediately follows HOWL init and the shared UI asset load below.
+	 */
+	CseqMusic_StopAll();
+#endif
 
 	DecalGlobal_Clear(gGT);
 

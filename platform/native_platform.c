@@ -2,6 +2,9 @@
 #include <platform.h>
 
 #include <CharacterRegistry.h>
+#include <NativeHangout.h>
+#include <NativeSession.h>
+#include <platform/native_gltf.h>
 #include <platform/native_obj.h>
 #include <macros.h>
 
@@ -15,6 +18,10 @@
 #include "platform/native_replay_scheduler.h"
 #include "platform/native_savestate.h"
 
+#ifdef _WIN32
+#include "platform/native_win32.h"
+#endif
+
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <stdbool.h>
@@ -27,12 +34,15 @@ SDL_Window *g_window = NULL;
 int g_dbg_polygonSelected = 0;
 
 extern int g_cfg_bilinearFiltering;
+int g_cfg_psxDithering = 0;
 extern int g_dbg_emulatorPaused;
 extern int g_dbg_texturelessMode;
 extern int g_dbg_wireframeMode;
 extern int g_windowHeight;
 extern int g_windowWidth;
 void NativeGTE_SubpixelBeginFrame(void);
+int MainFreeze_NativeControlsHandleTextInput(const char *text);
+int MainFreeze_NativeControlsHandleHostKey(int key, int down, int repeat);
 internal void Platform_UpdateCursorVisibility(void);
 
 #define HOST_ALT_LEFT  (1 << 0)
@@ -50,24 +60,44 @@ global_variable int s_pinnedVramDisplayH = 0;
 
 global_variable int s_debugFreecamEnabled = 0;
 global_variable int s_debugFreecamCaptured = 0;
-global_variable int s_debugFreecamSavedMode = 0;
+global_variable int s_debugFreecamCameraID = -1;
+global_variable s16 s_debugFreecamPos[3];
+global_variable s16 s_debugFreecamRot[3];
+global_variable int s_hudHidden = 0;
 
 global_variable unsigned int s_mouseUiTapMask = 0;
+global_variable int s_mouseUiActivity = 0;
+global_variable u64 s_mouseUiIgnoreMotionUntil = 0;
 
+#define NATIVE_MOUSE_UI_RESIZE_SUPPRESS_MS 200
 #define NATIVE_FPS_REPORT_FRAME_WINDOW 2000
 global_variable int s_fpsFrameCount = 0;
 global_variable u64 s_fpsLastCounter = 0;
+global_variable u64 s_frameDurationLastCounter = 0;
+global_variable double s_lastFrameTimeMs = 0.0;
+global_variable int s_perfOverlayEnabled = 0;
+global_variable int s_experimentalFeedbackCadenceEnabled = 0;
 
 global_variable int g_cfg_highRefreshPresentation = 1;
 int g_cfg_subpixelGeometry = 1;
 #define NATIVE_HOST_PRESENT_HZ_FALLBACK 60
+global_variable int s_displayRefreshFPS = NATIVE_HOST_PRESENT_HZ_FALLBACK;
 global_variable int s_highRefreshTargetFPS = NATIVE_HOST_PRESENT_HZ_FALLBACK;
+global_variable int s_fpsLimitMode = PLATFORM_FPS_LIMIT_DISPLAY_HZ;
 global_variable SDL_DisplayID s_highRefreshDisplayID = 0;
 global_variable u64 s_highRefreshLastDisplayCheckCounter = 0;
 global_variable u64 s_hostPresentCount = 0;
 global_variable u64 s_hostPresentNextCounter = 0;
 global_variable u64 s_hostInterpolationStartCounter = 0;
 global_variable int s_hostInterpolationActive = 0;
+
+/* Experimental Unlimited-only present decoupling. The game/render loop stays
+ * completely uncapped; only the physical window swap is paced to the monitor.
+ * This is marker-gated until A/B testing proves it removes compositor stalls
+ * without changing gameplay or normal capped modes. */
+static u64 s_unlimitedPresentNextCounter = 0;
+static int s_unlimitedPresentDecoupleChecked = 0;
+static int s_unlimitedPresentDecoupleEnabled = 0;
 
 // When HIGH REFRESH is enabled this is the actual game-loop target, not a
 // presentation-only multiplier. VBlank remains independently emulated at 60 Hz.
@@ -105,8 +135,11 @@ typedef struct NativeUserSettings
 	int loaded;
 	int wideMode;
 	int highRefresh;
+	int fpsLimitMode;
 	int subpixel;
 	int bilinearFiltering;
+	int dithering;
+	int perfOverlay;
 	int characterDetail;
 	int fullscreen;
 	int windowWidth;
@@ -116,10 +149,27 @@ typedef struct NativeUserSettings
 	int volVoice;
 	int stereo;
 	int vibrationMask;
+	char playerNames[4][32];
 } NativeUserSettings;
 
 global_variable NativeUserSettings s_nativeUserSettings = {
-	0, 0, 1, 1, 0, 1, 0, 0, 0, 215, 175, 255, 1, 0
+	.loaded = 0,
+	.wideMode = 0,
+	.highRefresh = 1,
+	.fpsLimitMode = PLATFORM_FPS_LIMIT_DISPLAY_HZ,
+	.subpixel = 1,
+	.bilinearFiltering = 0,
+	.dithering = 0,
+	.perfOverlay = 0,
+	.characterDetail = 1,
+	.fullscreen = 0,
+	.windowWidth = 0,
+	.windowHeight = 0,
+	.volFX = 215,
+	.volMusic = 175,
+	.volVoice = 255,
+	.stereo = 1,
+	.vibrationMask = 0,
 };
 
 internal int Platform_SettingsClamp(int value, int minValue, int maxValue)
@@ -129,12 +179,57 @@ internal int Platform_SettingsClamp(int value, int minValue, int maxValue)
 	return value;
 }
 
+internal void Platform_CopyPlayerNameSanitized(
+	char *dst,
+	int dstSize,
+	const char *src,
+	int playerIndex)
+{
+	char fallback[32];
+	int out = 0;
+	int i;
+
+	if (dst == NULL || dstSize <= 0)
+		return;
+
+	snprintf(
+		fallback,
+		sizeof(fallback),
+		"PLAYER %d",
+		playerIndex + 1);
+
+	if (src == NULL || src[0] == 0)
+		src = fallback;
+
+	for (i = 0; src[i] != 0 && out < dstSize - 1; i++)
+	{
+		unsigned char c = (unsigned char)src[i];
+
+		if (c < 0x20 || c == 0x7f)
+			continue;
+
+		dst[out++] = (char)c;
+	}
+
+	while (out > 0 && dst[out - 1] == ' ')
+		out--;
+
+	dst[out] = 0;
+
+	if (out == 0)
+		snprintf(dst, (size_t)dstSize, "%s", fallback);
+}
+
 internal void Platform_SettingsSanitize(void)
 {
 	s_nativeUserSettings.wideMode = s_nativeUserSettings.wideMode != 0;
-	s_nativeUserSettings.highRefresh = s_nativeUserSettings.highRefresh != 0;
+	s_nativeUserSettings.highRefresh = 1;
+	s_nativeUserSettings.fpsLimitMode = Platform_SettingsClamp(
+		s_nativeUserSettings.fpsLimitMode, 0, PLATFORM_FPS_LIMIT_COUNT - 1);
 	s_nativeUserSettings.subpixel = s_nativeUserSettings.subpixel != 0;
 	s_nativeUserSettings.bilinearFiltering = s_nativeUserSettings.bilinearFiltering != 0;
+	s_nativeUserSettings.dithering = s_nativeUserSettings.dithering != 0;
+	s_nativeUserSettings.perfOverlay = s_nativeUserSettings.perfOverlay != 0;
 	s_nativeUserSettings.characterDetail = Platform_SettingsClamp(s_nativeUserSettings.characterDetail, 0, 3);
 	s_nativeUserSettings.fullscreen = s_nativeUserSettings.fullscreen != 0;
 	s_nativeUserSettings.stereo = s_nativeUserSettings.stereo != 0;
@@ -144,6 +239,21 @@ internal void Platform_SettingsSanitize(void)
 	s_nativeUserSettings.volFX = Platform_SettingsClamp(s_nativeUserSettings.volFX, 0, 255);
 	s_nativeUserSettings.volMusic = Platform_SettingsClamp(s_nativeUserSettings.volMusic, 0, 255);
 	s_nativeUserSettings.volVoice = Platform_SettingsClamp(s_nativeUserSettings.volVoice, 0, 255);
+
+	for (int i = 0; i < 4; i++)
+	{
+		char sanitized[32];
+		Platform_CopyPlayerNameSanitized(
+			sanitized,
+			(int)sizeof(sanitized),
+			s_nativeUserSettings.playerNames[i],
+			i);
+		snprintf(
+			s_nativeUserSettings.playerNames[i],
+			sizeof(s_nativeUserSettings.playerNames[i]),
+			"%s",
+			sanitized);
+	}
 }
 
 internal void Platform_SettingsWrite(void)
@@ -161,9 +271,12 @@ internal void Platform_SettingsWrite(void)
 
 	fprintf(config, "version=1\n");
 	fprintf(config, "aspect_wide=%d\n", s_nativeUserSettings.wideMode);
-	fprintf(config, "high_refresh=%d\n", s_nativeUserSettings.highRefresh);
+	fprintf(config, "high_refresh=1\n");
+	fprintf(config, "fps_limit_mode=%d\n", s_nativeUserSettings.fpsLimitMode);
 	fprintf(config, "subpixel=%d\n", s_nativeUserSettings.subpixel);
 	fprintf(config, "bilinear_filter=%d\n", s_nativeUserSettings.bilinearFiltering);
+	fprintf(config, "dithering=%d\n", s_nativeUserSettings.dithering);
+	fprintf(config, "perf_overlay=%d\n", s_nativeUserSettings.perfOverlay);
 	fprintf(config, "character_detail=%d\n", s_nativeUserSettings.characterDetail);
 	fprintf(config, "fullscreen=%d\n", s_nativeUserSettings.fullscreen);
 	fprintf(config, "window_width=%d\n", s_nativeUserSettings.windowWidth);
@@ -173,6 +286,8 @@ internal void Platform_SettingsWrite(void)
 	fprintf(config, "voice_volume=%d\n", s_nativeUserSettings.volVoice);
 	fprintf(config, "stereo=%d\n", s_nativeUserSettings.stereo);
 	fprintf(config, "vibration_disabled_mask=%d\n", s_nativeUserSettings.vibrationMask);
+	for (int i = 0; i < 4; i++)
+		fprintf(config, "player_name_%d=%s\n", i + 1, s_nativeUserSettings.playerNames[i]);
 	fclose(config);
 }
 
@@ -187,6 +302,14 @@ internal void Platform_SettingsLoad(int defaultWidth, int defaultHeight)
 	s_nativeUserSettings.windowWidth = defaultWidth;
 	s_nativeUserSettings.windowHeight = defaultHeight;
 	s_nativeUserSettings.wideMode = defaultWidth * 3 > defaultHeight * 4;
+	for (int i = 0; i < 4; i++)
+	{
+		snprintf(
+			s_nativeUserSettings.playerNames[i],
+			sizeof(s_nativeUserSettings.playerNames[i]),
+			"PLAYER %d",
+			i + 1);
+	}
 
 	config = fopen(NATIVE_SETTINGS_FILE, "rb");
 	if (config != NULL)
@@ -196,12 +319,33 @@ internal void Platform_SettingsLoad(int defaultWidth, int defaultHeight)
 		{
 			char key[64];
 			int value;
+			int playerNameIndex;
+			char playerNameValue[32];
+
+			if (sscanf(
+			        line,
+			        "player_name_%d=%31[^\r\n]",
+			        &playerNameIndex,
+			        playerNameValue) == 2)
+			{
+				if (playerNameIndex >= 1 && playerNameIndex <= 4)
+				Platform_CopyPlayerNameSanitized(
+					s_nativeUserSettings.playerNames[playerNameIndex - 1],
+					32,
+					playerNameValue,
+					playerNameIndex - 1);
+				continue;
+			}
+
 			if (sscanf(line, "%63[^=]=%d", key, &value) != 2) continue;
 
 			if (strcmp(key, "aspect_wide") == 0) s_nativeUserSettings.wideMode = value;
 			else if (strcmp(key, "high_refresh") == 0) s_nativeUserSettings.highRefresh = value;
+			else if (strcmp(key, "fps_limit_mode") == 0) s_nativeUserSettings.fpsLimitMode = value;
 			else if (strcmp(key, "subpixel") == 0) s_nativeUserSettings.subpixel = value;
 			else if (strcmp(key, "bilinear_filter") == 0) s_nativeUserSettings.bilinearFiltering = value;
+			else if (strcmp(key, "dithering") == 0) s_nativeUserSettings.dithering = value;
+			else if (strcmp(key, "perf_overlay") == 0) s_nativeUserSettings.perfOverlay = value;
 			else if (strcmp(key, "character_detail") == 0) s_nativeUserSettings.characterDetail = value;
 			else if (strcmp(key, "fullscreen") == 0) s_nativeUserSettings.fullscreen = value;
 			else if (strcmp(key, "window_width") == 0) s_nativeUserSettings.windowWidth = value;
@@ -244,10 +388,17 @@ internal void Platform_SettingsLoad(int defaultWidth, int defaultHeight)
 	s_nativeUserSettings.loaded = 1;
 	Platform_SettingsSanitize();
 
-	g_cfg_highRefreshPresentation = s_nativeUserSettings.highRefresh;
+	/* The native render loop is always active now. Frame limiting is selected
+	 * independently (fixed FPS, display Hz, or unlimited). */
+	g_cfg_highRefreshPresentation = 1;
+	s_nativeUserSettings.highRefresh = 1;
+	s_fpsLimitMode = s_nativeUserSettings.fpsLimitMode;
 	g_cfg_subpixelGeometry = s_nativeUserSettings.subpixel;
 	g_cfg_bilinearFiltering = s_nativeUserSettings.bilinearFiltering;
+	g_cfg_psxDithering = s_nativeUserSettings.dithering;
+	s_perfOverlayEnabled = s_nativeUserSettings.perfOverlay;
 	s_videoWideMode = s_nativeUserSettings.wideMode;
+	NativeSession_SetLocalPlayerName(s_nativeUserSettings.playerNames[0]);
 
 	if (!foundSettingsFile) Platform_SettingsWrite();
 }
@@ -265,6 +416,78 @@ void Platform_SetTextureFilteringMode(int enabled)
 	s_nativeUserSettings.bilinearFiltering = enabled;
 	Platform_SettingsWrite();
 	Platform_LogWarn("[CTR Native] filtering mode: %s\n", enabled ? "BILINEAR" : "NEAREST");
+}
+
+int Platform_GetDitheringMode(void)
+{
+	return g_cfg_psxDithering != 0;
+}
+
+void Platform_SetDitheringMode(int enabled)
+{
+	enabled = enabled != 0;
+	if (g_cfg_psxDithering == enabled) return;
+	g_cfg_psxDithering = enabled;
+	s_nativeUserSettings.dithering = enabled;
+	Platform_SettingsWrite();
+	Platform_LogWarn("[CTR Native] PS1 dithering: %s\n", enabled ? "ON" : "OFF");
+}
+
+int Platform_GetPerfOverlayMode(void)
+{
+	return s_perfOverlayEnabled != 0;
+}
+
+void Platform_SetPerfOverlayMode(int enabled)
+{
+	enabled = enabled != 0;
+	if (s_perfOverlayEnabled == enabled) return;
+	s_perfOverlayEnabled = enabled;
+	s_nativeUserSettings.perfOverlay = enabled;
+	Platform_SettingsWrite();
+}
+
+double Platform_GetLastFrameTimeMS(void)
+{
+	return s_lastFrameTimeMs;
+}
+
+int Platform_GetGpuTimingMode(void)
+{
+	return NativeRenderer_GetGpuTimingEnabled();
+}
+
+void Platform_SetGpuTimingMode(int enabled)
+{
+	NativeRenderer_SetGpuTimingEnabled(enabled != 0);
+}
+
+double Platform_GetLastGpuFrameMS(void)
+{
+	return NativeRenderer_GetLastGpuFrameMs();
+}
+
+int Platform_GetExperimentalCompactVRAMMode(void)
+{
+	return NativeRenderer_GetExperimentalCompactVRAM();
+}
+
+void Platform_SetExperimentalCompactVRAMMode(int enabled)
+{
+	NativeRenderer_SetExperimentalCompactVRAM(enabled != 0);
+}
+
+int Platform_GetExperimentalZBufferMode(void)
+{
+	return NativeRenderer_GetExperimentalZBuffer();
+}
+
+void Platform_SetExperimentalZBufferMode(int enabled)
+{
+	NativeRenderer_SetExperimentalZBuffer(enabled != 0);
+	Platform_LogWarn(
+		"[CTR Native] EXPERIMENTAL Z-buffer: %s (custom opaque only; retail world/effects stay OT-ordered; not persisted)\n",
+		NativeRenderer_GetExperimentalZBuffer() ? "ON" : "OFF");
 }
 
 int Platform_GetCharacterDetailMode(void)
@@ -311,6 +534,17 @@ void Platform_GetWindowSize(int *width, int *height)
 	if (height != NULL) *height = g_windowHeight;
 }
 
+internal void Platform_SuppressMouseUiMotion(void)
+{
+	/* A resize/fullscreen transition can synthesize a cursor recenter event.
+	   Clear any pending hover-ownership bit and ignore motion briefly so the
+	   mouse cannot steal menu focus from keyboard/controller just because
+	   Windows/SDL moved it for us. Real clicks are intentionally preserved. */
+	s_mouseUiActivity = 0;
+	s_mouseUiIgnoreMotionUntil =
+		SDL_GetTicks() + NATIVE_MOUSE_UI_RESIZE_SUPPRESS_MS;
+}
+
 int Platform_GetMouseUiPosition(int *x, int *y)
 {
 	float mouseX;
@@ -330,6 +564,13 @@ unsigned int Platform_ConsumeMouseUiTaps(void)
 	unsigned int taps = s_mouseUiTapMask;
 	s_mouseUiTapMask = 0;
 	return taps;
+}
+
+int Platform_ConsumeMouseUiActivity(void)
+{
+	int activity = s_mouseUiActivity;
+	s_mouseUiActivity = 0;
+	return activity;
 }
 
 int Platform_GetFullscreenMode(void)
@@ -373,6 +614,7 @@ void Platform_SetResolutionPreset(int index)
 
 	if (g_window != NULL)
 	{
+		Platform_SuppressMouseUiMotion();
 		if (Platform_GetFullscreenMode())
 		{
 			Platform_ApplyExclusiveFullscreenResolution(width, height);
@@ -403,6 +645,8 @@ void Platform_SetFullscreenMode(int enabled)
 		Platform_SettingsWrite();
 		return;
 	}
+
+	Platform_SuppressMouseUiMotion();
 
 	if (enabled)
 	{
@@ -476,6 +720,32 @@ void Platform_SaveVibrationMask(int mask)
 	Platform_SettingsWrite();
 }
 
+const char *Platform_GetPlayerName(int playerIndex)
+{
+	if (playerIndex < 0 || playerIndex >= 4)
+		playerIndex = 0;
+
+	return s_nativeUserSettings.playerNames[playerIndex];
+}
+
+void Platform_SetPlayerName(int playerIndex, const char *name)
+{
+	if (playerIndex < 0 || playerIndex >= 4)
+		return;
+
+	Platform_CopyPlayerNameSanitized(
+		s_nativeUserSettings.playerNames[playerIndex],
+		(int)sizeof(s_nativeUserSettings.playerNames[playerIndex]),
+		name,
+		playerIndex);
+
+	if (playerIndex == 0)
+		NativeSession_SetLocalPlayerName(
+			s_nativeUserSettings.playerNames[0]);
+
+	Platform_SettingsWrite();
+}
+
 void Platform_UpdateLegacy30HzClock(int elapsedTimeMS)
 {
 	if (!g_cfg_highRefreshPresentation)
@@ -517,6 +787,16 @@ int Platform_GetLegacy30HzAlpha256(void)
 	return alpha;
 }
 
+int Platform_GetHudHidden(void)
+{
+	return s_hudHidden != 0;
+}
+
+void Platform_SetHudHidden(int hidden)
+{
+	s_hudHidden = hidden != 0;
+}
+
 int Platform_GetDisplayFPS(void)
 {
 	// Report completed CTR logical frames. High-refresh host presents are not
@@ -550,14 +830,20 @@ int Platform_GetDisplayFPS(void)
 
 internal void Platform_CalcFPS(void)
 {
-#if defined(CTR_INTERNAL)
 	const u64 freq = SDL_GetPerformanceFrequency();
 	const u64 now = SDL_GetPerformanceCounter();
 
 	if (freq == 0)
-	{
 		return;
+
+	if (s_frameDurationLastCounter != 0 && now > s_frameDurationLastCounter)
+	{
+		s_lastFrameTimeMs =
+			(double)(now - s_frameDurationLastCounter) * 1000.0 / (double)freq;
 	}
+	s_frameDurationLastCounter = now;
+
+#if defined(CTR_INTERNAL)
 
 	if (s_fpsLastCounter == 0)
 	{
@@ -630,21 +916,55 @@ internal int Platform_QueryDisplayRefreshFPS(void)
 	return targetFPS;
 }
 
+internal int Platform_FPSLimitModeTargetFPS(int mode)
+{
+	switch (mode)
+	{
+	case PLATFORM_FPS_LIMIT_30: return 30;
+	case PLATFORM_FPS_LIMIT_60: return 60;
+	case PLATFORM_FPS_LIMIT_120: return 120;
+	case PLATFORM_FPS_LIMIT_144: return 144;
+	case PLATFORM_FPS_LIMIT_200: return 200;
+	case PLATFORM_FPS_LIMIT_240: return 240;
+	case PLATFORM_FPS_LIMIT_DISPLAY_HZ: return s_displayRefreshFPS;
+	case PLATFORM_FPS_LIMIT_UNLIMITED: return 0;
+	default: return s_displayRefreshFPS;
+	}
+}
+
 internal void Platform_RefreshHighRefreshTarget(void)
 {
-	const int targetFPS = Platform_QueryDisplayRefreshFPS();
+	const int displayFPS = Platform_QueryDisplayRefreshFPS();
+	const int oldDisplayFPS = s_displayRefreshFPS;
+	int targetFPS;
+
+	s_displayRefreshFPS = displayFPS;
+	targetFPS = Platform_FPSLimitModeTargetFPS(s_fpsLimitMode);
+
+	if (displayFPS != oldDisplayFPS)
+	{
+		Platform_LogWarn("[CTR Native] display refresh changed: %d HZ\n", displayFPS);
+	}
+
 	if (targetFPS != s_highRefreshTargetFPS)
 	{
 		s_highRefreshTargetFPS = targetFPS;
 		s_nextHighRefreshFrameCounter = 0;
 		s_highRefreshFrameRemainder = 0;
-		Platform_LogWarn("[CTR Native] display refresh target changed: %d FPS\n", targetFPS);
+		if (s_fpsLimitMode == PLATFORM_FPS_LIMIT_UNLIMITED)
+			Platform_LogWarn("[CTR Native] frame limiter target: Unlimited\n");
+		else if (s_fpsLimitMode == PLATFORM_FPS_LIMIT_DISPLAY_HZ)
+			Platform_LogWarn("[CTR Native] frame limiter target: %d HZ (display)\n", targetFPS);
+		else
+			Platform_LogWarn("[CTR Native] frame limiter target: %d FPS\n", targetFPS);
 	}
 }
 
 int Platform_GetHighRefreshMode(void)
 {
-	return g_cfg_highRefreshPresentation;
+	/* Compatibility name: the native variable-rate render loop is always on.
+	 * FPS limiting is now independent from the physical display refresh. */
+	return 1;
 }
 
 int Platform_GetHighRefreshTargetFPS(void)
@@ -652,30 +972,59 @@ int Platform_GetHighRefreshTargetFPS(void)
 	return s_highRefreshTargetFPS;
 }
 
-void Platform_SetHighRefreshMode(int enabled)
+int Platform_GetFPSLimitMode(void)
 {
-	enabled = enabled != 0;
-	if (enabled == g_cfg_highRefreshPresentation)
-	{
+	return s_fpsLimitMode;
+}
+
+int Platform_GetDisplayRefreshFPS(void)
+{
+	return s_displayRefreshFPS;
+}
+
+u64 Platform_GetHostPresentCount(void)
+{
+	return s_hostPresentCount;
+}
+
+void Platform_SetFPSLimitMode(int mode)
+{
+	if (mode < 0) mode = PLATFORM_FPS_LIMIT_COUNT - 1;
+	if (mode >= PLATFORM_FPS_LIMIT_COUNT) mode = 0;
+	if (mode == s_fpsLimitMode)
 		return;
-	}
-	g_cfg_highRefreshPresentation = enabled;
-	s_nativeUserSettings.highRefresh = enabled;
+
+	s_fpsLimitMode = mode;
+	g_cfg_highRefreshPresentation = 1;
+	s_nativeUserSettings.highRefresh = 1;
+	s_nativeUserSettings.fpsLimitMode = mode;
 	Platform_SettingsWrite();
-	if (enabled)
-	{
-		Platform_RefreshHighRefreshTarget();
-	}
+
+	Platform_RefreshHighRefreshTarget();
 	s_hostPresentNextCounter = 0;
+	s_unlimitedPresentNextCounter = 0;
 	s_hostInterpolationStartCounter = 0;
 	s_hostInterpolationActive = 0;
 	s_nextHighRefreshFrameCounter = 0;
 	s_highRefreshFrameRemainder = 0;
+	s_highRefreshLastDisplayCheckCounter = 0;
 	s_legacy30AccumulatorMS = 0;
 	s_legacy30Ticks = 1;
 	NativeGpu_PresentationReset();
-	Platform_LogWarn("[CTR Native] high refresh game loop: %s (display target %d FPS)\n",
-	                 enabled ? "ON" : "OFF", s_highRefreshTargetFPS);
+
+	if (mode == PLATFORM_FPS_LIMIT_UNLIMITED)
+		Platform_LogWarn("[CTR Native] FPS limit: Unlimited (display HZ ignored for pacing)\n");
+	else if (mode == PLATFORM_FPS_LIMIT_DISPLAY_HZ)
+		Platform_LogWarn("[CTR Native] FPS limit: Display HZ (%d HZ)\n", s_displayRefreshFPS);
+	else
+		Platform_LogWarn("[CTR Native] FPS limit: %d FPS\n", s_highRefreshTargetFPS);
+}
+
+void Platform_SetHighRefreshMode(int enabled)
+{
+	/* Legacy callers map cleanly onto the new limiter: OFF means a 30 FPS
+	 * native loop, ON means follow the physical display refresh. */
+	Platform_SetFPSLimitMode(enabled ? PLATFORM_FPS_LIMIT_DISPLAY_HZ : PLATFORM_FPS_LIMIT_30);
 }
 
 int Platform_GetSubpixelMode(void)
@@ -703,6 +1052,7 @@ void Platform_SetSubpixelMode(int enabled)
 
 internal void Platform_HandleWindowResize(int width, int height)
 {
+	Platform_SuppressMouseUiMotion();
 	g_windowWidth = width;
 	g_windowHeight = height;
 	if ((g_window == NULL) || ((SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) == 0))
@@ -847,12 +1197,34 @@ void Platform_Init(const char *title, int width, int height)
 	Platform_LogInit(title);
 	Platform_GetWindowName(title, windowName, sizeof(windowName));
 
+#ifdef _WIN32
+	{
+		DWORD priority = HIGH_PRIORITY_CLASS;
+#if defined(CTR_INTERNAL)
+		FILE *benchmark = fopen("debug/perf.autorun", "rb");
+		if (benchmark != NULL)
+		{
+			fclose(benchmark);
+			/* Don't starve unrelated apps when the user is working. */
+			priority = NORMAL_PRIORITY_CLASS;
+		}
+#endif
+		if (SetPriorityClass(GetCurrentProcess(), priority))
+			Platform_Log("[CTR Native] process priority: %s\n",
+				priority == HIGH_PRIORITY_CLASS ? "HIGH" : "NORMAL (unattended benchmark)");
+		else
+			Platform_LogWarn("[CTR Native] process priority setup failed: %lu\n", (unsigned long)GetLastError());
+	}
+#endif
+
 	Platform_Log("[CTR Native] Initialising platform\n");
 	Platform_Log("[CTR Native] BUILD: V2.0.8_TRUE_3D_WHEEL_AXES\n");
-	Platform_Log("[CTR Native] startup options: highRefresh=%d subpixel=%d filtering=%s wide=%d fullscreen=%d dithering=OFF\n",
+	Platform_Log("[CTR Native] startup options: highRefresh=%d subpixel=%d filtering=%s wide=%d fullscreen=%d dithering=%s perfOverlay=%d\n",
 	             g_cfg_highRefreshPresentation, g_cfg_subpixelGeometry,
 	             g_cfg_bilinearFiltering ? "BILINEAR" : "NEAREST",
-	             s_videoWideMode, s_nativeUserSettings.fullscreen);
+	             s_videoWideMode, s_nativeUserSettings.fullscreen,
+	             g_cfg_psxDithering ? "PS1" : "OFF",
+	             s_perfOverlayEnabled);
 
 	if (SDL_Init(SDL_INIT_VIDEO) == 0)
 	{
@@ -881,7 +1253,13 @@ void Platform_Init(const char *title, int width, int height)
 	if (s_nativeUserSettings.fullscreen)
 		Platform_SetFullscreenMode(1);
 	Platform_RefreshHighRefreshTarget();
-	Platform_Log("[CTR Native] display refresh target: %d FPS\n", s_highRefreshTargetFPS);
+	Platform_Log("[CTR Native] physical display: %d HZ\n", s_displayRefreshFPS);
+	if (s_fpsLimitMode == PLATFORM_FPS_LIMIT_UNLIMITED)
+		Platform_Log("[CTR Native] FPS limit: Unlimited\n");
+	else if (s_fpsLimitMode == PLATFORM_FPS_LIMIT_DISPLAY_HZ)
+		Platform_Log("[CTR Native] FPS limit: %d HZ (display)\n", s_highRefreshTargetFPS);
+	else
+		Platform_Log("[CTR Native] FPS limit: %d FPS\n", s_highRefreshTargetFPS);
 
 	atexit(Platform_Shutdown);
 	Platform_UpdateCursorVisibility();
@@ -912,6 +1290,7 @@ void Platform_Shutdown(void)
 
 	/* External racer textures belong to the live GL context. Release them
 	 * before the window/context is destroyed, then discard registry metadata. */
+	NativeGltf_Shutdown();
 	NativeObj_Shutdown();
 	CharacterRegistry_Shutdown();
 
@@ -979,9 +1358,79 @@ int Platform_BeginScene(void)
 
 	s_platformBeginScene = 1;
 
-	Platform_LogFlush();
+	// Keep the normal log useful without forcing a synchronous file flush
+	// every rendered frame. Warnings/errors still flush immediately.
+	{
+		static u32 s_logFlushFrameCounter;
+		s_logFlushFrameCounter++;
+		if ((s_logFlushFrameCounter & 0x7f) == 0)
+		{
+			Platform_LogFlush();
+		}
+	}
 
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_PLATFORM_BEGIN_SCENE);
+	return 1;
+}
+
+internal int Platform_UnlimitedPresentDecoupleMarkerEnabled(void)
+{
+	if (!s_unlimitedPresentDecoupleChecked)
+	{
+		FILE *marker = fopen("debug/unlimited_present_decouple.enable", "rb");
+		s_unlimitedPresentDecoupleEnabled = marker != NULL;
+		if (marker != NULL)
+			fclose(marker);
+		s_unlimitedPresentDecoupleChecked = 1;
+		if (s_unlimitedPresentDecoupleEnabled)
+		{
+			Platform_LogWarn(
+				"[CTR Native] Unlimited present decouple: ON (physical swap target %d HZ)\n",
+				s_displayRefreshFPS);
+		}
+	}
+
+	return s_unlimitedPresentDecoupleEnabled;
+}
+
+internal int Platform_ShouldSwapWindowThisFrame(void)
+{
+	u64 frequency;
+	u64 now;
+	u64 period;
+	int presentHz;
+
+	if ((s_fpsLimitMode != PLATFORM_FPS_LIMIT_UNLIMITED) ||
+	    !Platform_UnlimitedPresentDecoupleMarkerEnabled())
+	{
+		s_unlimitedPresentNextCounter = 0;
+		return 1;
+	}
+
+	frequency = SDL_GetPerformanceFrequency();
+	presentHz = s_displayRefreshFPS;
+	if ((frequency == 0) || (presentHz <= 0))
+	{
+		return 1;
+	}
+
+	if (presentHz > 1000)
+		presentHz = 1000;
+
+	now = SDL_GetPerformanceCounter();
+	period = (frequency + (u64)(presentHz / 2)) / (u64)presentHz;
+	if (period == 0)
+		period = 1;
+
+	if ((s_unlimitedPresentNextCounter != 0) &&
+	    (now < s_unlimitedPresentNextCounter))
+	{
+		return 0;
+	}
+
+	/* Rebase instead of catching up after a delayed compositor frame. The
+	 * latest fully-rendered back buffer is what matters; stale presents do not. */
+	s_unlimitedPresentNextCounter = now + period;
 	return 1;
 }
 
@@ -1034,7 +1483,10 @@ void Platform_EndScene(void)
 
 	s_hostInterpolationStartCounter = 0;
 	s_hostInterpolationActive = 0;
-	Platform_SwapWindowTracked();
+	if (Platform_ShouldSwapWindowThisFrame())
+	{
+		Platform_SwapWindowTracked();
+	}
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_PLATFORM_END_SCENE);
 }
 
@@ -1079,6 +1531,18 @@ void Platform_PinVRAMDisplayRect(int x, int y, int w, int h, int frameCount)
 	s_pinnedVramDisplayCustomRect = 1;
 }
 
+void Platform_StartTextInput(void)
+{
+	if (g_window != NULL)
+		SDL_StartTextInput(g_window);
+}
+
+void Platform_StopTextInput(void)
+{
+	if (g_window != NULL)
+		SDL_StopTextInput(g_window);
+}
+
 void Platform_PollHostEvents(void)
 {
 	SDL_Event event;
@@ -1101,18 +1565,35 @@ void Platform_PollHostEvents(void)
 			break;
 		case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
 		case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+			Platform_SuppressMouseUiMotion();
 			Platform_UpdateCursorVisibility();
 			break;
 		case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
 			exit(0);
 			break;
+		case SDL_EVENT_MOUSE_MOTION:
+			/* SDL/Windows can move the cursor as a side effect of a resolution or
+			   fullscreen transition. Do not treat that synthetic recenter as a
+			   request to take menu focus away from the controller. */
+			if ((SDL_GetTicks() >= s_mouseUiIgnoreMotionUntil) &&
+			    ((event.motion.xrel != 0.0f) ||
+			     (event.motion.yrel != 0.0f)))
+			{
+				s_mouseUiActivity = 1;
+			}
+			break;
 		case SDL_EVENT_MOUSE_BUTTON_DOWN:
+			s_mouseUiActivity = 1;
 			if (event.button.button == SDL_BUTTON_LEFT)
 				s_mouseUiTapMask |= PLATFORM_MOUSE_UI_LEFT;
 			else if (event.button.button == SDL_BUTTON_RIGHT)
 				s_mouseUiTapMask |= PLATFORM_MOUSE_UI_RIGHT;
 			else if (event.button.button == SDL_BUTTON_MIDDLE)
 				s_mouseUiTapMask |= PLATFORM_MOUSE_UI_MIDDLE;
+			break;
+		case SDL_EVENT_TEXT_INPUT:
+			if (!MainFreeze_NativeControlsHandleTextInput(event.text.text))
+				NativeHangout_HandleTextInput(event.text.text);
 			break;
 		case SDL_EVENT_KEY_DOWN:
 		case SDL_EVENT_KEY_UP:
@@ -1131,14 +1612,26 @@ void Platform_PollHostEvents(void)
 				break;
 			}
 
-			if (key == SDL_SCANCODE_RETURN)
+			if ((key == SDL_SCANCODE_RETURN) &&
+			    (s_hostAltKeyState != 0) &&
+			    (down != 0) &&
+			    (event.key.repeat == 0))
 			{
-				if ((s_hostAltKeyState != 0) && (down != 0) && (event.key.repeat == 0))
-				{
-					Platform_HandleFullscreenToggle();
-				}
+				Platform_HandleFullscreenToggle();
 				break;
 			}
+
+			if (MainFreeze_NativeControlsHandleHostKey(
+			        key,
+			        down,
+			        event.key.repeat))
+				break;
+
+			if (NativeHangout_HandleHostKey(key, down, event.key.repeat))
+				break;
+
+			if (key == SDL_SCANCODE_RETURN)
+				break;
 
 			if (key == SDL_SCANCODE_RSHIFT)
 			{
@@ -1153,10 +1646,67 @@ void Platform_PollHostEvents(void)
 				key = SDL_SCANCODE_LALT;
 			}
 
+#ifdef CTR_INTERNAL
+			/* Hidden local Hangout shortcuts. Function keys stay untouched. */
+			if ((down != 0) &&
+			    (event.key.repeat == 0) &&
+			    ((event.key.mod & SDL_KMOD_CTRL) != 0) &&
+			    ((event.key.mod & SDL_KMOD_ALT) != 0) &&
+			    ((event.key.mod & SDL_KMOD_SHIFT) != 0))
+			{
+				if (key == SDL_SCANCODE_H)
+				{
+					NativeHangout_RequestLaunch();
+					Platform_LogWarn("[Hangout] LOCAL requested (Ctrl+Alt+Shift+H)\n");
+					break;
+				}
+				if (key == SDL_SCANCODE_X)
+				{
+					NativeHangout_RequestExit();
+					Platform_LogWarn("[Hangout] exit requested (Ctrl+Alt+Shift+X)\n");
+					break;
+				}
+			}
+#endif
+
+			/*
+			 * Hidden experimental Z-buffer. This is intentionally absent from
+			 * every public menu and is never persisted between launches.
+			 * Text-entry/rebind handlers above keep first ownership.
+			 */
+			if ((key == SDL_SCANCODE_Z) &&
+			    (down != 0) &&
+			    (event.key.repeat == 0) &&
+			    ((event.key.mod & SDL_KMOD_CTRL) != 0) &&
+			    ((event.key.mod & SDL_KMOD_ALT) != 0) &&
+			    ((event.key.mod & SDL_KMOD_SHIFT) != 0))
+			{
+				Platform_SetExperimentalZBufferMode(
+					!Platform_GetExperimentalZBufferMode());
+				break;
+			}
+
+			/* Plain H toggles the gameplay HUD/floating overlays. Text-entry
+			 * handlers above get first ownership, so typing H in chat/player-name
+			 * fields never toggles this state. The hidden Hangout chord also gets
+			 * first ownership and therefore remains Ctrl+Alt+Shift+H. */
+			if ((key == SDL_SCANCODE_H) &&
+			    (down != 0) &&
+			    (event.key.repeat == 0) &&
+			    ((event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_SHIFT)) == 0))
+			{
+				Platform_SetHudHidden(!Platform_GetHudHidden());
+				Platform_LogWarn("[CTR Native] HUD/floating overlays: %s (H)\n",
+				                 Platform_GetHudHidden() ? "HIDDEN" : "VISIBLE");
+				break;
+			}
+
 			if ((key == SDL_SCANCODE_J) && (down != 0) && (event.key.repeat == 0))
 			{
 				s_debugFreecamEnabled = !s_debugFreecamEnabled;
-				Platform_LogWarn("[CTR Native] Debug freecam %s (J)\n", s_debugFreecamEnabled ? "ON" : "OFF");
+				s_debugFreecamCaptured = 0;
+				s_debugFreecamCameraID = -1;
+				Platform_LogWarn("[CTR Native] Debug freecam %s (J, visual-only)\n", s_debugFreecamEnabled ? "ON" : "OFF");
 				break;
 			}
 
@@ -1191,6 +1741,40 @@ void Platform_PollHostEvents(void)
 	}
 }
 
+int Platform_DebugFreecamIsEnabled(void)
+{
+	return s_debugFreecamEnabled != 0;
+}
+
+int Platform_DebugFreecamConsumesKey(int key)
+{
+	/* J is permanently reserved for the debug camera toggle. While freecam is
+	   active, its movement/look keys must never leak into the player's kart. */
+	if (key == SDL_SCANCODE_J)
+		return 1;
+
+	if (!s_debugFreecamEnabled)
+		return 0;
+
+	switch (key)
+	{
+	case SDL_SCANCODE_W:
+	case SDL_SCANCODE_A:
+	case SDL_SCANCODE_S:
+	case SDL_SCANCODE_D:
+	case SDL_SCANCODE_Q:
+	case SDL_SCANCODE_E:
+	case SDL_SCANCODE_R:
+	case SDL_SCANCODE_I:
+	case SDL_SCANCODE_K:
+	case SDL_SCANCODE_U:
+	case SDL_SCANCODE_O:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 void Platform_DebugFreecamUpdate(struct CameraDC *cDC, struct PushBuffer *pb)
 {
 	const bool *kb;
@@ -1209,25 +1793,31 @@ void Platform_DebugFreecamUpdate(struct CameraDC *cDC, struct PushBuffer *pb)
 
 	if (!s_debugFreecamEnabled)
 	{
-		if (s_debugFreecamCaptured)
-		{
-			cDC->cameraMode = s_debugFreecamSavedMode;
-			cDC->cameraModePrev = -1;
-			cDC->heightSmoothing.startOffset = 0;
-			cDC->BlastedLerp.framesRemaining = 0;
-			cDC->flags |= CAMERA_FLAG_RESET_RAIN_POS | CAMERA_FLAG_DIRECTION_CHANGED;
-			s_debugFreecamCaptured = 0;
-		}
+		s_debugFreecamCaptured = 0;
+		s_debugFreecamCameraID = -1;
 		return;
 	}
 
-	if (!s_debugFreecamCaptured)
+	/* The debug camera is a visual override of the primary view only. Most
+	   importantly, it never writes CameraDC.cameraMode or any transition state.
+	   CTR's real camera, race intro, traffic lights, pause state and cutscenes
+	   therefore continue ticking underneath it exactly as if freecam were off. */
+	if (cDC->cameraID != 0)
+		return;
+
+	if (!s_debugFreecamCaptured ||
+	    s_debugFreecamCameraID != cDC->cameraID)
 	{
-		s_debugFreecamSavedMode = cDC->cameraMode;
+		s_debugFreecamPos[0] = pb->pos.x;
+		s_debugFreecamPos[1] = pb->pos.y;
+		s_debugFreecamPos[2] = pb->pos.z;
+		s_debugFreecamRot[0] = pb->rot.x;
+		s_debugFreecamRot[1] = pb->rot.y;
+		s_debugFreecamRot[2] = pb->rot.z;
 		s_debugFreecamCaptured = 1;
+		s_debugFreecamCameraID = cDC->cameraID;
 	}
 
-	cDC->cameraMode = CAMERA_MODE_FREECAM;
 	kb = SDL_GetKeyboardState(NULL);
 	if (kb == NULL)
 		return;
@@ -1235,12 +1825,13 @@ void Platform_DebugFreecamUpdate(struct CameraDC *cDC, struct PushBuffer *pb)
 	moveSpeed = kb[SDL_SCANCODE_R] ? 96 : 24;
 	turnSpeed = 24;
 
-	if (kb[SDL_SCANCODE_U]) pb->rot.y = (s16)((pb->rot.y + turnSpeed) & 0xfff);
-	if (kb[SDL_SCANCODE_O]) pb->rot.y = (s16)((pb->rot.y - turnSpeed) & 0xfff);
-	if (kb[SDL_SCANCODE_I]) pb->rot.x = (s16)((pb->rot.x + turnSpeed) & 0xfff);
-	if (kb[SDL_SCANCODE_K]) pb->rot.x = (s16)((pb->rot.x - turnSpeed) & 0xfff);
+	if (kb[SDL_SCANCODE_U]) s_debugFreecamRot[1] = (s16)((s_debugFreecamRot[1] + turnSpeed) & 0xfff);
+	if (kb[SDL_SCANCODE_O]) s_debugFreecamRot[1] = (s16)((s_debugFreecamRot[1] - turnSpeed) & 0xfff);
+	if (kb[SDL_SCANCODE_I]) s_debugFreecamRot[0] = (s16)((s_debugFreecamRot[0] + turnSpeed) & 0xfff);
+	if (kb[SDL_SCANCODE_K]) s_debugFreecamRot[0] = (s16)((s_debugFreecamRot[0] - turnSpeed) & 0xfff);
 
-	yaw = ((double)(pb->rot.y & 0xfff) * (2.0 * 3.14159265358979323846)) / 4096.0;
+	yaw = ((double)(s_debugFreecamRot[1] & 0xfff) *
+	       (2.0 * 3.14159265358979323846)) / 4096.0;
 	forwardX = -sin(yaw);
 	forwardZ = -cos(yaw);
 	rightX = cos(yaw);
@@ -1251,10 +1842,21 @@ void Platform_DebugFreecamUpdate(struct CameraDC *cDC, struct PushBuffer *pb)
 	if (kb[SDL_SCANCODE_D]) { moveX += rightX; moveZ += rightZ; }
 	if (kb[SDL_SCANCODE_A]) { moveX -= rightX; moveZ -= rightZ; }
 
-	pb->pos.x = (s16)(pb->pos.x + (s16)lrint(moveX * moveSpeed));
-	pb->pos.z = (s16)(pb->pos.z + (s16)lrint(moveZ * moveSpeed));
-	if (kb[SDL_SCANCODE_E]) pb->pos.y = (s16)(pb->pos.y + moveSpeed);
-	if (kb[SDL_SCANCODE_Q]) pb->pos.y = (s16)(pb->pos.y - moveSpeed);
+	s_debugFreecamPos[0] =
+		(s16)(s_debugFreecamPos[0] + (s16)lrint(moveX * moveSpeed));
+	s_debugFreecamPos[2] =
+		(s16)(s_debugFreecamPos[2] + (s16)lrint(moveZ * moveSpeed));
+	if (kb[SDL_SCANCODE_E])
+		s_debugFreecamPos[1] = (s16)(s_debugFreecamPos[1] + moveSpeed);
+	if (kb[SDL_SCANCODE_Q])
+		s_debugFreecamPos[1] = (s16)(s_debugFreecamPos[1] - moveSpeed);
+
+	pb->pos.x = s_debugFreecamPos[0];
+	pb->pos.y = s_debugFreecamPos[1];
+	pb->pos.z = s_debugFreecamPos[2];
+	pb->rot.x = s_debugFreecamRot[0];
+	pb->rot.y = s_debugFreecamRot[1];
+	pb->rot.z = s_debugFreecamRot[2];
 }
 
 int Platform_PollInput(void)
@@ -1393,7 +1995,10 @@ internal int Native_CatchUpDueVBlanks(void)
 internal void Native_AdvanceHighRefreshFrameTarget(void)
 {
 	const u64 freq = SDL_GetPerformanceFrequency();
-	const u64 hz = (u64)((s_highRefreshTargetFPS > 0) ? s_highRefreshTargetFPS : NATIVE_HOST_PRESENT_HZ_FALLBACK);
+	const u64 hz = (u64)s_highRefreshTargetFPS;
+
+	if ((freq == 0) || (hz == 0))
+		return;
 
 	s_nextHighRefreshFrameCounter += freq / hz;
 	s_highRefreshFrameRemainder += freq % hz;
@@ -1415,9 +2020,22 @@ void Platform_WaitForHighRefreshFrame(void)
 		return;
 	}
 
+	/* Unlimited is a true benchmark/stress mode: no wait against the physical
+	 * monitor and no artificial target. Keep PS1 VBlank services alive at 60 Hz
+	 * so input/audio/callback timing still advances independently. */
+	if ((s_fpsLimitMode == PLATFORM_FPS_LIMIT_UNLIMITED) ||
+	    (s_highRefreshTargetFPS <= 0))
+	{
+		s_nextHighRefreshFrameCounter = 0;
+		s_highRefreshFrameRemainder = 0;
+		Native_CatchUpDueVBlanks();
+		return;
+	}
+
 	now = SDL_GetPerformanceCounter();
-	if ((s_highRefreshLastDisplayCheckCounter == 0) ||
-	    (now - s_highRefreshLastDisplayCheckCounter >= freq * 2))
+	if ((s_fpsLimitMode == PLATFORM_FPS_LIMIT_DISPLAY_HZ) &&
+	    ((s_highRefreshLastDisplayCheckCounter == 0) ||
+	     (now - s_highRefreshLastDisplayCheckCounter >= freq * 2)))
 	{
 		s_highRefreshLastDisplayCheckCounter = now;
 		Platform_RefreshHighRefreshTarget();
@@ -1445,29 +2063,35 @@ void Platform_WaitForHighRefreshFrame(void)
 		s_highRefreshFrameRemainder = 0;
 	}
 
-	while ((now = SDL_GetPerformanceCounter()) < s_nextHighRefreshFrameCounter)
+	now = SDL_GetPerformanceCounter();
+	if (now < s_nextHighRefreshFrameCounter)
 	{
-		u64 remaining;
-		u64 sleepMs;
-
-		// Keep PS1 VBlank services (audio/input/callbacks) at 60 Hz independently
-		// while the actual game/render loop follows the active display refresh.
-		Native_CatchUpDueVBlanks();
-
-		remaining = s_nextHighRefreshFrameCounter - now;
-		if (remaining <= spinWindow)
+		NativePerf_BeginScope(NATIVE_PERF_BUCKET_HIGH_REFRESH_WAIT);
+		while ((now = SDL_GetPerformanceCounter()) < s_nextHighRefreshFrameCounter)
 		{
-			while (SDL_GetPerformanceCounter() < s_nextHighRefreshFrameCounter)
+			u64 remaining;
+			u64 sleepMs;
+
+			// Keep PS1 VBlank services (audio/input/callbacks) at 60 Hz independently
+			// while the actual game/render loop follows the active display refresh.
+			Native_CatchUpDueVBlanks();
+
+			remaining = s_nextHighRefreshFrameCounter - now;
+			if (remaining <= spinWindow)
 			{
+				while (SDL_GetPerformanceCounter() < s_nextHighRefreshFrameCounter)
+				{
+				}
+				break;
 			}
-			break;
-		}
 
-		sleepMs = ((remaining - spinWindow) * 1000) / freq;
-		if (sleepMs > 0)
-		{
-			SDL_Delay((u32)sleepMs);
+			sleepMs = ((remaining - spinWindow) * 1000) / freq;
+			if (sleepMs > 0)
+			{
+				SDL_Delay((u32)sleepMs);
+			}
 		}
+		NativePerf_EndScope(NATIVE_PERF_BUCKET_HIGH_REFRESH_WAIT);
 	}
 
 	Native_CatchUpDueVBlanks();

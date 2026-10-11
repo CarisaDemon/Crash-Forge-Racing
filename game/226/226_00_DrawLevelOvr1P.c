@@ -1,10 +1,18 @@
 #include <common.h>
 #if defined(CTR_NATIVE)
+#include <platform/native_renderer.h>
+void NativeGTE_GetLevelPCView(s16 outM[3][3], s32 outT[3], int *screen, int *wide);
 s32 NativeGpu_CorrectSubpixelNclip(const void *p0, const void *p1, const void *p2, s32 retailNclip);
+void NativeGTE_GetLevelPCProjectionOrigin(s32 *x16,s32 *y16);
+int NativeGTE_GetStoredSubpixelFixedLocal(
+	const void *address, u32 packedSxy, s32 *x16, s32 *y16);
 #endif
 
 #if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
 #include <platform/native_perf.h>
+#include <SDL3/SDL.h>
+int RenderLists_NativeBoxPassesCameraFrustum(struct PushBuffer *pb, const struct BoundingBox *box);
+int RenderLists_NativeBoxFullyInsideCameraFrustum(struct PushBuffer *pb, const struct BoundingBox *box);
 #define WATER_PERF_BEGIN() NativePerf_BeginScope(NATIVE_PERF_BUCKET_WATER_RENDER)
 #define WATER_PERF_END()   NativePerf_EndScope(NATIVE_PERF_BUCKET_WATER_RENDER)
 #else
@@ -92,36 +100,318 @@ static u32 sDrawLevelOvr1P_PrimReserveBias;
 static u32 sDrawLevelOvr1P_MosaicReloadSpanOverride;
 static int sDrawLevelOvr1P_ListHandlersSeedRenderedCursor;
 
-static u32 DrawLevelOvr1P_ReadPackedWord(const void *src)
-{
-	const u8 *bytes = (const u8 *)src;
+static inline u32 DrawLevelOvr1P_ReadPackedWord(const void *src);
+static inline void DrawLevelOvr1P_WritePackedWord(void *dst, u32 value);
 
+#if defined(CTR_NATIVE)
+struct DrawLevelOvr1PProjectionCacheEntry
+{
+	u32 generation;
+	u32 packedSxy;
+	s32 x16;
+	s32 y16;
+	u16 depth;
+};
+
+static struct DrawLevelOvr1PProjectionCacheEntry *sDrawLevelOvr1PProjectionCache;
+static int sDrawLevelOvr1PProjectionCacheCapacity;
+static int sDrawLevelOvr1PProjectionCacheCount;
+static const struct LevVertex *sDrawLevelOvr1PProjectionCacheBase;
+static u32 sDrawLevelOvr1PProjectionCacheGeneration = 1;
+static int sDrawLevelOvr1PProjectionCacheEnabled;
+static int sDrawLevelOvr1PProjectionCacheGeomScreen;
+static u64 sDrawLevelOvr1PProjectionCacheRequests;
+static u64 sDrawLevelOvr1PProjectionCacheHits;
+static u32 sDrawLevelOvr1PProjectionCacheFrames;
+
+static int DrawLevelOvr1P_ProjectionCacheMarkerEnabled(void)
+{
+	static int checked;
+	static int enabled;
+
+	if (!checked)
+	{
+		FILE *marker = fopen("debug/level_projection_cache.enable", "rb");
+		enabled = marker != NULL;
+		if (marker != NULL)
+			fclose(marker);
+		checked = 1;
+	}
+
+	return enabled;
+}
+
+static void DrawLevelOvr1P_BeginProjectionCache(
+	const struct mesh_info *mesh,
+	const struct PushBuffer *pb)
+{
+	sDrawLevelOvr1PProjectionCacheEnabled = 0;
+
+	if (!DrawLevelOvr1P_ProjectionCacheMarkerEnabled() ||
+	    (mesh == NULL) || (pb == NULL) ||
+	    (mesh->ptrVertexArray == NULL) ||
+	    (mesh->numVertex <= 0))
+	{
+		return;
+	}
+
+	if (mesh->numVertex > sDrawLevelOvr1PProjectionCacheCapacity)
+	{
+		struct DrawLevelOvr1PProjectionCacheEntry *newCache;
+		newCache = (struct DrawLevelOvr1PProjectionCacheEntry *)realloc(
+			sDrawLevelOvr1PProjectionCache,
+			(size_t)mesh->numVertex *
+				sizeof(struct DrawLevelOvr1PProjectionCacheEntry));
+		if (newCache == NULL)
+			return;
+
+		memset(
+			newCache + sDrawLevelOvr1PProjectionCacheCapacity,
+			0,
+			(size_t)(mesh->numVertex -
+				sDrawLevelOvr1PProjectionCacheCapacity) *
+				sizeof(struct DrawLevelOvr1PProjectionCacheEntry));
+		sDrawLevelOvr1PProjectionCache = newCache;
+		sDrawLevelOvr1PProjectionCacheCapacity = mesh->numVertex;
+	}
+
+	sDrawLevelOvr1PProjectionCacheGeneration++;
+	if (sDrawLevelOvr1PProjectionCacheGeneration == 0)
+	{
+		memset(
+			sDrawLevelOvr1PProjectionCache,
+			0,
+			(size_t)sDrawLevelOvr1PProjectionCacheCapacity *
+				sizeof(struct DrawLevelOvr1PProjectionCacheEntry));
+		sDrawLevelOvr1PProjectionCacheGeneration = 1;
+	}
+
+	sDrawLevelOvr1PProjectionCacheBase = mesh->ptrVertexArray;
+	sDrawLevelOvr1PProjectionCacheCount = mesh->numVertex;
+	sDrawLevelOvr1PProjectionCacheGeomScreen = pb->distanceToScreen_PREV;
+	sDrawLevelOvr1PProjectionCacheEnabled = 1;
+	sDrawLevelOvr1PProjectionCacheFrames++;
+}
+
+static int DrawLevelOvr1P_ProjectionCacheIndex(
+	const struct LevVertex *vertex)
+{
+	ptrdiff_t index;
+
+	if (!sDrawLevelOvr1PProjectionCacheEnabled ||
+	    (vertex == NULL) ||
+	    (sDrawLevelOvr1PProjectionCacheBase == NULL))
+		return -1;
+
+	index = vertex - sDrawLevelOvr1PProjectionCacheBase;
+	if ((index < 0) ||
+	    (index >= sDrawLevelOvr1PProjectionCacheCount))
+		return -1;
+
+	return (int)index;
+}
+
+static int DrawLevelOvr1P_ProjectionCacheHas(
+	const struct LevVertex *vertex)
+{
+	int index;
+
+	index = DrawLevelOvr1P_ProjectionCacheIndex(vertex);
+	if (index < 0)
+		return 0;
+
+	if (sDrawLevelOvr1PProjectionCache[index].generation !=
+	    sDrawLevelOvr1PProjectionCacheGeneration)
+	{
+		return 0;
+	}
+
+	return 1;
+}
+
+static void DrawLevelOvr1P_ProjectionCacheRecordQuery(
+	u32 requestedVertices,
+	u32 reusedVertices)
+{
+	if (!sDrawLevelOvr1PProjectionCacheEnabled)
+		return;
+
+	sDrawLevelOvr1PProjectionCacheRequests += requestedVertices;
+	sDrawLevelOvr1PProjectionCacheHits += reusedVertices;
+}
+
+static int DrawLevelOvr1P_ProjectionCacheGetDepth(
+	const struct LevVertex *vertex,
+	u32 *depthOut)
+{
+	int index;
+
+	if (depthOut == NULL)
+		return 0;
+
+	index = DrawLevelOvr1P_ProjectionCacheIndex(vertex);
+	if ((index < 0) ||
+	    (sDrawLevelOvr1PProjectionCache[index].generation !=
+	     sDrawLevelOvr1PProjectionCacheGeneration))
+	{
+		return 0;
+	}
+
+	*depthOut = sDrawLevelOvr1PProjectionCache[index].depth;
+	return 1;
+}
+
+static int DrawLevelOvr1P_ProjectionCacheLoad(
+	const struct LevVertex *vertex,
+	struct DrawLevelOvr1PScratchVertex *projected,
+	u32 *depthOut)
+{
+	int index;
+	struct DrawLevelOvr1PProjectionCacheEntry *entry;
+
+	if ((projected == NULL) || (depthOut == NULL))
+		return 0;
+
+	index = DrawLevelOvr1P_ProjectionCacheIndex(vertex);
+	if (index < 0)
+		return 0;
+
+	entry = &sDrawLevelOvr1PProjectionCache[index];
+	if (entry->generation != sDrawLevelOvr1PProjectionCacheGeneration)
+		return 0;
+
+	DrawLevelOvr1P_WritePackedWord(
+		&projected->posScreen[0],
+		entry->packedSxy);
+	NativeGTE_SaveSXYStoreExact(
+		&projected->posScreen[0],
+		entry->packedSxy,
+		entry->x16,
+		entry->y16,
+		entry->depth);
+	*depthOut = entry->depth;
+	return 1;
+}
+
+static void DrawLevelOvr1P_ProjectionCacheStore(
+	const struct LevVertex *vertex,
+	const struct DrawLevelOvr1PScratchVertex *projected,
+	u32 depth)
+{
+	int index;
+	u32 packedSxy;
+	s32 x16;
+	s32 y16;
+	struct DrawLevelOvr1PProjectionCacheEntry *entry;
+
+	index = DrawLevelOvr1P_ProjectionCacheIndex(vertex);
+	if ((index < 0) || (projected == NULL))
+		return;
+
+	packedSxy = DrawLevelOvr1P_ReadPackedWord(&projected->posScreen[0]);
+	if (!NativeGTE_GetStoredSubpixelFixedLocal(
+			&projected->posScreen[0],
+			packedSxy,
+			&x16,
+			&y16))
+	{
+		x16 = (s32)(s16)packedSxy * 65536;
+		y16 = (s32)(s16)(packedSxy >> 16) * 65536;
+	}
+
+	entry = &sDrawLevelOvr1PProjectionCache[index];
+	entry->generation = sDrawLevelOvr1PProjectionCacheGeneration;
+	entry->packedSxy = packedSxy;
+	entry->x16 = x16;
+	entry->y16 = y16;
+	entry->depth = (u16)depth;
+}
+
+static int DrawLevelOvr1P_ProjectionCacheDepthOverflows(u32 depth)
+{
+	return (u32)sDrawLevelOvr1PProjectionCacheGeomScreen >= (depth * 2u);
+}
+
+static void DrawLevelOvr1P_LogProjectionCache(void)
+{
+	if (!sDrawLevelOvr1PProjectionCacheEnabled ||
+	    (sDrawLevelOvr1PProjectionCacheFrames < 300))
+		return;
+
+	Platform_Log(
+		"[LEVEL PROJECTION CACHE] requests=%llu hits=%llu hitRate=%.1f%%\n",
+		(unsigned long long)sDrawLevelOvr1PProjectionCacheRequests,
+		(unsigned long long)sDrawLevelOvr1PProjectionCacheHits,
+		sDrawLevelOvr1PProjectionCacheRequests != 0 ?
+			(100.0 *
+			 (double)sDrawLevelOvr1PProjectionCacheHits /
+			 (double)sDrawLevelOvr1PProjectionCacheRequests) :
+			0.0);
+
+	sDrawLevelOvr1PProjectionCacheRequests = 0;
+	sDrawLevelOvr1PProjectionCacheHits = 0;
+	sDrawLevelOvr1PProjectionCacheFrames = 0;
+}
+#endif
+
+static int DrawLevelOvr1P_NativeCameraAllowsQuadBlock(struct PushBuffer *pb, const struct QuadBlock *block)
+{
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	return (block != NULL) &&
+	       RenderLists_NativeBoxPassesCameraFrustum(pb, &block->bbox);
+#else
+	(void)pb;
+	(void)block;
+	return 1;
+#endif
+}
+
+static inline u32 DrawLevelOvr1P_ReadPackedWord(const void *src)
+{
+#if SDL_BYTEORDER == SDL_LIL_ENDIAN
+	u32 value;
+	memcpy(&value, src, sizeof(value));
+	return value;
+#else
+	const u8 *bytes = (const u8 *)src;
 	return (u32)bytes[0] | ((u32)bytes[1] << 8) | ((u32)bytes[2] << 16) | ((u32)bytes[3] << 24);
+#endif
 }
 
-static u16 DrawLevelOvr1P_ReadPackedHalf(const void *src)
+static inline u16 DrawLevelOvr1P_ReadPackedHalf(const void *src)
 {
+#if SDL_BYTEORDER == SDL_LIL_ENDIAN
+	u16 value;
+	memcpy(&value, src, sizeof(value));
+	return value;
+#else
 	const u8 *bytes = (const u8 *)src;
-
 	return (u16)((u16)bytes[0] | ((u16)bytes[1] << 8));
+#endif
 }
 
-static void DrawLevelOvr1P_WritePackedWord(void *dst, u32 value)
+static inline void DrawLevelOvr1P_WritePackedWord(void *dst, u32 value)
 {
+#if SDL_BYTEORDER == SDL_LIL_ENDIAN
+	memcpy(dst, &value, sizeof(value));
+#else
 	u8 *bytes = (u8 *)dst;
-
 	bytes[0] = (u8)value;
 	bytes[1] = (u8)(value >> 8);
 	bytes[2] = (u8)(value >> 16);
 	bytes[3] = (u8)(value >> 24);
+#endif
 }
 
-static void DrawLevelOvr1P_WritePackedHalf(void *dst, u16 value)
+static inline void DrawLevelOvr1P_WritePackedHalf(void *dst, u16 value)
 {
+#if SDL_BYTEORDER == SDL_LIL_ENDIAN
+	memcpy(dst, &value, sizeof(value));
+#else
 	u8 *bytes = (u8 *)dst;
-
 	bytes[0] = (u8)value;
 	bytes[1] = (u8)(value >> 8);
+#endif
 }
 
 struct DrawLevelOvr1PFullDynamicRecursiveGate
@@ -148,6 +438,7 @@ static const int sDrawLevelOvr1PFullDynamicLowIndices[4] = {
     3,
 };
 
+static struct TextureLayout *DrawLevelOvr1P_ResolveTexturePointerChecked(uintptr_t texturePtr);
 static const int sDrawLevelOvr1PGridFaceIndices[4][4] = {
     {0, 4, 5, 6},
     {4, 1, 6, 7},
@@ -259,21 +550,14 @@ static u32 DrawLevelOvr1P_GetActiveDrawOrderLow(void)
 static void DrawLevelOvr1P_CopyScratchWords(const u32 *source, const struct DrawLevelOvrBucketSetupCopy *copy)
 {
 	u32 *scratch = CTR_SCRATCHPAD_PTR(u32, copy->scratchOffset);
-
-	for (u32 scratchWordIndex = 0; scratchWordIndex <= copy->lastWordIndex; scratchWordIndex++)
-	{
-		scratch[scratchWordIndex] = source[scratchWordIndex];
-	}
+	memcpy(scratch, source, ((size_t)copy->lastWordIndex + 1u) * sizeof(u32));
 }
 
 static void Ovr226_800ab3dc_CopyClipRecordJumpTable(void)
 {
 	u32 *clipRecordJumpTable = CTR_SCRATCHPAD_PTR(u32, DRAW_LEVEL_OVR1P_GT3_CLIP_RECORD_JUMP_TABLE_OFFSET);
-
-	for (s32 jumpWordIndex = 0; jumpWordIndex < OVR226_CLIP_RECORD_JUMP_WORD_COUNT; jumpWordIndex++)
-	{
-		clipRecordJumpTable[jumpWordIndex] = R226.clipRecordJumpTable[jumpWordIndex];
-	}
+	memcpy(clipRecordJumpTable, R226.clipRecordJumpTable,
+	       (size_t)OVR226_CLIP_RECORD_JUMP_WORD_COUNT * sizeof(u32));
 }
 
 static int Ovr226_800ab3d4_EmptyGT4ClipRecordLabel(void)
@@ -299,11 +583,8 @@ static const struct DrawLevelOvrBucketSetupRecord *DrawLevelOvr1P_FindBucketSetu
 static void Ovr226_800a0ddc_CopyScratchInitTable(void)
 {
 	u32 *scratch = CTR_SCRATCHPAD_PTR(u32, DRAW_LEVEL_OVR1P_SCRATCH_INIT_TABLE_OFFSET);
-
-	for (s32 scratchWordIndex = 0; scratchWordIndex < OVR226_SCRATCH_INIT_WORD_COUNT; scratchWordIndex++)
-	{
-		scratch[scratchWordIndex] = R226.scratchInitTable[scratchWordIndex];
-	}
+	memcpy(scratch, R226.scratchInitTable,
+	       (size_t)OVR226_SCRATCH_INIT_WORD_COUNT * sizeof(u32));
 }
 
 static void Ovr226_800a0e44_ApplyBucketSetup(u32 setupAddress)
@@ -328,12 +609,25 @@ static u32 DrawLevelOvr1P_Select4x1ProjectedTableWord(const struct QuadBlock *bl
 	return *CTR_SCRATCHPAD_PTR(u32, DRAW_LEVEL_OVR1P_SCRATCH_INIT_TABLE_OFFSET + (int)(tableIndex * sizeof(u32)));
 }
 
+#if defined(CTR_NATIVE)
+static int DrawLevelOvr1P_TryCached4x1Selector(
+    const struct QuadBlock *block,
+    const struct DrawLevelOvr1PFaceSelector *selector,
+    u32 tableWord, int *indices);
+#endif
+
 static u32 DrawLevelOvr1P_Select4x1ProjectedIndices(const struct QuadBlock *block, const struct DrawLevelOvr1PFaceSelector *selector, int *indices)
 {
 	u32 tableWord = DrawLevelOvr1P_Select4x1ProjectedTableWord(block, selector);
 
 	DrawLevelOvr1P_Scratch()->selected4x1TableWord = tableWord;
 
+#if defined(CTR_NATIVE)
+    /* Selected tableWord and slot still come from LIVE retail scratch data;
+     * caching only the immutable selector decode preserves OT/UV semantics. */
+    if (DrawLevelOvr1P_TryCached4x1Selector(block,selector,tableWord,indices))
+        return tableWord;
+#endif
 	for (s32 vertexIndex = 0; vertexIndex < 4; vertexIndex++)
 	{
 		u32 tableShift = (tableWord >> ((3 - vertexIndex) * 8)) & 0x1f;
@@ -390,6 +684,718 @@ static int DrawLevelOvr1P_IsPlausibleTextureLayout(const struct TextureLayout *t
 }
 
 #ifdef CTR_NATIVE
+#define DRAW_LEVEL_NATIVE_POINTER_CACHE_SIZE 1024u
+
+struct DrawLevelOvr1PNativeSpanCacheEntry
+{
+	uintptr_t ptr;
+	uintptr_t size;
+	u32 generation;
+	u8 result;
+};
+
+struct DrawLevelOvr1PNativeTextureCacheEntry
+{
+	u32 value;
+	u32 generation;
+	u8 result;
+};
+
+struct DrawLevelOvr1PNativePsxWordCacheEntry
+{
+	u32 hostWord;
+	u32 psxWord;
+	u32 generation;
+	u8 result;
+};
+
+static struct DrawLevelOvr1PNativeSpanCacheEntry sDrawLevelOvr1P_NativeSpanCache[DRAW_LEVEL_NATIVE_POINTER_CACHE_SIZE];
+static struct DrawLevelOvr1PNativeTextureCacheEntry sDrawLevelOvr1P_NativeTextureCache[DRAW_LEVEL_NATIVE_POINTER_CACHE_SIZE];
+static struct DrawLevelOvr1PNativePsxWordCacheEntry sDrawLevelOvr1P_NativePsxWordCache[DRAW_LEVEL_NATIVE_POINTER_CACHE_SIZE];
+static u32 sDrawLevelOvr1P_NativePointerCacheGeneration = 1;
+static const struct mesh_info *sDrawLevelOvr1P_NativePointerCacheMesh;
+static const void *sDrawLevelOvr1P_NativePointerCacheQuadBlocks;
+static s32 sDrawLevelOvr1P_NativePointerCacheLevelID = -1;
+static void *sDrawLevelOvr1P_NativePointerCachePackStart[4];
+static void *sDrawLevelOvr1P_NativePointerCachePackEnd[4];
+static s32 sDrawLevelOvr1P_NativePointerCachePackSize[4];
+
+/* Native x86 level-topology predecode. The source vertex memory is NEVER
+ * copied: SCVert/water animations still update the exact same live positions
+ * and colors, and GTE/clipping/OT emission are unchanged. The nine index-to-
+ * pointer conversions per quad are performed once per loaded mesh instead
+ * of once per visible quad every frame. Invalid/out-of-range topology falls
+ * back to the retail index path. Disable for A/B with
+ * debug/level_compiled_vertices.disable before starting the process. */
+#define DRAW_LEVEL_PREDECODE_MAX_QUADS 131072
+struct DrawLevelOvr1PCompiledVertices
+{
+    struct LevVertex *v[9];
+    /* Native classic 4x1 selector decode, loaded once per mesh.
+     * The exact table word and active draw_order_low are both checked at
+     * runtime to avoid stale data if custom maps mutate the overlay data. */
+    u32 nativeSelectorWord[4];
+    u8 nativeSelectorCorner[4][4];
+    u8 nativeSelectorMask;
+    /* One-time retail selector decode for each 4x1 face. Live vertex
+     * pointers are still authoritative, including custom vertex colors.
+     * No queued native face is eligible for LOD QA unless all four bits
+     * were validated while generating the immutable GPU mesh. */
+    u8 nativeFaceCorner[4][4];
+    u8 nativeLodFaceMask;
+    u8 valid;
+};
+static struct DrawLevelOvr1PCompiledVertices *sDrawLevelOvr1P_CompiledVertices;
+static struct QuadBlock *sDrawLevelOvr1P_CompiledQuadBase;
+static struct LevVertex *sDrawLevelOvr1P_CompiledVertexBase;
+static s32 sDrawLevelOvr1P_CompiledQuadCount;
+
+/* Never enabled in a stable build unless the user deliberately creates the
+ * QA marker. No change to gameplay, render output, or OT packet structure. */
+static int DrawLevelOvr1P_TryCached4x1Selector(
+    const struct QuadBlock *block,
+    const struct DrawLevelOvr1PFaceSelector *selector,
+    u32 tableWord, int *indices)
+{
+    static int checked,enabled,logged;
+    static unsigned long hits;
+    if(!checked)
+    {
+        FILE *f=fopen("debug/level_selector_cache_qa.enable","rb");
+        enabled=(f!=NULL);
+        if(f)fclose(f);
+        checked=1;
+    }
+    if(!enabled || block==NULL || selector==NULL || indices==NULL)
+        return 0;
+    if (!logged)
+    {
+        Platform_Log("[LEVEL CPU] opt-in classic 4x1 selector cache active (exact retail table-word check)\n");
+        logged=1;
+    }
+    const uintptr_t addr=(uintptr_t)block;
+    const uintptr_t start=(uintptr_t)sDrawLevelOvr1P_CompiledQuadBase;
+    if (start==0 || addr<start ||
+        sDrawLevelOvr1P_CompiledVertices==NULL ||
+        sDrawLevelOvr1P_CompiledQuadCount<=0 ||
+        DrawLevelOvr1P_GetActiveDrawOrderLow()!=block->draw_order_low)
+        return 0;
+    const uintptr_t diff=addr-start;
+    if ((diff%sizeof(*block))!=0 ||
+        diff/sizeof(*block)>=(size_t)sDrawLevelOvr1P_CompiledQuadCount)
+        return 0;
+    const struct DrawLevelOvr1PCompiledVertices *entry=
+        &sDrawLevelOvr1P_CompiledVertices[diff/sizeof(*block)];
+    int face=-1;
+    for(int f=0;f<4;++f)
+    {
+        if(selector==&sDrawLevelOvr1P4x1FaceSelectors[f])
+        {
+            face=f;
+            break;
+        }
+    }
+    if(face<0 || !(entry->nativeSelectorMask & (1u<<face)) ||
+       entry->nativeSelectorWord[face]!=tableWord)
+        return 0;
+
+    for(int c=0;c<4;++c)
+        indices[c]=entry->nativeSelectorCorner[face][c];
+    ++hits;
+    if((hits&65535ul)==0)
+        Platform_Log("[LEVEL CPU] classic 4x1 selector cache hits=%lu\n",hits);
+    return 1;
+}
+
+static void DrawLevelOvr1P_ResetCompiledVertices(void)
+{
+    free(sDrawLevelOvr1P_CompiledVertices);
+    sDrawLevelOvr1P_CompiledVertices = NULL;
+    sDrawLevelOvr1P_CompiledQuadBase = NULL;
+    sDrawLevelOvr1P_CompiledVertexBase = NULL;
+    sDrawLevelOvr1P_CompiledQuadCount = 0;
+}
+
+/* Turbocharged-style immutable level exclusion. GPU compilation is still
+ * experimental; keep animated water/scenery in the authoritative retail OT.
+ * Address bounds are checked before computing a vertex index (custom maps). */
+static void DrawLevelOvr1P_NativeGpuMarkAnimatedVertex(
+    u8 *bits, const struct mesh_info *mesh, const struct LevVertex *vertex)
+{
+    if (!bits || !mesh || !vertex || mesh->numVertex <= 0)
+        return;
+    const uintptr_t base = (uintptr_t)mesh->ptrVertexArray;
+    const uintptr_t addr = (uintptr_t)vertex;
+    const size_t bytes = (size_t)mesh->numVertex * sizeof(struct LevVertex);
+    if (addr < base || addr - base >= bytes)
+        return;
+    const size_t offset = (size_t)(addr - base);
+    if (offset % sizeof(struct LevVertex) == 0)
+        bits[offset / sizeof(struct LevVertex)] = 1;
+}
+
+static void DrawLevelOvr1P_CompileLevelVertices(const struct mesh_info *mesh)
+{
+    FILE *disableMarker;
+    DrawLevelOvr1P_ResetCompiledVertices();
+    if (mesh == NULL || mesh->ptrVertexArray == NULL || mesh->ptrQuadBlockArray == NULL ||
+        mesh->numVertex <= 0 || mesh->numQuadBlock <= 0 ||
+        mesh->numQuadBlock > DRAW_LEVEL_PREDECODE_MAX_QUADS)
+        return;
+    disableMarker = fopen("debug/level_compiled_vertices.disable", "rb");
+    if (disableMarker != NULL)
+    {
+        fclose(disableMarker);
+        return;
+    }
+    const size_t n = (size_t)mesh->numQuadBlock;
+    struct DrawLevelOvr1PCompiledVertices *out =
+        (struct DrawLevelOvr1PCompiledVertices *)calloc(n, sizeof(*out));
+    if (out == NULL)
+        return;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const struct QuadBlock *block = &mesh->ptrQuadBlockArray[i];
+        int valid = 1;
+        for (int j = 0; j < 9; ++j)
+        {
+            u32 vertexIndex = block->index[j];
+            if (vertexIndex >= (u32)mesh->numVertex)
+            {
+                valid = 0;
+                break;
+            }
+            out[i].v[j] = &mesh->ptrVertexArray[vertexIndex];
+        }
+        out[i].valid = (u8)valid;
+        if (!valid) continue;
+        /* Predecode retail 4x1 face table once. A custom table that does not
+         * map every corner to one of our 9 live projected vertices simply
+         * leaves that face on the unchanged retail selector path. */
+        for(int face=0;face<4;++face)
+        {
+            const struct DrawLevelOvr1PFaceSelector *sel=
+                &sDrawLevelOvr1P4x1FaceSelectors[face];
+            const u32 pattern=(block->draw_order_low >> sel->drawOrderShift)&0x1fu;
+            if(pattern>=OVR226_SCRATCH_INIT_WORD_COUNT)continue;
+            const u32 word=R226.scratchInitTable[pattern];
+            u8 corners[4];
+            int legal=1;
+            for(int c=0;c<4;++c)
+            {
+                const u32 shift=(word>>((3-c)*8))&0x1fu;
+                const u32 offset=(sel->selector>>shift)&0xffu;
+                if(offset % sizeof(struct DrawLevelOvr1PScratchVertex)!=0 ||
+                   offset/sizeof(struct DrawLevelOvr1PScratchVertex)>=9u)
+                {
+                    legal=0;
+                    break;
+                }
+                corners[c]=(u8)(offset/sizeof(struct DrawLevelOvr1PScratchVertex));
+            }
+            if(!legal)continue;
+            out[i].nativeSelectorWord[face]=word;
+            for(int c=0;c<4;++c)
+                out[i].nativeSelectorCorner[face][c]=corners[c];
+            out[i].nativeSelectorMask|=(u8)(1u<<face);
+        }
+    }
+    /* Stage 1: precompile the world-space 3x3 topology of each quadblock into
+     * GPU-resident triangles for native renderer validation. Still draw ALL
+     * retail geometry; replacement awaits camera/texture/OT visual QA.
+     * Texture, water and animated positions are intentionally not captured
+     * here because retail live render remains authoritative. */
+    if (NativeRenderer_LevelPCEnabled() && n <= 16384)
+    {
+        /* Retail GT3 topology: first 0-1-2, second 1-3-2. */
+        static const u8 faceToTriangle[6] = {0, 1, 2, 1, 3, 2};
+        NativeLevelPCVertex *gpuVertices =
+            (NativeLevelPCVertex *)calloc(n * 24u, sizeof(*gpuVertices));
+        u8 *gpuFaceTypes = (u8 *)malloc(n * 4u);
+        if (gpuFaceTypes != NULL) memset(gpuFaceTypes, 255, n * 4u);
+        /* Only classify/cache a level whose live asset tables match this mesh.
+         * Missing metadata or allocation failures keep all terrain on PS1. */
+        const struct Level *nativeGpuLevel =
+            (sdata->gGT != NULL) ? sdata->gGT->level1 : NULL;
+        const int nativeGpuLevelTrusted =
+            nativeGpuLevel && nativeGpuLevel->ptr_mesh_info == mesh &&
+            nativeGpuLevel->numWaterVertices >= 0 &&
+            nativeGpuLevel->numWaterVertices <= mesh->numVertex * 2 &&
+            nativeGpuLevel->numSCVert >= 0 &&
+            nativeGpuLevel->numSCVert <= mesh->numVertex * 2 &&
+            (nativeGpuLevel->numWaterVertices == 0 || nativeGpuLevel->ptr_water != NULL) &&
+            (nativeGpuLevel->numSCVert == 0 || nativeGpuLevel->ptrSCVert != NULL);
+        u8 *nativeAnimated = (u8 *)calloc((size_t)mesh->numVertex, 1);
+        u8 *nativeWaterBlocks = (u8 *)calloc(n, 1);
+        if (gpuVertices != NULL && gpuFaceTypes != NULL &&
+            nativeGpuLevelTrusted && nativeAnimated != NULL &&
+            nativeWaterBlocks != NULL)
+        {
+            /* Animations change the source vertex positions/colors after VBO
+             * upload. Exclude all quadblocks referencing any such vertex. */
+            for (int i = 0; nativeGpuLevel->ptr_water != NULL &&
+                 i < nativeGpuLevel->numWaterVertices; ++i)
+                DrawLevelOvr1P_NativeGpuMarkAnimatedVertex(
+                    nativeAnimated, mesh, nativeGpuLevel->ptr_water[i].v);
+            for (int i = 0; nativeGpuLevel->ptrSCVert != NULL &&
+                 i < nativeGpuLevel->numSCVert; ++i)
+                DrawLevelOvr1P_NativeGpuMarkAnimatedVertex(
+                    nativeAnimated, mesh, nativeGpuLevel->ptrSCVert[i].v);
+
+            /* Retail's water BSP leaf type must remain dynamic, including
+             * water blocks that do not reference animated source vertices. */
+            for (int i = 0; mesh->bspRoot != NULL &&
+                 i < mesh->numBspNodes; ++i)
+            {
+                const struct BSP *leaf = &mesh->bspRoot[i];
+                if ((leaf->flag & (BSP_NODE_FLAG_LEAF | BSP_LEAF_FLAG_WATER)) !=
+                    (BSP_NODE_FLAG_LEAF | BSP_LEAF_FLAG_WATER) ||
+                    leaf->data.leaf.ptrQuadBlockArray == NULL)
+                    continue;
+                const uintptr_t base = (uintptr_t)mesh->ptrQuadBlockArray;
+                const uintptr_t addr = (uintptr_t)leaf->data.leaf.ptrQuadBlockArray;
+                if (addr < base || addr - base >= n * sizeof(struct QuadBlock) ||
+                    (addr - base) % sizeof(struct QuadBlock) != 0)
+                    continue;
+                const size_t start = (size_t)(addr - base) / sizeof(struct QuadBlock);
+                for (int j = 0; j < leaf->data.leaf.numQuads &&
+                     start + (size_t)j < n; ++j)
+                    nativeWaterBlocks[start + (size_t)j] = 1;
+            }
+            int staticRejectedWater=0;
+            int staticRejectedAnimated=0;
+            int staticRejectedSelector=0;
+            int staticRejectedUnresolved=0;
+            int staticCandidateBlocks=0;
+            int staticRejectedStrictBlocks=0;
+            int staticRejectedStrictBlendFaces=0;
+            int staticRejectedStrictOrderFaces=0;
+            int staticRejectedStrictUnsupportedFaces=0;
+            int strictStatic=0;
+            /* Opt-in defensive QA: the static cache is NOT allowed to
+             * replace retail transparent materials and OT-order-biased faces.
+             * Any unsafe face makes the entire quadblock fall back to PS1. */
+            FILE *strictFlag=fopen("debug/level_pc_gpu_strict_material_stress.enable","rb");
+            if (strictFlag)
+            {
+                strictStatic=1;
+                fclose(strictFlag);
+            }
+            int previewTextureLod=0;
+            int lodAccepted=0;
+            int lodFallback=0;
+            int selectorExact=0;
+            int selectorFallback=0;
+            int selectorUvFlipped=0;
+            int selectorSingleTriangles=0;
+            /* Test-only diagnostic: compare the geometrically coherent 3x3 grid
+             * against the 4x1 retail-selector vertex layout, without changing
+             * PS1 OT or game physics. Enable before process startup only. */
+            int previewGridTopology=0;
+            FILE *gridFlag=fopen("debug/level_pc_gpu_grid_topology_qa.enable","rb");
+            if(gridFlag)
+            {
+                previewGridTopology=1;
+                fclose(gridFlag);
+                Platform_Log("[LEVEL PC GPU] stress QA using grid 3x3 topology, not 4x1 selectors\n");
+            }
+            int previewLowQuad=0;
+            FILE *lowFlag=fopen("debug/level_pc_gpu_far_low_quad_qa.enable","rb");
+            if(lowFlag)
+            {
+                previewLowQuad=1;
+                fclose(lowFlag);
+                Platform_Log("[LEVEL PC GPU] QA using one full low-detail quad per block\n");
+            }
+            FILE *lodFile=fopen("debug/level_pc_texture_lod_index.txt","rb");
+            if (lodFile!=NULL)
+            {
+                int readIndex=0;
+                if (fscanf(lodFile,"%d",&readIndex)==1 &&
+                    readIndex>=0 && readIndex<=3)
+                    previewTextureLod=readIndex;
+                fclose(lodFile);
+            }
+            for (size_t qi = 0; qi < n; ++qi)
+            {
+                if (!out[qi].valid) continue;
+                const struct QuadBlock *staticBlock = &mesh->ptrQuadBlockArray[qi];
+                if (nativeWaterBlocks[qi])
+                {
+                    ++staticRejectedWater;
+                    continue;
+                }
+                int moving = 0;
+                for (int j = 0; j < 9; ++j)
+                    if (nativeAnimated[staticBlock->index[j]]) { moving = 1; break; }
+                if (moving)
+                {
+                    ++staticRejectedAnimated;
+                    continue;
+                }
+                int animatedTexture = (((uintptr_t)staticBlock->ptr_texture_low & 1u) != 0);
+                for (int f = 0; f < 4; ++f)
+                    animatedTexture |= (((uintptr_t)staticBlock->ptr_texture_mid[f] & 1u) != 0);
+                if (animatedTexture)
+                {
+                    ++staticRejectedSelector;
+                    continue;
+                }
+                ++staticCandidateBlocks;
+                int strictBlockUnsafe=0;
+                if (strictStatic)
+                {
+                    /* A textured level is opaque ONLY when both tpage blend
+                     * bits are set (Turbocharged's 0x60 retail test). */
+                    for (int f=0; f<4; ++f)
+                    {
+                        const struct TextureLayout *baseTexture =
+                            DrawLevelOvr1P_ResolveTexturePointerChecked(
+                                (uintptr_t)staticBlock->ptr_texture_mid[f]);
+                        if (baseTexture==NULL || ((baseTexture->tpage >> 7) & 3u) >= 3u)
+                        {
+                            ++staticRejectedStrictUnsupportedFaces;
+                            strictBlockUnsafe=1;
+                        }
+                        else if ((baseTexture->tpage & 0x60u) != 0x60u)
+                        {
+                            ++staticRejectedStrictBlendFaces;
+                            strictBlockUnsafe=1;
+                        }
+                        /* Per-face signed draw order changes OT slot relative
+                         * to camera depth. Static scene layer cannot yet
+                         * reproduce that, so leave the entire block retail. */
+                        const s8 order=(s8)(staticBlock->draw_order_high >> (f*8));
+                        if (order!=0)
+                        {
+                            ++staticRejectedStrictOrderFaces;
+                            strictBlockUnsafe=1;
+                        }
+                    }
+                }
+                if (strictBlockUnsafe)
+                {
+                    ++staticRejectedStrictBlocks;
+                    continue;
+                }
+                if (previewLowQuad)
+                {
+                    /* Retail FULL_DYNAMIC far path uses the single low-LOD
+                     * face {0,1,2,3}, not four 4x1 mid-LOD faces. This
+                     * immutable QA VBO is consumed ONLY when retail's own
+                     * near-mask and offscreen checks permit the direct path. */
+                    const struct TextureLayout *lowTex =
+                        DrawLevelOvr1P_ResolveTexturePointerChecked(
+                            (uintptr_t)mesh->ptrQuadBlockArray[qi].ptr_texture_low);
+                    const int format=lowTex ? ((lowTex->tpage>>7)&3) : 3;
+                    if (format < 3)
+                    {
+                        const u8 U[4]={lowTex->u0,lowTex->u1,lowTex->u2,lowTex->u3};
+                        const u8 V[4]={lowTex->v0,lowTex->v1,lowTex->v2,lowTex->v3};
+                        gpuFaceTypes[qi*4u]=(u8)format;
+                        for (int j=0;j<6;++j)
+                        {
+                            const int corner=faceToTriangle[j];
+                            const struct LevVertex *v=out[qi].v[corner];
+                            NativeLevelPCVertex *dst=&gpuVertices[qi*24u+(size_t)j];
+                            dst->x=(float)v->pos.x;
+                            dst->y=(float)v->pos.y;
+                            dst->z=(float)v->pos.z;
+                            dst->u=(float)U[corner];
+                            dst->v=(float)V[corner];
+                            dst->page=(float)(lowTex->tpage & 0x1f);
+                            dst->clut=(float)lowTex->clut;
+                            dst->r=v->color_hi[0];
+                            dst->g=v->color_hi[1];
+                            dst->b=v->color_hi[2];
+                            dst->a=255;
+                        }
+                    }
+                    continue;
+                }
+                for (int face = 0; face < 4; ++face)
+                {
+                    /* Retail uses a selector table derived from the packed
+                     * per-face rotation/mode, not fixed grid indices.
+                     * Precompute this ONCE per mesh, not every camera frame.
+                     * If its table index is outside the 24 known words or
+                     * a byte does not map onto a projected record, preserve
+                     * the legacy QA grid as a safe fallback.
+                     */
+                    const struct DrawLevelOvr1PFaceSelector *selector=
+                        &sDrawLevelOvr1P4x1FaceSelectors[face];
+                    const u32 patternIndex=
+                        (mesh->ptrQuadBlockArray[qi].draw_order_low >>
+                         selector->drawOrderShift)&0x1fu;
+                    int faceVertexIndex[4];
+                    int faceSelectorValid=(!previewGridTopology && patternIndex<OVR226_SCRATCH_INIT_WORD_COUNT);
+                    int uvFlipped=0;
+                    int oneTriangle=0;
+                    int reverseWinding=0;
+                    if (faceSelectorValid)
+                    {
+                        const u32 tableWord=R226.scratchInitTable[patternIndex];
+                        uvFlipped=((s32)(tableWord<<8))<0;
+                        /* CTR retail table bit 7: GT3, not GT4.
+                         * Do not draw a fabricated second triangle. */
+                        oneTriangle=(tableWord&0x80u)!=0;
+                        reverseWinding=(tableWord&0x80000000u)!=0;
+                        for (int c=0;c<4;++c)
+                        {
+                            const u32 shift=(tableWord>>((3-c)*8))&0x1fu;
+                            const u32 rawOffset=(selector->selector>>shift)&0xffu;
+                            if (rawOffset%sizeof(struct DrawLevelOvr1PScratchVertex)!=0 ||
+                                rawOffset/sizeof(struct DrawLevelOvr1PScratchVertex)>=9u)
+                            {
+                                faceSelectorValid=0;
+                                break;
+                            }
+                            faceVertexIndex[c]=(int)(rawOffset/
+                                sizeof(struct DrawLevelOvr1PScratchVertex));
+                        }
+                    }
+                    if(faceSelectorValid)
+                    {
+                        ++selectorExact;
+                        if(uvFlipped)++selectorUvFlipped;
+                        if(oneTriangle)++selectorSingleTriangles;
+                    }
+                    else ++selectorFallback;
+                    const struct TextureLayout *tex =
+                        DrawLevelOvr1P_ResolveTexturePointerChecked(
+                            (uintptr_t)mesh->ptrQuadBlockArray[qi].ptr_texture_mid[face]);
+                    if(tex && previewTextureLod)
+                    {
+                        /* PS1 quadblock mid textures are sequential layouts
+                         * for distance-based LOD (+1/+2/+3). Choose an
+                         * explicit source for controlled native GPU QA.
+                         * This does not alter retail texture choice. */
+                        const struct TextureLayout *candidate =
+                            DrawLevelOvr1P_ResolveTexturePointerChecked(
+                                (uintptr_t)(tex+previewTextureLod));
+                        if(candidate)
+                        {
+                            tex=candidate;
+                            ++lodAccepted;
+                        }
+                        else ++lodFallback;
+                    }
+                    int format=tex?((tex->tpage>>7)&3):3;
+                    /* Static native geometry buckets match Turbocharged:
+                     * [0..2] texture format, [0/1] GT4/GT3,
+                     * [0..2] cull both/normal/reversed. 255=ineligible.
+                     * The retail per-face scratch selector determines
+                     * triangle count AND winding. */
+                    const int bothSides=
+                        (staticBlock->draw_order_low & QUADBLOCK_DRAW_ORDER_LOW_DOUBLE_SIDED)!=0;
+                    const int cullClass=bothSides ? 0 : (reverseWinding ? 2 : 1);
+                    if(format<3 && faceSelectorValid)
+                    {
+                        gpuFaceTypes[qi*4u+(size_t)face]=(u8)(
+                            format + (oneTriangle ? 3 : 0) + cullClass * 6);
+                        for (int c=0;c<4;++c)
+                            out[qi].nativeFaceCorner[face][c]=(u8)faceVertexIndex[c];
+                        out[qi].nativeLodFaceMask|=(u8)(1u<<face);
+                    }
+                    for (int j = 0; j < (oneTriangle ? 3 : 6); ++j)
+                    {
+                        const int corner=faceToTriangle[j];
+                        const int gridIndex = faceSelectorValid ?
+                            faceVertexIndex[corner] : sDrawLevelOvr1PGridFaceIndices[face][corner];
+                        const struct LevVertex *v = out[qi].v[gridIndex];
+                        NativeLevelPCVertex *dst = &gpuVertices[qi * 24u + (size_t)face * 6u + (size_t)j];
+                        dst->x = (float)v->pos.x;
+                        dst->y = (float)v->pos.y;
+                        dst->z = (float)v->pos.z;
+                        if (tex && format<3)
+                        {
+                            const u8 U[4]={tex->u0,tex->u1,tex->u2,tex->u3};
+                            const u8 V[4]={tex->v0,tex->v1,tex->v2,tex->v3};
+                            const int uvCorner=(faceSelectorValid && uvFlipped) ?
+                                (corner^1) : corner;
+                            dst->u=(float)U[uvCorner];
+                            dst->v=(float)V[uvCorner];
+                            dst->page=(float)(tex->tpage & 0x1f);
+                            dst->clut=(float)tex->clut;
+                            dst->dither=0.0f;
+                        }
+                        dst->r = v->color_hi[0];
+                        dst->g = v->color_hi[1];
+                        dst->b = v->color_hi[2];
+                        dst->a = 255;
+                    }
+                }
+                /* A replacement draw cannot silently omit one of four faces.
+                 * Keep that entire block in retail unless all materials
+                 * resolved. Low-LOD preview intentionally uses one face. */
+                int facesResolved = 1;
+                for (int f = 0; f < 4; ++f)
+                    if (gpuFaceTypes[qi * 4u + (size_t)f] >= 18u)
+                        facesResolved = 0;
+                if (!facesResolved)
+                {
+                    memset(&gpuFaceTypes[qi * 4u], 255, 4u);
+                    ++staticRejectedUnresolved;
+                }
+            }
+            Platform_Log("[LEVEL PC GPU] static eligibility: candidates=%d water=%d animated=%d animatedTex=%d unresolved=%d total=%u GT3faces=%d\n",
+                staticCandidateBlocks,staticRejectedWater,
+                staticRejectedAnimated,staticRejectedSelector,
+                staticRejectedUnresolved,(unsigned)n,selectorSingleTriangles);
+            if (strictStatic)
+                Platform_Log("[LEVEL PC GPU] STRICT material policy: retained=%d rejectedBlocks=%d blendFaces=%d orderFaces=%d unsupportedFaces=%d (far LOD fallback recommended)\n",
+                    staticCandidateBlocks-staticRejectedStrictBlocks-staticRejectedUnresolved,
+                    staticRejectedStrictBlocks,
+                    staticRejectedStrictBlendFaces,
+                    staticRejectedStrictOrderFaces,
+                    staticRejectedStrictUnsupportedFaces);
+            NativeRenderer_LevelPCUpload(mesh->ptrQuadBlockArray, gpuVertices, gpuFaceTypes,
+                (int)(n * 24u), (int)n);
+            NativeRenderer_LevelPCProjectionQAUpload(
+                mesh->ptrQuadBlockArray, mesh->ptrVertexArray, mesh->numVertex);
+            Platform_Log("[LEVEL PC GPU] texture LOD experiment=%d validated=%d fallback=%d\n",
+                previewTextureLod,lodAccepted,lodFallback);
+            Platform_Log("[LEVEL PC GPU] retail selector faces exact=%d fallback=%d flippedUV=%d\n",
+                selectorExact,selectorFallback,selectorUvFlipped);
+        }
+        if (!nativeGpuLevelTrusted)
+            Platform_LogWarn("[LEVEL PC GPU] static cache not prepared: missing/mismatched live level metadata\n");
+        free(nativeAnimated);
+        free(nativeWaterBlocks);
+        free(gpuVertices);
+        free(gpuFaceTypes);
+    }
+    sDrawLevelOvr1P_CompiledVertices = out;
+    sDrawLevelOvr1P_CompiledQuadBase = mesh->ptrQuadBlockArray;
+    sDrawLevelOvr1P_CompiledVertexBase = mesh->ptrVertexArray;
+    sDrawLevelOvr1P_CompiledQuadCount = mesh->numQuadBlock;
+    Platform_Log("[LEVEL NATIVE] predecoded %d quadblocks (%u bytes) - positions remain live\n",
+        mesh->numQuadBlock, (unsigned)(n * sizeof(*out)));
+}
+
+/* Stress bypass may queue ONLY native blocks replacing actual PS1 packets.
+ * Overlay-only mode retains automatic diagnostic queuing. */
+/* The retail far-LOD FULL_DYNAMIC bucket emits one quad from vertices 0..3.
+ * Strict diagnostic: replace ONLY actual retail direct GT4 packets; the
+ * near-subdivided and triangular cases stay on the PS1 OT path.
+ * Marker ignored outside active stress test, never for user gameplay. */
+static int DrawLevelOvr1P_FarLowDirectStressEnabled(void)
+{
+    static int checked, enabled;
+    if(!checked)
+    {
+        FILE *f=fopen("debug/level_pc_gpu_far_low_direct_stress.enable","rb");
+        enabled=(f!=NULL);
+        if(f)fclose(f);
+        checked=1;
+        if(enabled)Platform_Log("[LEVEL PC GPU] strict far-LOD GT4 bucket marker active\n");
+    }
+    return enabled;
+}
+
+static int DrawLevelOvr1P_NativeGpuStressExplicitQueues(void)
+{
+    static int checked,mask;
+    if (!checked)
+    {
+        FILE *f=fopen("debug/level_pc_gpu_replace_stress.txt","rb");
+        if (f)
+        {
+            if (fscanf(f,"%d",&mask)!=1 || mask<1 || mask>3) mask=0;
+            fclose(f);
+        }
+        checked=1;
+    }
+    return ((mask!=0 || DrawLevelOvr1P_FarLowDirectStressEnabled()) && NativePerf_IsStressTestMeasuring());
+}
+
+static struct LevVertex *const *DrawLevelOvr1P_GetCompiledBlockVertices(
+    const struct LevVertex *sourceVertices, const struct QuadBlock *block)
+{
+    const uintptr_t start = (uintptr_t)sDrawLevelOvr1P_CompiledQuadBase;
+    const uintptr_t address = (uintptr_t)block;
+    uintptr_t delta;
+    size_t index;
+    if (sDrawLevelOvr1P_CompiledVertices == NULL ||
+        sourceVertices != sDrawLevelOvr1P_CompiledVertexBase ||
+        address < start)
+        return NULL;
+    delta = address - start;
+    if ((delta % sizeof(*block)) != 0)
+        return NULL;
+    index = delta / sizeof(*block);
+    if (index >= (size_t)sDrawLevelOvr1P_CompiledQuadCount ||
+        !sDrawLevelOvr1P_CompiledVertices[index].valid)
+        return NULL;
+    /* A visible quadblock already selected by retail BSP can be queued for
+     * the optional native VBO overlay without touching its OT packets. */
+    if (NativeRenderer_LevelPCEnabled() &&
+            !DrawLevelOvr1P_NativeGpuStressExplicitQueues())
+        NativeRenderer_LevelPCQueueBlock(sDrawLevelOvr1P_CompiledQuadBase, (int)index);
+    return sDrawLevelOvr1P_CompiledVertices[index].v;
+}
+
+static void DrawLevelOvr1P_InvalidateNativePointerCache(void)
+{
+	sDrawLevelOvr1P_NativePointerCacheGeneration++;
+	if (sDrawLevelOvr1P_NativePointerCacheGeneration == 0)
+	{
+		memset(sDrawLevelOvr1P_NativeSpanCache, 0, sizeof(sDrawLevelOvr1P_NativeSpanCache));
+		memset(sDrawLevelOvr1P_NativeTextureCache, 0, sizeof(sDrawLevelOvr1P_NativeTextureCache));
+		memset(sDrawLevelOvr1P_NativePsxWordCache, 0, sizeof(sDrawLevelOvr1P_NativePsxWordCache));
+		sDrawLevelOvr1P_NativePointerCacheGeneration = 1;
+	}
+}
+
+static void DrawLevelOvr1P_BeginNativePointerCachePass(const struct mesh_info *mesh)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	const void *quadBlocks = (mesh != NULL) ? mesh->ptrQuadBlockArray : NULL;
+	s32 levelID = (gGT != NULL) ? gGT->levelID : -1;
+	int changed = (mesh != sDrawLevelOvr1P_NativePointerCacheMesh) ||
+	              (quadBlocks != sDrawLevelOvr1P_NativePointerCacheQuadBlocks) ||
+	              (levelID != sDrawLevelOvr1P_NativePointerCacheLevelID);
+
+	for (s32 packIndex = 0; packIndex < 4; packIndex++)
+	{
+		const struct Mempack *pack = &sdata->mempack[packIndex];
+		if ((pack->start != sDrawLevelOvr1P_NativePointerCachePackStart[packIndex]) ||
+		    (pack->endOfMemory != sDrawLevelOvr1P_NativePointerCachePackEnd[packIndex]) ||
+		    (pack->packSize != sDrawLevelOvr1P_NativePointerCachePackSize[packIndex]))
+		{
+			changed = 1;
+		}
+	}
+
+	if (!changed)
+	{
+		return;
+	}
+
+	sDrawLevelOvr1P_NativePointerCacheMesh = mesh;
+	sDrawLevelOvr1P_NativePointerCacheQuadBlocks = quadBlocks;
+	sDrawLevelOvr1P_NativePointerCacheLevelID = levelID;
+
+	for (s32 packIndex = 0; packIndex < 4; packIndex++)
+	{
+		const struct Mempack *pack = &sdata->mempack[packIndex];
+		sDrawLevelOvr1P_NativePointerCachePackStart[packIndex] = pack->start;
+		sDrawLevelOvr1P_NativePointerCachePackEnd[packIndex] = pack->endOfMemory;
+		sDrawLevelOvr1P_NativePointerCachePackSize[packIndex] = pack->packSize;
+	}
+
+	DrawLevelOvr1P_InvalidateNativePointerCache();
+	DrawLevelOvr1P_CompileLevelVertices(mesh);
+}
+
+static u32 DrawLevelOvr1P_NativePointerCacheIndex(uintptr_t ptr, uintptr_t salt)
+{
+	u32 key = (u32)ptr;
+	key ^= (u32)(ptr >> 12);
+	key ^= (u32)salt * 2654435761u;
+	return (key ^ (key >> 16)) & (DRAW_LEVEL_NATIVE_POINTER_CACHE_SIZE - 1);
+}
+
 // NOTE(aalhendi): Native data-boundary shim. Retail ptrmap leaves PSX address
 // words in level data; native level loads store host-rebased pointers instead.
 static int DrawLevelOvr1P_MempackContains(const struct Mempack *pack, uintptr_t ptr, uintptr_t *span)
@@ -449,30 +1455,41 @@ static const struct Mempack *DrawLevelOvr1P_FindMempackContaining(uintptr_t ptr)
 
 static int DrawLevelOvr1P_IsNativeLevelSpan(uintptr_t ptr, uintptr_t size)
 {
+	u32 cacheIndex;
+	struct DrawLevelOvr1PNativeSpanCacheEntry *cache;
+	const struct Mempack *pack;
+	uintptr_t end;
+	uintptr_t packStart;
+	uintptr_t packEnd;
+	int result = 0;
+
 	if (size == 0)
 	{
 		return 0;
 	}
 
-	const struct Mempack *pack = DrawLevelOvr1P_FindMempackContaining(ptr);
-	if (pack == NULL)
+	cacheIndex = DrawLevelOvr1P_NativePointerCacheIndex(ptr, size);
+	cache = &sDrawLevelOvr1P_NativeSpanCache[cacheIndex];
+	if ((cache->generation == sDrawLevelOvr1P_NativePointerCacheGeneration) &&
+	    (cache->ptr == ptr) && (cache->size == size))
 	{
-		return 0;
+		return cache->result != 0;
 	}
 
-	uintptr_t end = ptr + size;
-	if (end < ptr)
+	pack = DrawLevelOvr1P_FindMempackContaining(ptr);
+	end = ptr + size;
+	if ((pack != NULL) && (end >= ptr) && (pack->start != NULL) && (pack->packSize > 0))
 	{
-		return 0;
+		packStart = (uintptr_t)pack->start;
+		packEnd = packStart + (uintptr_t)pack->packSize;
+		result = (packEnd >= packStart) && (ptr >= packStart) && (end <= packEnd);
 	}
 
-	uintptr_t span;
-	if (!DrawLevelOvr1P_MempackContains(pack, ptr, &span))
-	{
-		return 0;
-	}
-
-	return end <= (uintptr_t)pack->start + span;
+	cache->ptr = ptr;
+	cache->size = size;
+	cache->result = result ? 1 : 0;
+	cache->generation = sDrawLevelOvr1P_NativePointerCacheGeneration;
+	return result;
 }
 
 #endif
@@ -482,14 +1499,23 @@ static int DrawLevelOvr1P_IsNativeLevelTexturePointer(u32 value)
 #ifdef CTR_NATIVE
 	// NOTE(aalhendi): Native classifies host-rebased level texture pointers at
 	// the data boundary; renderer control flow still follows retail sign tests.
+	const u32 cacheIndex = DrawLevelOvr1P_NativePointerCacheIndex((uintptr_t)value, sizeof(struct TextureLayout));
+	struct DrawLevelOvr1PNativeTextureCacheEntry *cache = &sDrawLevelOvr1P_NativeTextureCache[cacheIndex];
 	uintptr_t ptr = (uintptr_t)value;
+	int result;
 
-	if (!DrawLevelOvr1P_IsNativeLevelSpan(ptr, sizeof(struct TextureLayout)))
+	if ((cache->generation == sDrawLevelOvr1P_NativePointerCacheGeneration) && (cache->value == value))
 	{
-		return 0;
+		return cache->result != 0;
 	}
 
-	return DrawLevelOvr1P_IsPlausibleTextureLayout((const struct TextureLayout *)ptr);
+	result = DrawLevelOvr1P_IsNativeLevelSpan(ptr, sizeof(struct TextureLayout)) &&
+	         DrawLevelOvr1P_IsPlausibleTextureLayout((const struct TextureLayout *)ptr);
+
+	cache->value = value;
+	cache->result = result ? 1 : 0;
+	cache->generation = sDrawLevelOvr1P_NativePointerCacheGeneration;
+	return result;
 #else
 	(void)value;
 	return 0;
@@ -523,27 +1549,50 @@ static int DrawLevelOvr1P_TryConvertNativeMempackPointerToPsxWord(u32 hostWord, 
 {
 	const u32 psxRamBase = 0x80000000u;
 	const uintptr_t psxRamSize = 0x200000u;
-	uintptr_t hostPtr = (uintptr_t)hostWord;
-	const struct Mempack *pack = DrawLevelOvr1P_FindMempackContaining(hostPtr);
-	if (pack == NULL || pack->endOfMemory == NULL)
+	const u32 cacheIndex = DrawLevelOvr1P_NativePointerCacheIndex((uintptr_t)hostWord, 0x505358u);
+	struct DrawLevelOvr1PNativePsxWordCacheEntry *cache = &sDrawLevelOvr1P_NativePsxWordCache[cacheIndex];
+	uintptr_t hostPtr;
+	const struct Mempack *pack;
+	uintptr_t hostEnd;
+	uintptr_t hostBase;
+	u32 converted = 0;
+	int result = 0;
+
+	if ((cache->generation == sDrawLevelOvr1P_NativePointerCacheGeneration) && (cache->hostWord == hostWord))
 	{
-		return 0;
+		if (cache->result && (psxWord != NULL))
+		{
+			*psxWord = cache->psxWord;
+		}
+		return cache->result != 0;
 	}
 
-	uintptr_t hostEnd = (uintptr_t)pack->endOfMemory;
-	if (hostEnd < psxRamSize)
+	hostPtr = (uintptr_t)hostWord;
+	pack = DrawLevelOvr1P_FindMempackContaining(hostPtr);
+	if ((pack != NULL) && (pack->endOfMemory != NULL))
 	{
-		return 0;
+		hostEnd = (uintptr_t)pack->endOfMemory;
+		if (hostEnd >= psxRamSize)
+		{
+			hostBase = hostEnd - psxRamSize;
+			if ((hostPtr >= hostBase) && (hostPtr < hostEnd))
+			{
+				converted = psxRamBase + (u32)(hostPtr - hostBase);
+				result = 1;
+			}
+		}
 	}
 
-	uintptr_t hostBase = hostEnd - psxRamSize;
-	if (hostPtr < hostBase || hostPtr >= hostEnd)
-	{
-		return 0;
-	}
+	cache->hostWord = hostWord;
+	cache->psxWord = converted;
+	cache->result = result ? 1 : 0;
+	cache->generation = sDrawLevelOvr1P_NativePointerCacheGeneration;
 
-	*psxWord = psxRamBase + (u32)(hostPtr - hostBase);
-	return 1;
+	if (result && (psxWord != NULL))
+	{
+		*psxWord = converted;
+	}
+	return result;
 }
 #endif
 
@@ -843,11 +1892,13 @@ static void DrawLevelOvr1P_PrepareDeepestMosaicUv(const struct DrawLevelOvr1PScr
 	}
 
 	u32 mosaicBase = DrawLevelOvr1P_Scratch()->mosaicTextureWord;
+	int mosaicIsNative = 0;
 #ifdef CTR_NATIVE
 	// NOTE(aalhendi): Retail uses scratch 0x84 directly. Native can inherit
 	// host-rebased pointer words when a wide slot preserves texture state, so
 	// only dereference values that are valid level texture data.
-	if (mosaicBase == 0 || ((s32)mosaicBase < 0 && !DrawLevelOvr1P_IsNativeLevelTexturePointer(mosaicBase)))
+	mosaicIsNative = DrawLevelOvr1P_IsNativeLevelTexturePointer(mosaicBase);
+	if (mosaicBase == 0 || ((s32)mosaicBase < 0 && !mosaicIsNative))
 	{
 		DrawLevelOvr1P_RestoreProjectedUvScratch();
 		return;
@@ -856,7 +1907,7 @@ static void DrawLevelOvr1P_PrepareDeepestMosaicUv(const struct DrawLevelOvr1PScr
 	// NOTE(aalhendi): Retail 0x800a8714/0x800aa334 restores saved UV scratch
 	// for positive inline sentinels, but rebased native hi-texture pointers must
 	// still follow PS1's negative-pointer reload path.
-	if ((s32)mosaicBase > 0 && !DrawLevelOvr1P_IsNativeLevelTexturePointer(mosaicBase))
+	if ((s32)mosaicBase > 0 && !mosaicIsNative)
 	{
 		DrawLevelOvr1P_RestoreProjectedUvScratch();
 		return;
@@ -986,8 +2037,24 @@ static int DrawLevelOvr1P_HasClipRecordSpace(size_t size)
 	u8 *start = DrawLevelOvr1P_GetClipRecordStart();
 	u8 *cursor = DrawLevelOvr1P_GetClipRecordCursor();
 	u8 *end = DrawLevelOvr1P_GetClipRecordEnd();
+	int ok = start != NULL && cursor != NULL && end != NULL && cursor >= start && cursor <= end && size <= (size_t)(end - cursor);
 
-	return start != NULL && cursor != NULL && end != NULL && cursor >= start && cursor <= end && size <= (size_t)(end - cursor);
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	if (!ok && NativePerf_IsStressTestMeasuring())
+	{
+		static u32 s_lastClipCapacityLogFrame = 0xffffffffu;
+		u32 frame = (u32)sdata->frameCounter;
+		if (frame != s_lastClipCapacityLogFrame)
+		{
+			size_t remaining = (cursor != NULL && end != NULL && cursor <= end) ? (size_t)(end - cursor) : 0;
+			s_lastClipCapacityLogFrame = frame;
+			Platform_Log("[RENDER CAP] clip full frame=%u remaining=%u need=%u\n",
+				frame, (unsigned)remaining, (unsigned)size);
+		}
+	}
+#endif
+
+	return ok;
 }
 
 static u8 DrawLevelOvr1P_MipsSubuSignBit(u32 lhs, u32 rhs)
@@ -1058,6 +2125,33 @@ static void Ovr226_800a0f78_ProjectVertexTripleFullDepth(struct LevVertex *verti
 	DrawLevelOvr1P_CopySourceVertex(&projected[index1], vertex1);
 	DrawLevelOvr1P_CopySourceVertex(&projected[index2], vertex2);
 
+#if defined(CTR_NATIVE)
+	{
+		const int cacheHit =
+			DrawLevelOvr1P_ProjectionCacheHas(vertex0) &&
+			DrawLevelOvr1P_ProjectionCacheHas(vertex1) &&
+			DrawLevelOvr1P_ProjectionCacheHas(vertex2);
+
+		DrawLevelOvr1P_ProjectionCacheRecordQuery(3, cacheHit ? 3 : 0);
+		if (cacheHit)
+		{
+			DrawLevelOvr1P_ProjectionCacheLoad(
+				vertex0, &projected[index0], &depth0);
+			DrawLevelOvr1P_ProjectionCacheLoad(
+				vertex1, &projected[index1], &depth1);
+			DrawLevelOvr1P_ProjectionCacheLoad(
+				vertex2, &projected[index2], &depth2);
+			DrawLevelOvr1P_StoreProjectedDepthWord(
+				&projected[index0], depth0);
+			DrawLevelOvr1P_StoreProjectedDepthWord(
+				&projected[index1], depth1);
+			DrawLevelOvr1P_StoreProjectedDepthWord(
+				&projected[index2], depth2);
+			return;
+		}
+	}
+#endif
+
 	CTR_GteLoadSVec3V3(&vertex0->pos, &vertex1->pos, &vertex2->pos);
 	gte_rtpt();
 	CTR_GteStoreSXY3(&projected[index0].posScreen[0], &projected[index1].posScreen[0], &projected[index2].posScreen[0]);
@@ -1066,6 +2160,20 @@ static void Ovr226_800a0f78_ProjectVertexTripleFullDepth(struct LevVertex *verti
 	DrawLevelOvr1P_StoreProjectedDepthWord(&projected[index0], depth0);
 	DrawLevelOvr1P_StoreProjectedDepthWord(&projected[index1], depth1);
 	DrawLevelOvr1P_StoreProjectedDepthWord(&projected[index2], depth2);
+#if defined(CTR_NATIVE)
+    NativeRenderer_LevelPCProjectionQARecord(sDrawLevelOvr1P_CompiledQuadBase,
+        sDrawLevelOvr1P_CompiledVertexBase,vertex0,
+        projected[index0].posScreen[0],projected[index0].posScreen[1],depth0);
+    NativeRenderer_LevelPCProjectionQARecord(sDrawLevelOvr1P_CompiledQuadBase,
+        sDrawLevelOvr1P_CompiledVertexBase,vertex1,
+        projected[index1].posScreen[0],projected[index1].posScreen[1],depth1);
+    NativeRenderer_LevelPCProjectionQARecord(sDrawLevelOvr1P_CompiledQuadBase,
+        sDrawLevelOvr1P_CompiledVertexBase,vertex2,
+        projected[index2].posScreen[0],projected[index2].posScreen[1],depth2);
+	DrawLevelOvr1P_ProjectionCacheStore(vertex0, &projected[index0], depth0);
+	DrawLevelOvr1P_ProjectionCacheStore(vertex1, &projected[index1], depth1);
+	DrawLevelOvr1P_ProjectionCacheStore(vertex2, &projected[index2], depth2);
+#endif
 }
 
 static void Ovr226_800a1024_ProjectFullDynamicLowFourth(struct LevVertex *vertices, const struct QuadBlock *block,
@@ -1076,11 +2184,26 @@ static void Ovr226_800a1024_ProjectFullDynamicLowFourth(struct LevVertex *vertic
 
 	DrawLevelOvr1P_CopySourceVertex(&projected[3], vertex);
 
+#if defined(CTR_NATIVE)
+	if (DrawLevelOvr1P_ProjectionCacheHas(vertex))
+	{
+		DrawLevelOvr1P_ProjectionCacheRecordQuery(1, 1);
+		DrawLevelOvr1P_ProjectionCacheLoad(
+			vertex, &projected[3], &depth);
+		DrawLevelOvr1P_StoreProjectedDepthWord(&projected[3], depth);
+		return;
+	}
+	DrawLevelOvr1P_ProjectionCacheRecordQuery(1, 0);
+#endif
+
 	CTR_GteLoadSVec3V0(&vertex->pos);
 	gte_rtps();
 	CTR_GteStoreSXY(&projected[3].posScreen[0]);
 	gte_stsz(&depth);
 	DrawLevelOvr1P_StoreProjectedDepthWord(&projected[3], depth);
+#if defined(CTR_NATIVE)
+	DrawLevelOvr1P_ProjectionCacheStore(vertex, &projected[3], depth);
+#endif
 }
 
 static void Ovr226_800a0f78_ProjectFullDynamicLowQuad(struct LevVertex *vertices, const struct QuadBlock *block, struct DrawLevelOvr1PScratchVertex *projected)
@@ -1130,11 +2253,18 @@ static void DrawLevelOvr1P_CopyProjectedSource(struct LevVertex *vertex, struct 
 }
 
 static int DrawLevelOvr1P_ProjectListVertexTriple(struct LevVertex *vertices, const struct QuadBlock *block, struct DrawLevelOvr1PScratchVertex *projected,
-                                                  int index0, int index1, int index2, enum DrawLevelOvr1PProjectedSource source)
+                                                  int index0, int index1, int index2, enum DrawLevelOvr1PProjectedSource source, struct LevVertex *const *compiled)
 {
+#ifdef CTR_NATIVE
+	struct LevVertex *vertex0 = compiled ? compiled[index0] : &vertices[block->index[index0]];
+	struct LevVertex *vertex1 = compiled ? compiled[index1] : &vertices[block->index[index1]];
+	struct LevVertex *vertex2 = compiled ? compiled[index2] : &vertices[block->index[index2]];
+#else
+	(void)compiled;
 	struct LevVertex *vertex0 = &vertices[block->index[index0]];
 	struct LevVertex *vertex1 = &vertices[block->index[index1]];
 	struct LevVertex *vertex2 = &vertices[block->index[index2]];
+#endif
 	u32 depth0;
 	u32 depth1;
 	u32 depth2;
@@ -1186,28 +2316,40 @@ static void DrawLevelOvr1P_SetGridSlotMode(const struct DrawLevelOvr1PScratchVer
 static int DrawLevelOvr1P_ProjectListGrid(struct LevVertex *vertices, const struct QuadBlock *block, struct DrawLevelOvr1PScratchVertex *projected,
                                           enum DrawLevelOvr1PProjectedSource source, enum DrawLevelOvr1PGridSlotMode slotMode)
 {
+	struct LevVertex *const *compiled = NULL;
+#ifdef CTR_NATIVE
+	compiled = DrawLevelOvr1P_GetCompiledBlockVertices(vertices, block);
+#endif
 	DrawLevelOvr1P_SetGridSlotMode(projected, slotMode);
 
-	if (DrawLevelOvr1P_ProjectListVertexTriple(vertices, block, projected, 0, 1, 2, source))
+	if (DrawLevelOvr1P_ProjectListVertexTriple(vertices, block, projected, 0, 1, 2, source, compiled))
 	{
 		return 1;
 	}
 
-	if (DrawLevelOvr1P_ProjectListVertexTriple(vertices, block, projected, 3, 4, 5, source))
+	if (DrawLevelOvr1P_ProjectListVertexTriple(vertices, block, projected, 3, 4, 5, source, compiled))
 	{
 		return 1;
 	}
 
 	DrawLevelOvr1P_SetActiveDrawOrderLow(block);
-	return DrawLevelOvr1P_ProjectListVertexTriple(vertices, block, projected, 6, 7, 8, source);
+	int result = DrawLevelOvr1P_ProjectListVertexTriple(vertices, block, projected, 6, 7, 8, source, compiled);
+	return result;
 }
 
 static void DrawLevelOvr1P_ProjectRenderedVertexTriple(struct LevVertex *vertices, const struct QuadBlock *block, struct DrawLevelOvr1PScratchVertex *projected,
-                                                       int index0, int index1, int index2, enum DrawLevelOvr1PProjectedSource source)
+                                                       int index0, int index1, int index2, enum DrawLevelOvr1PProjectedSource source, struct LevVertex *const *compiled)
 {
+#ifdef CTR_NATIVE
+	struct LevVertex *vertex0 = compiled ? compiled[index0] : &vertices[block->index[index0]];
+	struct LevVertex *vertex1 = compiled ? compiled[index1] : &vertices[block->index[index1]];
+	struct LevVertex *vertex2 = compiled ? compiled[index2] : &vertices[block->index[index2]];
+#else
+	(void)compiled;
 	struct LevVertex *vertex0 = &vertices[block->index[index0]];
 	struct LevVertex *vertex1 = &vertices[block->index[index1]];
 	struct LevVertex *vertex2 = &vertices[block->index[index2]];
+#endif
 	u32 depth0;
 	u32 depth1;
 	u32 depth2;
@@ -1215,6 +2357,39 @@ static void DrawLevelOvr1P_ProjectRenderedVertexTriple(struct LevVertex *vertice
 	DrawLevelOvr1P_CopyProjectedSource(vertex0, &projected[index0], source, 1);
 	DrawLevelOvr1P_CopyProjectedSource(vertex1, &projected[index1], source, 1);
 	DrawLevelOvr1P_CopyProjectedSource(vertex2, &projected[index2], source, 1);
+
+#if defined(CTR_NATIVE)
+	{
+		const int cacheHit =
+			DrawLevelOvr1P_ProjectionCacheHas(vertex0) &&
+			DrawLevelOvr1P_ProjectionCacheHas(vertex1) &&
+			DrawLevelOvr1P_ProjectionCacheHas(vertex2);
+
+		DrawLevelOvr1P_ProjectionCacheRecordQuery(3, cacheHit ? 3 : 0);
+		if (cacheHit)
+		{
+			DrawLevelOvr1P_ProjectionCacheLoad(
+				vertex0, &projected[index0], &depth0);
+			DrawLevelOvr1P_ProjectionCacheLoad(
+				vertex1, &projected[index1], &depth1);
+			DrawLevelOvr1P_ProjectionCacheLoad(
+				vertex2, &projected[index2], &depth2);
+			DrawLevelOvr1P_SetProjectedDepth(
+				&projected[index0],
+				depth0,
+				DRAW_LEVEL_OVR1P_CLIP_BYTES_RENDERED);
+			DrawLevelOvr1P_SetProjectedDepth(
+				&projected[index1],
+				depth1,
+				DRAW_LEVEL_OVR1P_CLIP_BYTES_RENDERED);
+			DrawLevelOvr1P_SetProjectedDepth(
+				&projected[index2],
+				depth2,
+				DRAW_LEVEL_OVR1P_CLIP_BYTES_RENDERED);
+			return;
+		}
+	}
+#endif
 
 	CTR_GteLoadSVec3V3(&vertex0->pos, &vertex1->pos, &vertex2->pos);
 	gte_rtpt();
@@ -1224,16 +2399,34 @@ static void DrawLevelOvr1P_ProjectRenderedVertexTriple(struct LevVertex *vertice
 	DrawLevelOvr1P_SetProjectedDepth(&projected[index0], depth0, DRAW_LEVEL_OVR1P_CLIP_BYTES_RENDERED);
 	DrawLevelOvr1P_SetProjectedDepth(&projected[index1], depth1, DRAW_LEVEL_OVR1P_CLIP_BYTES_RENDERED);
 	DrawLevelOvr1P_SetProjectedDepth(&projected[index2], depth2, DRAW_LEVEL_OVR1P_CLIP_BYTES_RENDERED);
+#if defined(CTR_NATIVE)
+    NativeRenderer_LevelPCProjectionQARecord(sDrawLevelOvr1P_CompiledQuadBase,
+        sDrawLevelOvr1P_CompiledVertexBase,vertex0,
+        projected[index0].posScreen[0],projected[index0].posScreen[1],depth0);
+    NativeRenderer_LevelPCProjectionQARecord(sDrawLevelOvr1P_CompiledQuadBase,
+        sDrawLevelOvr1P_CompiledVertexBase,vertex1,
+        projected[index1].posScreen[0],projected[index1].posScreen[1],depth1);
+    NativeRenderer_LevelPCProjectionQARecord(sDrawLevelOvr1P_CompiledQuadBase,
+        sDrawLevelOvr1P_CompiledVertexBase,vertex2,
+        projected[index2].posScreen[0],projected[index2].posScreen[1],depth2);
+	DrawLevelOvr1P_ProjectionCacheStore(vertex0, &projected[index0], depth0);
+	DrawLevelOvr1P_ProjectionCacheStore(vertex1, &projected[index1], depth1);
+	DrawLevelOvr1P_ProjectionCacheStore(vertex2, &projected[index2], depth2);
+#endif
 }
 
 static void DrawLevelOvr1P_ProjectRenderedGrid(struct LevVertex *vertices, const struct QuadBlock *block, struct DrawLevelOvr1PScratchVertex *projected,
                                                enum DrawLevelOvr1PProjectedSource source, enum DrawLevelOvr1PGridSlotMode slotMode)
 {
+	struct LevVertex *const *compiled = NULL;
+#ifdef CTR_NATIVE
+	compiled = DrawLevelOvr1P_GetCompiledBlockVertices(vertices, block);
+#endif
 	DrawLevelOvr1P_SetGridSlotMode(projected, slotMode);
-	DrawLevelOvr1P_ProjectRenderedVertexTriple(vertices, block, projected, 0, 1, 2, source);
-	DrawLevelOvr1P_ProjectRenderedVertexTriple(vertices, block, projected, 3, 4, 5, source);
+	DrawLevelOvr1P_ProjectRenderedVertexTriple(vertices, block, projected, 0, 1, 2, source, compiled);
+	DrawLevelOvr1P_ProjectRenderedVertexTriple(vertices, block, projected, 3, 4, 5, source, compiled);
 	DrawLevelOvr1P_SetActiveDrawOrderLow(block);
-	DrawLevelOvr1P_ProjectRenderedVertexTriple(vertices, block, projected, 6, 7, 8, source);
+	DrawLevelOvr1P_ProjectRenderedVertexTriple(vertices, block, projected, 6, 7, 8, source, compiled);
 }
 
 static u32 DrawLevelOvr1P_GetProjectedColorWord(const struct DrawLevelOvr1PScratchVertex *projected);
@@ -1356,18 +2549,62 @@ static int DrawLevelOvr1P_NclipProjected(const struct DrawLevelOvr1PScratchVerte
 	u32 sxy1 = (u16)vertex1->posScreen[0] | ((u32)(u16)vertex1->posScreen[1] << 16);
 	sxy2 = (u16)vertex2->posScreen[0] | ((u32)(u16)vertex2->posScreen[1] << 16);
 
-	// NOTE(aalhendi): Retail helper paths use GTE NCLIP/MAC0 for this sign
-	// fold; using the GTE also avoids host signed-overflow behavior here.
-	MTC2(sxy0, 12);
-	MTC2(sxy1, 13);
-	MTC2(sxy2, 14);
-	gte_nclip();
-	gte_stopz(&nclip);
-
-	#if defined(CTR_NATIVE)
-	return NativeGpu_CorrectSubpixelNclip(vertex0->posScreen, vertex1->posScreen, vertex2->posScreen, nclip);
+#if defined(CTR_NATIVE)
+    /* Modes: '1' conservatively compares the optimized code to all the
+     * existing MTC2/GTE/MFC2 side effects, returning retail's result.
+     * '2' uses the fused native path with the same register writes.
+     * Unset leaves normal rendering entirely unchanged. */
+    static int checked,mode;
+    static unsigned long verified,mismatches,fused;
+    if(!checked)
+    {
+        FILE *f=fopen("debug/level_fused_nclip_qa.txt","rb");
+        if(f)
+        {
+            const int c=fgetc(f);
+            mode=(c=='1') ? 1 : ((c=='2') ? 2 : 0);
+            fclose(f);
+        }
+        checked=1;
+        if(mode)Platform_Log("[LEVEL CPU] fused NCLIP QA mode=%d (1=verify, 2=fast)\n",mode);
+    }
+    if(mode==2)
+    {
+        nclip=NativeGTE_NCLIPLoadedTriple(sxy0,sxy1,sxy2);
+        ++fused;
+    }
+    else
+#endif
+    {
+        /* Retail helper paths need MAC0 and the exact GTE register state. */
+        MTC2(sxy0, 12);
+        MTC2(sxy1, 13);
+        MTC2(sxy2, 14);
+        gte_nclip();
+        gte_stopz(&nclip);
+    }
+#if defined(CTR_NATIVE)
+    if(mode==1)
+    {
+        const s32 optimized=NativeGTE_NCLIPLoadedTriple(sxy0,sxy1,sxy2);
+        ++verified;
+        if(optimized!=nclip)
+        {
+            ++mismatches;
+            if(mismatches<=8)
+                Platform_LogWarn("[LEVEL CPU] fused NCLIP MISMATCH retail=%d optimized=%d count=%lu\n",
+                                 nclip,optimized,mismatches);
+        }
+        if((verified&0x1fffful)==0)
+            Platform_Log("[LEVEL CPU] fused NCLIP verification samples=%lu mismatches=%lu\n",
+                         verified,mismatches);
+    }
+    if(mode==2 && (fused&0x3fffful)==0)
+        Platform_Log("[LEVEL CPU] fused NCLIP fast calls=%lu\n",fused);
+    return NativeGpu_CorrectSubpixelNclip(
+        vertex0->posScreen, vertex1->posScreen, vertex2->posScreen, nclip);
 #else
-	return nclip;
+    return nclip;
 #endif
 }
 
@@ -1452,23 +2689,9 @@ static u32 DrawLevelOvr1P_GetProjectedWaterNearMaskAtScratchOffset(const struct 
 	u32 mask = 0;
 
 #if defined(CTR_NATIVE)
-	/* The native 1P high-detail profile doubles the generic near thresholds so
-	   detailed ground stays active farther away. That also made water recurse
-	   through the PS1 3x3 subdivision path at twice the retail distance, which
-	   is extremely CPU-heavy at 144/200 Hz.
-
-	   Native rendering already has perspective-correct UVs and subpixel geometry,
-	   so water does not need that extra distant subdivision. Restore the retail
-	   water thresholds while leaving the rest of the level high-detail profile
-	   untouched. */
-	struct GameTracker *gGT = sdata->gGT;
-	if ((gGT != NULL) &&
-	    (gGT->numPlyrCurrGame == 1) &&
-	    (gGT->levelID != ADVENTURE_GARAGE) &&
-	    ((gGT->gameMode1 & (MAIN_MENU | GAME_CUTSCENE)) == 0))
-	{
-		threshold >>= 1;
-	}
+	/* Native keeps the retail recursive near thresholds for both ground and
+	   water. High-detail source buckets still stay visible farther away, but
+	   extra PS1-era recursive tessellation is intentionally not extended. */
 #endif
 
 	for (s32 bitIndex = 0; bitIndex < 4; bitIndex++)
@@ -1788,6 +3011,11 @@ static void Ovr226_800a74a0_BuildDynamicListSubdivideMidpoint(struct DrawLevelOv
 	CTR_GteStoreSXY(&dstMid->posScreen[0]);
 	gte_stsz(&depth);
 	DrawLevelOvr1P_StoreProjectedDepthWord(dstMid, depth);
+#if defined(CTR_NATIVE)
+    /* GPU tessellation diagnostic after original GTE/UV/ARGB calculations:
+     * no change to PS1 OT, visual output, clipping or collision. */
+    NativeRenderer_LevelPCMidpointQARecord(srcA,srcB,dstMid);
+#endif
 }
 
 static void Ovr226_800a74a0_BuildDynamicListSubdivisionFrame(struct DrawLevelOvr1PScratchVertex *sub, const struct DrawLevelOvr1PScratchVertex *projected,
@@ -3297,15 +4525,51 @@ static int Ovr226_800aa790_TerminalPreamble(struct PushBuffer *pb, const u8 *cur
 
 static int DrawLevelOvr1P_HasClipRecordConsumerPrimReserve(const struct PrimMem *primMem)
 {
-	return (u8 *)primMem->cursor + DRAW_LEVEL_OVR1P_CLIP_RECORD_PRIM_RESERVE + sDrawLevelOvr1P_PrimReserveBias <= (u8 *)primMem->end;
+	u8 *curr = primMem->cursor;
+	u8 *end = primMem->end;
+	u32 need = DRAW_LEVEL_OVR1P_CLIP_RECORD_PRIM_RESERVE + sDrawLevelOvr1P_PrimReserveBias;
+	int ok = curr <= end && (size_t)need <= (size_t)(end - curr);
+
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	if (!ok && NativePerf_IsStressTestMeasuring())
+	{
+		static u32 s_lastClipPrimCapacityLogFrame = 0xffffffffu;
+		u32 frame = (u32)sdata->frameCounter;
+		if (frame != s_lastClipPrimCapacityLogFrame)
+		{
+			size_t remaining = (curr <= end) ? (size_t)(end - curr) : 0;
+			s_lastClipPrimCapacityLogFrame = frame;
+			Platform_Log("[RENDER CAP] clip-consumer prim full frame=%u remaining=%u need=%u\n",
+				frame, (unsigned)remaining, (unsigned)need);
+		}
+	}
+#endif
+
+	return ok;
 }
 
 static int DrawLevelOvr1P_HasBucketPrimReserve(const struct PrimMem *primMem, u32 reserve)
 {
 	u8 *curr = primMem->cursor;
 	u8 *end = primMem->end;
+	int ok = curr <= end && (size_t)(reserve + sDrawLevelOvr1P_PrimReserveBias) <= (size_t)(end - curr);
 
-	return curr <= end && (size_t)(reserve + sDrawLevelOvr1P_PrimReserveBias) <= (size_t)(end - curr);
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	if (!ok && NativePerf_IsStressTestMeasuring())
+	{
+		static u32 s_lastPrimCapacityLogFrame = 0xffffffffu;
+		u32 frame = (u32)sdata->frameCounter;
+		if (frame != s_lastPrimCapacityLogFrame)
+		{
+			size_t remaining = (curr <= end) ? (size_t)(end - curr) : 0;
+			s_lastPrimCapacityLogFrame = frame;
+			Platform_Log("[RENDER CAP] prim full frame=%u remaining=%u need=%u bias=%u\n",
+				frame, (unsigned)remaining, (unsigned)reserve, (unsigned)sDrawLevelOvr1P_PrimReserveBias);
+		}
+	}
+#endif
+
+	return ok;
 }
 
 static void DrawLevelOvr1P_SetPrimReserveBias(u32 bias)
@@ -4585,17 +5849,19 @@ static void Ovr226_800a3f74_PrepareGround4x1DeepestUv(const struct DrawLevelOvr1
 	}
 
 	u32 mosaicBase = DrawLevelOvr1P_Scratch()->mosaicTextureWord;
+	int mosaicIsNative = 0;
 #ifdef CTR_NATIVE
 	// NOTE(aalhendi): Retail dereferences scratch 0x84 directly. Native can
 	// carry host-rebased level words here, so only follow pointer-shaped
 	// values that belong to level texture data.
-	if (mosaicBase == 0 || ((s32)mosaicBase < 0 && !DrawLevelOvr1P_IsNativeLevelTexturePointer(mosaicBase)))
+	mosaicIsNative = DrawLevelOvr1P_IsNativeLevelTexturePointer(mosaicBase);
+	if (mosaicBase == 0 || ((s32)mosaicBase < 0 && !mosaicIsNative))
 	{
 		DrawLevelOvr1P_RestoreProjectedUvScratch();
 		return;
 	}
 #endif
-	if ((s32)mosaicBase > 0 && !DrawLevelOvr1P_IsNativeLevelTexturePointer(mosaicBase))
+	if ((s32)mosaicBase > 0 && !mosaicIsNative)
 	{
 		DrawLevelOvr1P_RestoreProjectedUvScratch();
 		return;
@@ -4915,16 +6181,18 @@ static void Ovr226_800a4b54_PrepareGround4x1RenderedDeepestUv(const struct DrawL
 	}
 
 	u32 mosaicBase = DrawLevelOvr1P_Scratch()->mosaicTextureWord;
+	int mosaicIsNative = 0;
 #ifdef CTR_NATIVE
 	// NOTE(aalhendi): Native keeps this as a data-boundary guard for
 	// host-rebased level texture words; non-native code follows retail.
-	if (mosaicBase == 0 || ((s32)mosaicBase < 0 && !DrawLevelOvr1P_IsNativeLevelTexturePointer(mosaicBase)))
+	mosaicIsNative = DrawLevelOvr1P_IsNativeLevelTexturePointer(mosaicBase);
+	if (mosaicBase == 0 || ((s32)mosaicBase < 0 && !mosaicIsNative))
 	{
 		DrawLevelOvr1P_RestoreProjectedUvScratch();
 		return;
 	}
 #endif
-	if ((s32)mosaicBase > 0 && !DrawLevelOvr1P_IsNativeLevelTexturePointer(mosaicBase))
+	if ((s32)mosaicBase > 0 && !mosaicIsNative)
 	{
 		DrawLevelOvr1P_RestoreProjectedUvScratch();
 		return;
@@ -5674,6 +6942,43 @@ static int Ovr226_800a725c_DispatchDynamicListHelperWrappers(struct PushBuffer *
 	                                                  inheritedOtIndex);
 }
 
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+/* Runtime test flag; never touch normal CTR rendering without marker. */
+static int DrawLevelOvr1P_DynamicNearStageProfileEnabled(void)
+{
+    static int checked,enabled;
+    if(!checked)
+    {
+        FILE *f=fopen("debug/level_dynamic_near_stages.enable","rb");
+        enabled=(f!=NULL);
+        if(f)fclose(f);
+        checked=1;
+        if(enabled)Platform_Log("[DYN NEAR STAGES] instrumenting 1/8 root near calls\n");
+    }
+    return enabled && NativePerf_IsStressTestMeasuring();
+}
+static void DrawLevelOvr1P_DynamicNearStageProfileRecord(
+    u64 buildNs,u64 dispatchNs,u64 setupNs,u32 mask,int ok)
+{
+    static u64 sumBuild,sumDispatch,sumSetup;
+    static u32 calls,failed,halfMask;
+    sumBuild+=buildNs;
+    sumDispatch+=dispatchNs;
+    sumSetup+=setupNs;
+    failed+=(u32)(!ok);
+    halfMask+=(u32)((mask & 0x3cu)!=0);
+    if(++calls>=4000u)
+    {
+        Platform_Log("[DYN NEAR STAGES] rootCalls=%u midpointMs=%.3f dispatchMs=%.3f setupMs=%.3f failed=%u nonzeroMask=%u\n",
+            calls,(double)sumBuild/1000000.0,
+            (double)sumDispatch/1000000.0,
+            (double)sumSetup/1000000.0,failed,halfMask);
+        calls=0;failed=0;halfMask=0;
+        sumBuild=0;sumDispatch=0;sumSetup=0;
+    }
+}
+#endif
+
 static int Ovr226_800a78a8_DynamicListNearOrDirect(struct PushBuffer *pb, struct PrimMem *primMem, const struct QuadBlock *block,
                                                    const struct DrawLevelOvr1PScratchVertex *projected, const int *indices, int faceIndex,
                                                    const struct TextureLayout *texture, int depth, u32 thresholdScratchOffset, int inheritedOtIndex)
@@ -5685,15 +6990,34 @@ static int Ovr226_800a78a8_DynamicListNearOrDirect(struct PushBuffer *pb, struct
 		return Ovr226_800a7a58_DispatchDynamicListDirectTail(pb, primMem, block, projected, indices, faceIndex, texture, inheritedOtIndex);
 	}
 
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	static u32 sNearStageSampleIndex;
+	const int stageSample = (depth == 0) &&
+	    DrawLevelOvr1P_DynamicNearStageProfileEnabled() &&
+	    ((++sNearStageSampleIndex & 7u) == 0u);
+	const u64 t0 = stageSample ? SDL_GetTicksNS() : 0;
+#endif
 	struct DrawLevelOvr1PScratchVertex *sub = DrawLevelOvr1P_GetSubdivisionFrame(depth);
 	Ovr226_800a74a0_BuildDynamicListSubdivisionFrame(sub, projected, indices);
-
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	const u64 t1 = stageSample ? SDL_GetTicksNS() : 0;
+#endif
 	u32 handlerAddress = *CTR_SCRATCHPAD_PTR(u32, DRAW_LEVEL_OVR1P_DIRECT_NEAR_HANDLER_TABLE_OFFSET + nearMask);
 	int handlerSlot = DrawLevelOvr1P_GetNearSubdivisionTableSlot(nearMask);
 	DrawLevelOvr1P_SetPreviousRecursiveHandler(handlerAddress);
-
-	return Ovr226_800a725c_DispatchDynamicListHelperWrappers(pb, primMem, block, sub, faceIndex, texture, depth + 1, handlerAddress, handlerSlot,
-	                                                         inheritedOtIndex);
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	const u64 t2 = stageSample ? SDL_GetTicksNS() : 0;
+#endif
+	int result=Ovr226_800a725c_DispatchDynamicListHelperWrappers(pb, primMem, block, sub, faceIndex, texture, depth + 1, handlerAddress, handlerSlot,
+	                                                            inheritedOtIndex);
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	if(stageSample)
+	{
+		const u64 t3=SDL_GetTicksNS();
+		DrawLevelOvr1P_DynamicNearStageProfileRecord(t1-t0,t3-t2,t2-t1,nearMask,result);
+	}
+#endif
+	return result;
 }
 
 static void Ovr226_800a79a0_PrepareDynamicListDeepestUv(const struct DrawLevelOvr1PScratchVertex *projected, const int *indices)
@@ -5754,9 +7078,86 @@ static int Ovr226_800a7a58_DispatchDynamicListDirectTail(struct PushBuffer *pb, 
 	}
 }
 
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+/* Sample 1 of 13 face calls: preserve retail selection, texture and OT packet
+ * logic, measure substage costs without GPU or altered user graphics. */
+static int DrawLevelOvr1P_DynamicFaceProfileEnabled(void)
+{
+    static int checked,enabled;
+    if (!checked)
+    {
+        FILE *f=fopen("debug/level_dynamic_face_subprofile.enable","rb");
+        enabled=(f!=NULL);
+        if(f)fclose(f);
+        checked=1;
+        if(enabled)Platform_Log("[DYN FACE PROFILE] 1/13 sample active\n");
+    }
+    return enabled && NativePerf_IsStressTestMeasuring();
+}
+static void DrawLevelOvr1P_DynamicFaceSample(
+    u64 selectNs,u64 uvNs,u64 emitNs,int rejected,int failed,int nearKind)
+{
+    static u64 totalSelect,totalUv,totalEmit,totalDirect,totalNear;
+    static u32 calls,rejectedCalls,failedCalls,directCalls,nearCalls;
+    totalSelect+=selectNs;totalUv+=uvNs;totalEmit+=emitNs;
+    rejectedCalls+=(u32)(rejected!=0);
+    failedCalls+=(u32)(failed!=0);
+    if(nearKind==0){totalDirect+=emitNs;++directCalls;}
+    if(nearKind==1){totalNear+=emitNs;++nearCalls;}
+    if(++calls>=20000u)
+    {
+        Platform_Log("[DYN FACE PROFILE] calls=%u selectMs=%.3f textureMs=%.3f emitMs=%.3f rejected=%u failed=%u directCalls=%u nearCalls=%u directMs=%.3f nearMs=%.3f\n",
+            calls,(double)totalSelect/1000000.0,
+            (double)totalUv/1000000.0,(double)totalEmit/1000000.0,
+            rejectedCalls,failedCalls,directCalls,nearCalls,
+            (double)totalDirect/1000000.0,(double)totalNear/1000000.0);
+        calls=0;rejectedCalls=0;failedCalls=0;directCalls=0;nearCalls=0;
+        totalSelect=0;totalUv=0;totalEmit=0;totalDirect=0;totalNear=0;
+    }
+}
+static int Ovr226_800a7668_ProfiledFaceGate(
+    struct PushBuffer *pb,struct PrimMem *primMem,
+    struct DrawLevelOvr1PScratchVertex *projected,
+    struct QuadBlock *block,int faceIndex)
+{
+    int indices[4];
+    u32 directMask=0;
+    const u64 t0=SDL_GetTicksNS();
+    const u32 tableWord=DrawLevelOvr1P_Select4x1ProjectedFace(projected,block,faceIndex,indices);
+    const int passes=Ovr226_800a3c70_SelectAndStoreGround4x1SelectorDirectMask(
+        projected,indices,tableWord,&directMask);
+    const u64 t1=SDL_GetTicksNS();
+    if(!passes)
+    {
+        DrawLevelOvr1P_DynamicFaceSample(t1-t0,0,0,1,0,-1);
+        return 1;
+    }
+    const u32 maxDepth=DrawLevelOvr1P_GetProjectedMaxDepth(projected,indices);
+    const int inheritedOtIndex=Ovr226_800a3d98_ResolveGround4x1SelectorOtIndex(
+        block,projected,maxDepth,faceIndex);
+    struct TextureLayout *texture=Ovr226_800a3e00_SelectGround4x1SelectorTexture(
+        block,projected,maxDepth);
+    if(texture!=NULL)DrawLevelOvr1P_WriteProjectedUv(projected,indices,texture,tableWord);
+    const int nearKind=(DrawLevelOvr1P_GetProjectedNearMaskAtScratchOffset(
+        projected,indices,0x24)!=0);
+    const u64 t2=SDL_GetTicksNS();
+    const int result=Ovr226_800a78a8_DynamicListNearOrDirect(
+        pb,primMem,block,projected,indices,faceIndex,texture,0,0x24,inheritedOtIndex);
+    const u64 t3=SDL_GetTicksNS();
+    DrawLevelOvr1P_DynamicFaceSample(t1-t0,t2-t1,t3-t2,0,!result,nearKind);
+    return result;
+}
+#endif
+
 static int Ovr226_800a7668_DynamicListSelectorNearGate(struct PushBuffer *pb, struct PrimMem *primMem, struct DrawLevelOvr1PScratchVertex *projected,
                                                        struct QuadBlock *block, int faceIndex)
 {
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+    static u32 qaSampleCounter;
+    if(DrawLevelOvr1P_DynamicFaceProfileEnabled() &&
+       (++qaSampleCounter % 13u)==0u)
+        return Ovr226_800a7668_ProfiledFaceGate(pb,primMem,projected,block,faceIndex);
+#endif
 	int indices[4];
 	u32 directMask = 0;
 
@@ -8013,12 +9414,37 @@ static int Ovr226_800a1338_DispatchFullDynamicLowDirect(struct PushBuffer *pb, s
 
 	directMask = DrawLevelOvr1P_SelectDirectMask(block, projected, indices, 0, DRAW_LEVEL_OVR1P_DIRECT_QUAD);
 	DrawLevelOvr1P_Scratch()->directMask = directMask;
-	if (directMask == 0)
-	{
-		return 1;
-	}
-
-	return Ovr226_800a1cc4_EmitFullDynamicDirectTail(pb, primMem, block, projected, indices, -1, texture);
+    if (directMask == 0)
+    {
+        return 1;
+    }
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+    if (DrawLevelOvr1P_FarLowDirectStressEnabled() &&
+        NativePerf_IsStressTestMeasuring() && NativeRenderer_LevelPCEnabled() &&
+        texture != NULL && ((texture->tpage>>7)&3)<3 &&
+        DrawLevelOvr1P_GetDirectHandlerAddress(directMask) ==
+             DRAW_LEVEL_OVR_RETAIL_LABEL_FULL_DYNAMIC_DIRECT_GT4_226)
+    {
+        const uintptr_t base=(uintptr_t)sDrawLevelOvr1P_CompiledQuadBase;
+        const uintptr_t ptr=(uintptr_t)block;
+        if (base != 0 && ptr >= base &&
+            (ptr-base)%sizeof(*block)==0)
+        {
+            const size_t idx=(ptr-base)/sizeof(*block);
+            if (idx < (size_t)sDrawLevelOvr1P_CompiledQuadCount &&
+                sDrawLevelOvr1P_CompiledVertices != NULL &&
+                sDrawLevelOvr1P_CompiledVertices[idx].valid &&
+                NativeRenderer_LevelPCQueueBlock(sDrawLevelOvr1P_CompiledQuadBase, (int)idx))
+            {
+                static unsigned long accepted;
+                if ((++accepted & 2047ul)==0)
+                    Platform_Log("[LEVEL PC GPU] far-LOD direct GT4 queued=%lu\n",accepted);
+                return 1; /* Never emit the matching retail OT quad twice. */
+            }
+        }
+    }
+#endif
+    return Ovr226_800a1cc4_EmitFullDynamicDirectTail(pb, primMem, block, projected, indices, -1, texture);
 }
 
 static void Ovr226_800a11e0_ProjectFullDynamicLastPair(struct LevVertex *vertices, const struct QuadBlock *block, struct DrawLevelOvr1PScratchVertex *projected)
@@ -8117,12 +9543,20 @@ static int Ovr226_800a0ef4_DrawFullDynamicBspList(struct VisMemBspListNode *slot
                                                   const int *visFaceList)
 {
 	struct LevVertex *vertices = mesh->ptrVertexArray;
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	const int nativeStressMeasuring = NativePerf_IsStressTestMeasuring();
+#endif
 
 	while (slot != NULL)
 	{
 		struct BSP *bsp = slot->bsp;
 		struct QuadBlock *block = bsp->data.leaf.ptrQuadBlockArray;
 		s32 quadCount = bsp->data.leaf.numQuads;
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+		const int nativeStressLeafFullyInside =
+			nativeStressMeasuring && (quadCount >= 4) &&
+			RenderLists_NativeBoxFullyInsideCameraFrustum(pb, &bsp->box);
+#endif
 
 		DrawLevelOvr1P_Scratch()->quadCount = quadCount;
 		if (quadCount > 0)
@@ -8132,16 +9566,29 @@ static int Ovr226_800a0ef4_DrawFullDynamicBspList(struct VisMemBspListNode *slot
 
 		while (quadCount > 0)
 		{
-			if (!DrawLevelOvr1P_HasBucketPrimReserve(primMem, DRAW_LEVEL_OVR1P_BUCKET_RESERVE_FULL_DYNAMIC))
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+			if (nativeStressMeasuring)
 			{
-				return 0;
-			}
-
-			if (Ovr226_800a0f34_ConsumeFullDynamicVisibilityBit())
-			{
-				if (!Ovr226_800a0f78_EmitFullDynamicQuadBlock(pb, primMem, block, vertices))
+				if (Ovr226_800a0f34_ConsumeFullDynamicVisibilityBit() &&
+				    (nativeStressLeafFullyInside ||
+				     DrawLevelOvr1P_NativeCameraAllowsQuadBlock(pb, block)))
 				{
+					if (!DrawLevelOvr1P_HasBucketPrimReserve(primMem, DRAW_LEVEL_OVR1P_BUCKET_RESERVE_FULL_DYNAMIC))
+						return 0;
+					if (!Ovr226_800a0f78_EmitFullDynamicQuadBlock(pb, primMem, block, vertices))
+						return 0;
+				}
+			}
+			else
+#endif
+			{
+				if (!DrawLevelOvr1P_HasBucketPrimReserve(primMem, DRAW_LEVEL_OVR1P_BUCKET_RESERVE_FULL_DYNAMIC))
 					return 0;
+
+				if (Ovr226_800a0f34_ConsumeFullDynamicVisibilityBit())
+				{
+					if (!Ovr226_800a0f78_EmitFullDynamicQuadBlock(pb, primMem, block, vertices))
+						return 0;
 				}
 			}
 
@@ -8169,19 +9616,19 @@ static int DrawLevelOvr1P_ProjectSplitGroundListALowGrid(struct LevVertex *verti
                                                          struct DrawLevelOvr1PScratchVertex *projected)
 {
 	DrawLevelOvr1P_SetGridFaceSlot(projected, 0);
-	if (DrawLevelOvr1P_ProjectListVertexTriple(vertices, block, projected, 0, 1, 2, DRAW_LEVEL_OVR1P_PROJECTED_SOURCE_POS_FLAGS))
+	if (DrawLevelOvr1P_ProjectListVertexTriple(vertices, block, projected, 0, 1, 2, DRAW_LEVEL_OVR1P_PROJECTED_SOURCE_POS_FLAGS, NULL))
 	{
 		return 1;
 	}
 
 	DrawLevelOvr1P_SetActiveDrawOrderLow(block);
-	return DrawLevelOvr1P_ProjectListVertexTriple(vertices, block, projected, 3, 4, 5, DRAW_LEVEL_OVR1P_PROJECTED_SOURCE_POS_FLAGS);
+	return DrawLevelOvr1P_ProjectListVertexTriple(vertices, block, projected, 3, 4, 5, DRAW_LEVEL_OVR1P_PROJECTED_SOURCE_POS_FLAGS, NULL);
 }
 
 static int DrawLevelOvr1P_ProjectSplitGroundListATransitionGrid(struct LevVertex *vertices, const struct QuadBlock *block,
                                                                 struct DrawLevelOvr1PScratchVertex *projected)
 {
-	if (DrawLevelOvr1P_ProjectListVertexTriple(vertices, block, projected, 6, 7, 8, DRAW_LEVEL_OVR1P_PROJECTED_SOURCE_POS_FLAGS))
+	if (DrawLevelOvr1P_ProjectListVertexTriple(vertices, block, projected, 6, 7, 8, DRAW_LEVEL_OVR1P_PROJECTED_SOURCE_POS_FLAGS, NULL))
 	{
 		return 1;
 	}
@@ -8224,12 +9671,20 @@ static int DrawLevelOvr1P_DrawSplitGroundListABspList(struct VisMemBspListNode *
                                                       const int *visFaceList)
 {
 	DrawLevelOvr1P_SetSplitGroundThresholdScratch();
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	const int nativeStressMeasuring = NativePerf_IsStressTestMeasuring();
+#endif
 
 	while (slot != NULL)
 	{
 		struct BSP *bsp = slot->bsp;
 		struct QuadBlock *block = bsp->data.leaf.ptrQuadBlockArray;
 		s32 quadCount = bsp->data.leaf.numQuads;
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+		const int nativeStressLeafFullyInside =
+			nativeStressMeasuring && (quadCount >= 4) &&
+			RenderLists_NativeBoxFullyInsideCameraFrustum(pb, &bsp->box);
+#endif
 
 		DrawLevelOvr1P_Scratch()->quadCount = quadCount;
 		Ovr226_800a0f0c_SeedFullDynamicVisibilityScratch(visFaceList, block);
@@ -8237,16 +9692,25 @@ static int DrawLevelOvr1P_DrawSplitGroundListABspList(struct VisMemBspListNode *
 		while (quadCount > 0)
 		{
 			if (!DrawLevelOvr1P_HasBucketPrimReserve(primMem, DRAW_LEVEL_OVR1P_BUCKET_RESERVE_DEFAULT))
-			{
 				return 0;
-			}
 
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+			if (nativeStressMeasuring)
+			{
+				if (Ovr226_800a0f34_ConsumeFullDynamicVisibilityBit() &&
+				    (nativeStressLeafFullyInside ||
+				     DrawLevelOvr1P_NativeCameraAllowsQuadBlock(pb, block)))
+				{
+					if (!DrawLevelOvr1P_EmitSplitGroundListAQuadBlock(pb, primMem, mesh, block))
+						return 0;
+				}
+			}
+			else
+#endif
 			if (Ovr226_800a0f34_ConsumeFullDynamicVisibilityBit())
 			{
 				if (!DrawLevelOvr1P_EmitSplitGroundListAQuadBlock(pb, primMem, mesh, block))
-				{
 					return 0;
-				}
 			}
 
 			block++;
@@ -8282,6 +9746,228 @@ static int Ovr226_800a3738_EmitGround4x1ListQuadBlock(struct PushBuffer *pb, str
 
 	return 1;
 }
+
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+/* Turbocharged-style native level OT insertion: stress-only test.
+ * The B5 primitive carries one command word (0xB5000000) and is parsed by
+ * ProcessPsyXPrims before the normal later-frame PS1 splits. B3 is reserved
+ * for our native modular OBJ packets, so DO NOT reuse upstream's B3 here.
+ * This marker must be armed before ANY retail terrain can be bypassed. */
+static int sDrawLevelOvr1P_NativeGpuOtMarkerArmed;
+
+/* Human-controlled QA path, restricted to Oxide Station single-player.
+ * In every other scene or multiplayer session, retail rendering is retained.
+ * This is NOT the production native renderer. */
+static int DrawLevelOvr1P_NativeGpuManualPlaytestAllowed(void)
+{
+    const struct GameTracker *gt=(sdata!=NULL)?sdata->gGT:NULL;
+    return NativeRenderer_LevelPCManualPlaytest() && gt != NULL &&
+           gt->levelID == OXIDE_STATION && gt->numPlyrCurrGame == 1 &&
+           (gt->gameMode1 & (MAIN_MENU | GAME_CUTSCENE)) == 0;
+}
+
+static int DrawLevelOvr1P_NativeGpuOtMarkerRequested(void)
+{
+    static int checked, requested;
+    if (!checked)
+    {
+        FILE *f=fopen("debug/level_pc_gpu_ot_marker_stress.enable","rb");
+        requested=(f!=NULL);
+        if(f)fclose(f);
+        checked=1;
+    }
+    return requested &&
+           (NativePerf_IsStressTestMeasuring() ||
+            DrawLevelOvr1P_NativeGpuManualPlaytestAllowed()) &&
+           NativeRenderer_LevelPCEnabled();
+}
+
+/* Test-only native GPU terrain bypass. Numeric marker:
+ * debug/level_pc_gpu_replace_stress.txt
+ * 1=DYNAMIC, 2=GROUND_4X1, 3=both. Other buckets retain retail PS1.
+ * Requires the native material shader opt-in and an ACTIVE 8-bot stress
+ * measurement. Never run this bypass during player gameplay.
+ * When the queue is full/unavailable ALWAYS fall back to retail packets. */
+static int DrawLevelOvr1P_NativeGpuBypassRole(const struct mesh_info *mesh, int role)
+{
+	static int checked=0,mode=0;
+	if (!checked)
+	{
+		FILE *f=fopen("debug/level_pc_gpu_replace_stress.txt","rb");
+		if (f)
+		{
+			int parsed=0;
+			if (fscanf(f,"%d",&parsed)==1 && parsed>=0 && parsed<=3)
+				mode=parsed;
+			fclose(f);
+		}
+		checked=1;
+		if (mode)
+			Platform_Log("[LEVEL PC GPU] stress-only PS1 terrain bypass mask=%d\n",mode);
+	}
+	/* No marker in the OT means any skipped polygons would disappear.
+	 * Preserve the retail path if marker injection was requested but failed. */
+	if ((DrawLevelOvr1P_NativeGpuOtMarkerRequested() &&
+	     !sDrawLevelOvr1P_NativeGpuOtMarkerArmed) ||
+	    !mode || !(NativePerf_IsStressTestMeasuring() ||
+	               DrawLevelOvr1P_NativeGpuManualPlaytestAllowed()) ||
+	    !NativeRenderer_LevelPCEnabled() || mesh==NULL ||
+	    mesh->ptrQuadBlockArray==NULL)
+		return 0;
+	switch (role)
+	{
+	case DRAW_LEVEL_OVR1P_BUCKET_DYNAMIC_LIST:
+	case DRAW_LEVEL_OVR1P_BUCKET_DYNAMIC_RENDERED:
+		return (mode & 1)!=0;
+	case DRAW_LEVEL_OVR1P_BUCKET_4X1_LIST:
+	case DRAW_LEVEL_OVR1P_BUCKET_4X1_RENDERED:
+		return (mode & 2)!=0;
+	default:
+		return 0;
+	}
+}
+/* Conservative stress-only near-camera fallback for the resident GPU mesh.
+ * The native quad has no PS1 near subdivision, so preserve retail rendering
+ * whenever ANY of its original nine vertices is too close to the camera. */
+static int DrawLevelOvr1P_NativeGpuNearFallback(
+    const struct mesh_info *mesh,const struct QuadBlock *block)
+{
+    static int checked,threshold;
+    if(!checked)
+    {
+        FILE *f=fopen("debug/level_pc_gpu_near_fallback_stress.txt","rb");
+        if(f)
+        {
+            if(fscanf(f,"%d",&threshold)!=1 || threshold<1 || threshold>5000)
+                threshold=0;
+            fclose(f);
+        }
+        checked=1;
+        if(threshold)
+            Platform_Log("[LEVEL PC GPU] stress near-zone fallback minZ=%d\n",threshold);
+    }
+    if(!threshold || !(NativePerf_IsStressTestMeasuring() ||
+                     DrawLevelOvr1P_NativeGpuManualPlaytestAllowed()))return 0;
+    for(int j=0;j<9;++j)
+    {
+        const u32 vi=block->index[j];
+        if(vi>=(u32)mesh->numVertex)return 1;
+        const struct LevVertex *v=&mesh->ptrVertexArray[vi];
+        const float z=NativeRenderer_LevelPCWorldDepthQA(
+            (float)v->pos.x,(float)v->pos.y,(float)v->pos.z);
+        if(!(z>=(float)threshold))return 1;
+    }
+    return 0;
+}
+
+/* The GPU VBO uses the first (far) texture layout for every face.
+ * Retail selects ptr_texture_mid[face]+1/+2 as a function of EACH face's
+ * maximum projected depth. Passing a block whose faces select different
+ * textures causes wrong tunnel/wall colors even when vertices are correct.
+ * This extra selection check is QA-only; it never changes retail physics,
+ * collisions, geometry, or the installed executable.
+ *
+ * Unlike a global minZ>=1600 cutoff, this checks each face's actual four
+ * vertices so an adjacent face can remain eligible when its furthest
+ * corner is beyond retail's far texture LOD threshold. */
+static int DrawLevelOvr1P_NativeGpuLodGuard(
+    const struct mesh_info *mesh, const struct QuadBlock *block)
+{
+    static int checked,enabled;
+    static unsigned long examined,excludedLod,excludedInvalid;
+    if (!checked)
+    {
+        FILE *f=fopen("debug/level_pc_gpu_lod_guard.enable","rb");
+        enabled=(f!=NULL);
+        if(f)fclose(f);
+        checked=1;
+        if(enabled)
+            Platform_Log("[LEVEL PC GPU] native face LOD-safe fallback enabled (test only)\n");
+    }
+    if(!enabled)return 0;
+
+    /* RenderScratch is populated by the retail ground passes. Fail closed
+     * rather than using a stale threshold from a custom level. */
+    const s32 threshold=DrawLevelOvr1P_RenderScratch()->textureLodDepthThreshold0;
+    const uintptr_t base=(uintptr_t)sDrawLevelOvr1P_CompiledQuadBase;
+    const uintptr_t addr=(uintptr_t)block;
+    const size_t count=(size_t)sDrawLevelOvr1P_CompiledQuadCount;
+    if(mesh==NULL || block==NULL ||
+       sDrawLevelOvr1P_CompiledVertices==NULL || base==0 ||
+       mesh->ptrQuadBlockArray!=sDrawLevelOvr1P_CompiledQuadBase ||
+       mesh->ptrVertexArray!=sDrawLevelOvr1P_CompiledVertexBase ||
+       addr<base || (addr-base)%sizeof(*block)!=0 ||
+       (addr-base)/sizeof(*block)>=count ||
+       threshold<=0 || threshold>65535)
+    {
+        ++excludedInvalid;
+        return 1;
+    }
+    const size_t idx=(addr-base)/sizeof(*block);
+    const struct DrawLevelOvr1PCompiledVertices *entry=
+        &sDrawLevelOvr1P_CompiledVertices[idx];
+    if(!entry->valid || entry->nativeLodFaceMask!=0xfu)
+    {
+        ++excludedInvalid;
+        return 1;
+    }
+
+    float z[9];
+    for(int i=0;i<9;++i)
+    {
+        const struct LevVertex *v=entry->v[i];
+        if(v==NULL){++excludedInvalid;return 1;}
+        z[i]=NativeRenderer_LevelPCWorldDepthQA(
+             (float)v->pos.x,(float)v->pos.y,(float)v->pos.z);
+    }
+    ++examined;
+    /* PS1 GTE SZ is integer and can saturate near the LOD boundary:
+     * retain the retail path in a small 32-unit safety margin. */
+    const float safeDepth=(float)threshold+32.0f;
+    for(int f=0;f<4;++f)
+    {
+        float maxDepth=-1.0e20f;
+        for(int c=0;c<4;++c)
+        {
+            const u8 vi=entry->nativeFaceCorner[f][c];
+            if(vi>=9){++excludedInvalid;return 1;}
+            if(z[vi]>maxDepth)maxDepth=z[vi];
+        }
+        if(!(maxDepth>=safeDepth))
+        {
+            ++excludedLod;
+            if((examined&8191ul)==0)
+                Platform_Log("[LEVEL PC GPU] LOD guard blocks=%lu retailLOD=%lu invalid=%lu\n",
+                             examined,excludedLod,excludedInvalid);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int DrawLevelOvr1P_NativeGpuBypassTryQueue(
+	const struct mesh_info *mesh,const struct QuadBlock *block)
+{
+	static int groundOnlyChecked, groundOnly;
+	if (!groundOnlyChecked)
+	{
+		FILE *flag=fopen("debug/level_pc_gpu_ground_only_stress.enable","rb");
+		groundOnly=(flag!=NULL);
+		if (flag) fclose(flag);
+		groundOnlyChecked=1;
+		if (groundOnly)
+			Platform_Log("[LEVEL PC GPU] stress bypass: GROUND blocks only\\n");
+	}
+	if (block < mesh->ptrQuadBlockArray || 
+	    block >= mesh->ptrQuadBlockArray + mesh->numQuadBlock)
+		return 0;
+	if (groundOnly && !(block->quadFlags & QUADBLOCK_FLAG_GROUND))return 0;
+    if(DrawLevelOvr1P_NativeGpuNearFallback(mesh,block))return 0;
+    if(DrawLevelOvr1P_NativeGpuLodGuard(mesh,block))return 0;
+	return NativeRenderer_LevelPCQueueBlock(
+		mesh->ptrQuadBlockArray,(int)(block - mesh->ptrQuadBlockArray));
+}
+#endif
 
 static u32 DrawLevelOvr1P_GetBspListReserve(int role)
 {
@@ -8372,7 +10058,14 @@ static int DrawLevelOvr1P_DrawNonWaterRenderedList(struct QuadBlock **renderedLi
 		{
 			return 1;
 		}
-
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+		if (DrawLevelOvr1P_NativeGpuBypassRole(mesh, role) &&
+		    DrawLevelOvr1P_NativeGpuBypassTryQueue(mesh,block))
+		{
+			renderedList++;
+			continue;
+		}
+#endif
 		DrawLevelOvr1P_ProjectRenderedGrid(vertices, block, projected, DRAW_LEVEL_OVR1P_PROJECTED_SOURCE_POS_FLAGS, slotMode);
 
 		for (int faceIndex = 0; faceIndex < 4; faceIndex++)
@@ -8409,8 +10102,74 @@ static int Ovr226_800a5030_EmitGround4x2ListQuadBlock(struct PushBuffer *pb, str
 	return 1;
 }
 
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+/* Non-shipping diagnostic: quantify GTE projection vs dynamic face writer.
+ * If debug/level_dynamic_subprofile.enable is absent, normal retail path is unchanged. */
+static int DrawLevelOvr1P_DynamicListProfileEnabled(void)
+{
+    static int checked, enabled;
+    if (!checked)
+    {
+        FILE *f=fopen("debug/level_dynamic_subprofile.enable","rb");
+        enabled=(f!=NULL);
+        if (f) fclose(f);
+        checked=1;
+        if (enabled) Platform_Log("[DYN PROFILE] experimental timing active for DYNAMIC_LIST only\n");
+    }
+    return enabled && NativePerf_IsStressTestMeasuring();
+}
+static int Ovr226_800a6fd0_ProfiledDynamicListQuadBlock(
+    struct PushBuffer *pb, struct PrimMem *primMem,
+    struct mesh_info *mesh, struct QuadBlock *block)
+{
+    static u64 projectionNs, faceNs;
+    static u32 blocks, overflowBlocks, failedBlocks;
+    struct LevVertex *vertices=mesh->ptrVertexArray;
+    struct DrawLevelOvr1PScratchVertex *projected=DrawLevelOvr1P_GetScratchVertices();
+    const u64 t0=SDL_GetTicksNS();
+    const int overflow=DrawLevelOvr1P_ProjectListGrid(
+        vertices, block, projected, DRAW_LEVEL_OVR1P_PROJECTED_SOURCE_POS_FLAGS,
+        DRAW_LEVEL_OVR1P_GRID_SLOT_WORD);
+    const u64 t1=SDL_GetTicksNS();
+    int result=1;
+    if (overflow)
+    {
+        DrawLevelOvr1P_AppendRenderedQuadBlock(block);
+        ++overflowBlocks;
+    }
+    else
+    {
+        for (int faceIndex=0;faceIndex<4;++faceIndex)
+        {
+            if(!Ovr226_800a7668_DynamicListSelectorNearGate(
+                pb,primMem,projected,block,faceIndex))
+            {
+                result=0;
+                ++failedBlocks;
+                break;
+            }
+        }
+    }
+    const u64 t2=SDL_GetTicksNS();
+    projectionNs+=t1-t0;
+    faceNs+=t2-t1;
+    if (++blocks>=10000u)
+    {
+        Platform_Log("[DYN PROFILE] blocks=%u projectMs=%.3f facesMs=%.3f overflow=%u failed=%u\n",
+            blocks,(double)projectionNs/1000000.0,
+            (double)faceNs/1000000.0,overflowBlocks,failedBlocks);
+        blocks=0; projectionNs=0; faceNs=0;overflowBlocks=0;failedBlocks=0;
+    }
+    return result;
+}
+#endif
+
 static int Ovr226_800a6fd0_EmitDynamicListQuadBlock(struct PushBuffer *pb, struct PrimMem *primMem, struct mesh_info *mesh, struct QuadBlock *block)
 {
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+    if (DrawLevelOvr1P_DynamicListProfileEnabled())
+        return Ovr226_800a6fd0_ProfiledDynamicListQuadBlock(pb,primMem,mesh,block);
+#endif
 	struct LevVertex *vertices = mesh->ptrVertexArray;
 	struct DrawLevelOvr1PScratchVertex *projected = DrawLevelOvr1P_GetScratchVertices();
 
@@ -8480,28 +10239,56 @@ static int DrawLevelOvr1P_DrawBspListQuadBlocks(struct VisMemBspListNode *slot, 
 	}
 
 	u32 reserve = DrawLevelOvr1P_GetBspListReserve(role);
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+    /* During manual 1P Oxide playtest retain the same conservative visibility
+     * and bypass branch already validated by the automatic stress QA. */
+	const int nativeStressMeasuring = NativePerf_IsStressTestMeasuring() ||
+        DrawLevelOvr1P_NativeGpuManualPlaytestAllowed();
+#endif
 
 	while (slot != NULL)
 	{
 		struct BSP *bsp = slot->bsp;
 		struct QuadBlock *block = bsp->data.leaf.ptrQuadBlockArray;
 		s32 quadCount = bsp->data.leaf.numQuads;
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+		const int nativeStressLeafFullyInside =
+			nativeStressMeasuring && (quadCount >= 4) &&
+			RenderLists_NativeBoxFullyInsideCameraFrustum(pb, &bsp->box);
+#endif
 
 		DrawLevelOvr1P_Scratch()->quadCount = quadCount;
 		Ovr226_800a0f0c_SeedFullDynamicVisibilityScratch(visFaceList, block);
 
 		while (quadCount > 0)
 		{
-			if (!DrawLevelOvr1P_HasBucketPrimReserve(primMem, reserve))
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+			if (nativeStressMeasuring)
 			{
-				return 0;
-			}
-
-			if (Ovr226_800a0f34_ConsumeFullDynamicVisibilityBit())
-			{
-				if (!DrawLevelOvr1P_EmitBspListQuadBlock(pb, primMem, mesh, block, role))
+				if (Ovr226_800a0f34_ConsumeFullDynamicVisibilityBit() &&
+				    (nativeStressLeafFullyInside ||
+				     DrawLevelOvr1P_NativeCameraAllowsQuadBlock(pb, block)))
 				{
+					if (!(DrawLevelOvr1P_NativeGpuBypassRole(mesh, role) &&
+					      DrawLevelOvr1P_NativeGpuBypassTryQueue(mesh,block)))
+					{
+						if (!DrawLevelOvr1P_HasBucketPrimReserve(primMem, reserve))
+							return 0;
+						if (!DrawLevelOvr1P_EmitBspListQuadBlock(pb, primMem, mesh, block, role))
+							return 0;
+					}
+				}
+			}
+			else
+#endif
+			{
+				if (!DrawLevelOvr1P_HasBucketPrimReserve(primMem, reserve))
 					return 0;
+
+				if (Ovr226_800a0f34_ConsumeFullDynamicVisibilityBit())
+				{
+					if (!DrawLevelOvr1P_EmitBspListQuadBlock(pb, primMem, mesh, block, role))
+						return 0;
 				}
 			}
 
@@ -9162,30 +10949,61 @@ static int Ovr226_800a1e30_DrawWaterBspList(struct VisMemBspListNode *slot, stru
 {
 	WATER_PERF_BEGIN();
 	Ovr226_800a1e30_SeedWaterListState();
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	const int nativeStressMeasuring = NativePerf_IsStressTestMeasuring();
+#endif
 
 	while (slot != NULL)
 	{
 		struct BSP *bsp = slot->bsp;
 		struct QuadBlock *block = bsp->data.leaf.ptrQuadBlockArray;
 		s32 quadCount = bsp->data.leaf.numQuads;
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+		const int nativeStressLeafFullyInside =
+			nativeStressMeasuring && (quadCount >= 4) &&
+			RenderLists_NativeBoxFullyInsideCameraFrustum(pb, &bsp->box);
+#endif
 
 		DrawLevelOvr1P_Scratch()->quadCount = quadCount;
 		Ovr226_800a1e74_SeedWaterVisibilityScratch(visFaceList, block);
 
 		while (quadCount > 0)
 		{
-			if (!DrawLevelOvr1P_HasBucketPrimReserve(primMem, DRAW_LEVEL_OVR1P_BUCKET_RESERVE_DEFAULT))
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+			if (nativeStressMeasuring)
 			{
-				WATER_PERF_END();
-				return 0;
+				if (Ovr226_800a1eb0_ConsumeWaterVisibilityBit() &&
+				    (nativeStressLeafFullyInside ||
+				     DrawLevelOvr1P_NativeCameraAllowsQuadBlock(pb, block)))
+				{
+					if (!DrawLevelOvr1P_HasBucketPrimReserve(primMem, DRAW_LEVEL_OVR1P_BUCKET_RESERVE_DEFAULT))
+					{
+						WATER_PERF_END();
+						return 0;
+					}
+					if (!Ovr226_800a1ee0_EmitWaterListQuadBlock(pb, primMem, mesh, block))
+					{
+						WATER_PERF_END();
+						return 0;
+					}
+				}
 			}
-
-			if (Ovr226_800a1eb0_ConsumeWaterVisibilityBit())
+			else
+#endif
 			{
-				if (!Ovr226_800a1ee0_EmitWaterListQuadBlock(pb, primMem, mesh, block))
+				if (!DrawLevelOvr1P_HasBucketPrimReserve(primMem, DRAW_LEVEL_OVR1P_BUCKET_RESERVE_DEFAULT))
 				{
 					WATER_PERF_END();
 					return 0;
+				}
+
+				if (Ovr226_800a1eb0_ConsumeWaterVisibilityBit())
+				{
+					if (!Ovr226_800a1ee0_EmitWaterListQuadBlock(pb, primMem, mesh, block))
+					{
+						WATER_PERF_END();
+						return 0;
+					}
 				}
 			}
 
@@ -9818,6 +11636,55 @@ static int Ovr226_800a0e78_DispatchBucketHandler(u32 handlerAddress, void *bucke
 	}
 }
 
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+/* Experimental diagnostic only. Disabled by default unless the marker exists.
+ * Measures the original retail bucket dispatcher without changing its output.
+ * Run this in an isolated build, then remove once a direct native path is ready.
+ */
+static int DrawLevelOvr1P_BucketProfileEnabled(void)
+{
+    static int checked, enabled;
+    if (!checked)
+    {
+        FILE *f = fopen("debug/level_bucket_profile.enable", "rb");
+        enabled = (f != NULL);
+        if (f != NULL) fclose(f);
+        checked = 1;
+    }
+    return enabled;
+}
+static u64 sDrawLevelOvr1P_BucketNs[OVR226_BUCKET_COUNT];
+static u64 sDrawLevelOvr1P_BucketCalls[OVR226_BUCKET_COUNT];
+static u32 sDrawLevelOvr1P_BucketFrames;
+static u64 DrawLevelOvr1P_BucketProfileBegin(void)
+{
+    return SDL_GetTicksNS();
+}
+static void DrawLevelOvr1P_BucketProfileEnd(u32 index, u64 start)
+{
+    if (index < OVR226_BUCKET_COUNT)
+    {
+        sDrawLevelOvr1P_BucketNs[index] += SDL_GetTicksNS() - start;
+        ++sDrawLevelOvr1P_BucketCalls[index];
+    }
+}
+static void DrawLevelOvr1P_BucketProfileFrame(void)
+{
+    if (++sDrawLevelOvr1P_BucketFrames < 1200) return;
+    sDrawLevelOvr1P_BucketFrames = 0;
+    Platform_Log("[LEVEL BUCKET PROFILE] 1200 frames / 11 retail buckets (ms total and calls)\n");
+    for (u32 i = 0; i < OVR226_BUCKET_COUNT; ++i)
+    {
+        Platform_Log("[LEVEL BUCKET PROFILE] bucket=%u kind=%u role=%u totalMs=%.3f calls=%llu\n",
+            i, (u32)sDrawLevelOvr1PBuckets[i].kind, (u32)sDrawLevelOvr1PBuckets[i].role,
+            (double)sDrawLevelOvr1P_BucketNs[i] / 1000000.0,
+            (unsigned long long)sDrawLevelOvr1P_BucketCalls[i]);
+        sDrawLevelOvr1P_BucketNs[i] = 0;
+        sDrawLevelOvr1P_BucketCalls[i] = 0;
+    }
+}
+#endif
+
 static int Ovr226_800a0e10_DispatchBucketTable(struct DrawLevelOvr1PRenderList *renderList, struct PushBuffer *pb, struct mesh_info *mesh,
                                                struct PrimMem *primMem, const int *visFaceList)
 {
@@ -9840,7 +11707,16 @@ static int Ovr226_800a0e10_DispatchBucketTable(struct DrawLevelOvr1PRenderList *
 		}
 
 		Ovr226_800a0e44_ApplyBucketSetup(setupAddress);
-
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+		if (DrawLevelOvr1P_BucketProfileEnabled())
+		{
+			const u64 bucketStart = DrawLevelOvr1P_BucketProfileBegin();
+			const int success = Ovr226_800a0e78_DispatchBucketHandler(handlerAddress, bucketValue, pb, mesh, primMem, visFaceList);
+			DrawLevelOvr1P_BucketProfileEnd(bucketIndex, bucketStart);
+			if (!success) return 0;
+		}
+		else
+#endif
 		if (!Ovr226_800a0e78_DispatchBucketHandler(handlerAddress, bucketValue, pb, mesh, primMem, visFaceList))
 		{
 			return 0;
@@ -9857,6 +11733,13 @@ void DrawLevelOvr1P(void *LevRenderList, struct PushBuffer *pb, struct BSP *bspL
 	struct DrawLevelOvr1PRenderList *renderList = LevRenderList;
 	struct mesh_info *mesh = (struct mesh_info *)bspList;
 	u32 hostStackAnchor;
+
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+    sDrawLevelOvr1P_NativeGpuOtMarkerArmed=0;
+#endif
+#ifdef CTR_NATIVE
+	DrawLevelOvr1P_BeginNativePointerCachePass(mesh);
+#endif
 
 	// NOTE(aalhendi): Retail 0x800a0cf0 saves `sp` in scratch 0x38 and
 	// restores it at 0x800a0eb8. Native records a stack anchor only so later
@@ -9884,8 +11767,57 @@ void DrawLevelOvr1P(void *LevRenderList, struct PushBuffer *pb, struct BSP *bspL
 	DrawLevelOvr1P_SetListHandlersSeedRenderedCursor(1);
 	Ovr226_800a0d20_SeedEntryScratchPointers(renderList, pb);
 	Ovr226_800a0d34_SetEntryGteAndCameraScratch(pb);
+#if defined(CTR_NATIVE)
+	if (NativeRenderer_LevelPCEnabled())
+	{
+		s16 viewM[3][3];
+		s32 viewT[3];
+		int nativeScreen = 0;
+		int nativeWide = 0;
+		NativeGTE_GetLevelPCView(viewM, viewT, &nativeScreen, &nativeWide);
+		/* CTR's 1P logical projection is 320x240; the host viewport may be
+		 * widescreen, but the presentation mapper handles host pixels. */
+		NativeRenderer_LevelPCBeginFrame(
+			mesh->ptrQuadBlockArray, viewM, viewT,
+			nativeScreen, 320, 240, nativeWide);
+        s32 originX=0,originY=0;
+        NativeGTE_GetLevelPCProjectionOrigin(&originX,&originY);
+        NativeRenderer_LevelPCProjectionQABegin(
+            mesh->ptrQuadBlockArray,viewM,viewT,
+            nativeScreen,nativeWide,originX,originY);
+	}
+	DrawLevelOvr1P_BeginProjectionCache(mesh, pb);
+#endif
 	Ovr226_800a0dc4_ClearProjectedScratch();
 	Ovr226_800a0ddc_CopyScratchInitTable();
+
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+    /* OT 0x3fc mirrors Turbocharged's layer placement: sky negative-depth
+     * entries precede resident terrain, later gameplay/HUD entries follow.
+     * Keep this packet in the SAME PrimMem as the original overlay so its
+     * OT address is properly registered and survives native PS1 packet walk.
+     * Reserve it BEFORE rasterizing: an incomplete bucket render can safely
+     * fall back without ever suppressing geometry whose marker is absent.
+     * This does NOT switch on any new mode for normal player gameplay. */
+    if (DrawLevelOvr1P_NativeGpuOtMarkerRequested() &&
+        pb->ptrOT != NULL && primMem->cursor != NULL &&
+        primMem->end != NULL &&
+        (uintptr_t)primMem->end >= (uintptr_t)primMem->cursor &&
+        (uintptr_t)primMem->end - (uintptr_t)primMem->cursor >= 8u)
+    {
+        u32 *marker=(u32 *)primMem->cursor;
+        marker[1]=0xB5000000u; /* 0xB5: reserved native terrain packet */
+        DrawLevelOvr1P_AddRawPrimToOt(primMem,marker,1,&pb->ptrOT[0x3fc]);
+        primMem->cursor=(void *)(marker+2);
+        sDrawLevelOvr1P_NativeGpuOtMarkerArmed=1;
+        static int loggedMarker;
+        if(!loggedMarker)
+        {
+            Platform_Log("[LEVEL PC GPU] STRESS OT terrain marker inserted at 0x3fc (B5, 1 word)\n");
+            loggedMarker=1;
+        }
+    }
+#endif
 
 	if (!Ovr226_800a0e10_DispatchBucketTable(renderList, pb, mesh, primMem, visFaceList))
 	{
@@ -9899,4 +11831,11 @@ void DrawLevelOvr1P(void *LevRenderList, struct PushBuffer *pb, struct BSP *bspL
 	{
 		return;
 	}
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	if (DrawLevelOvr1P_BucketProfileEnabled())
+		DrawLevelOvr1P_BucketProfileFrame();
+#endif
+#if defined(CTR_NATIVE)
+	DrawLevelOvr1P_LogProjectionCache();
+#endif
 }

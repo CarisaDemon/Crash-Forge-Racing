@@ -1,4 +1,9 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <RacerLoadout.h>
+#include <VehiclePartRegistry.h>
+#include <math.h>
+#endif
 
 enum
 {
@@ -133,6 +138,180 @@ static void VehTurbo_TransformOffset(struct Instance *driverInst, s16 x, s16 y, 
 	CTR_GteStoreIR(out);
 }
 
+#if defined(CTR_NATIVE)
+static s16 VehTurbo_ClampS16(float value)
+{
+	if (value < -32768.0f)
+		return -32768;
+	if (value > 32767.0f)
+		return 32767;
+	return (s16)lroundf(value);
+}
+
+static void VehTurbo_BuildLocalRotation(
+	const float rotation[3],
+	float out[3][3])
+{
+	const float degToRad = 0.01745329251994329577f;
+	float rx = rotation[0] * degToRad;
+	float ry = rotation[1] * degToRad;
+	float rz = rotation[2] * degToRad;
+	float sx = sinf(rx), cx = cosf(rx);
+	float sy = sinf(ry), cy = cosf(ry);
+	float sz = sinf(rz), cz = cosf(rz);
+
+	/*
+	 * Euler order matches VehEmitter: local X, then Y, then Z.
+	 * Matrix form is Rz * Ry * Rx.
+	 */
+	out[0][0] = cz * cy;
+	out[0][1] = cz * sy * sx - sz * cx;
+	out[0][2] = cz * sy * cx + sz * sx;
+
+	out[1][0] = sz * cy;
+	out[1][1] = sz * sy * sx + cz * cx;
+	out[1][2] = sz * sy * cx - cz * sx;
+
+	out[2][0] = -sy;
+	out[2][1] = cy * sx;
+	out[2][2] = cy * cx;
+}
+
+static int VehTurbo_GetCustomExhaust(
+	const struct Driver *driver,
+	int exhaustIndex,
+	float position[3],
+	float rotation[3],
+	int *outCount)
+{
+	int kartID;
+	int count;
+
+	if (outCount != NULL)
+		*outCount = -1;
+
+	if (driver == NULL)
+		return 0;
+
+	kartID = RacerLoadout_GetEffectiveKart((int)driver->driverID);
+	if (kartID < 0)
+		return 0;
+
+	count = VehiclePartRegistry_GetExhaustCount(kartID);
+	if (outCount != NULL)
+		*outCount = count;
+
+	if (count < 0 ||
+		exhaustIndex < 0 ||
+		exhaustIndex >= count)
+		return 0;
+
+	return VehiclePartRegistry_GetExhaustMount(
+		kartID, exhaustIndex, position, rotation);
+}
+
+static int VehTurbo_ApplyCustomExhaustTransform(
+	struct Driver *driver,
+	struct Instance *effectInst,
+	int exhaustIndex,
+	int fireSize,
+	int mirrorX)
+{
+	struct Instance *driverInst;
+	float position[3];
+	float rotation[3];
+	float localRotation[3][3];
+
+	if (driver == NULL || effectInst == NULL)
+		return 0;
+
+	driverInst = driver->instSelf;
+	if (driverInst == NULL ||
+		!VehTurbo_GetCustomExhaust(
+			driver,
+			exhaustIndex,
+			position,
+			rotation,
+			NULL))
+	{
+		return 0;
+	}
+
+	VehTurbo_BuildLocalRotation(rotation, localRotation);
+
+	/*
+	 * Kart exhaust attachments use the same local units as smoke. Retail turbo
+	 * flame instances use a translation roughly one quarter as large before the
+	 * flame mesh's own scaled geometry reaches the exhaust mouth (vanilla is
+	 * about 72/208/-208 for smoke versus 18/48/-52 for flame translation).
+	 * Convert the custom mount to that turbo-instance space instead of moving
+	 * the flame instance all the way to the particle coordinate.
+	 */
+
+	for (int row = 0; row < 3; row++)
+	{
+		for (int col = 0; col < 3; col++)
+		{
+			float value = 0.0f;
+
+			for (int axis = 0; axis < 3; axis++)
+			{
+				value +=
+					(float)driverInst->matrix.m[row][axis] *
+					localRotation[axis][col];
+			}
+
+			value *= (float)fireSize /
+				(float)(1 << TURBO_FIRE_MATRIX_SCALE_SHIFT);
+
+			if (mirrorX && col == 0)
+				value = -value;
+
+			effectInst->matrix.m[row][col] =
+				VehTurbo_ClampS16(value);
+		}
+	}
+
+	VehTurbo_TransformOffset(
+		driverInst,
+		VehTurbo_ClampS16(
+			position[0] * (float)driverInst->scale.x / 16384.0f),
+		VehTurbo_ClampS16(
+			position[1] * (float)driverInst->scale.y / 16384.0f),
+		VehTurbo_ClampS16(
+			position[2] * (float)driverInst->scale.z / 16384.0f),
+		&effectInst->matrix.t[0]);
+
+	return 1;
+}
+
+static void VehTurbo_EnforceCustomExhaustCount(
+	struct Driver *driver,
+	struct Instance *primary,
+	struct Instance *secondary)
+{
+	int kartID;
+	int count;
+
+	if (driver == NULL)
+		return;
+
+	kartID = RacerLoadout_GetEffectiveKart((int)driver->driverID);
+	if (kartID < 0)
+		return;
+
+	count = VehiclePartRegistry_GetExhaustCount(kartID);
+	if (count < 0)
+		return;
+
+	if (count <= 0 && primary != NULL)
+		primary->flags |= HIDE_MODEL;
+
+	if (count <= 1 && secondary != NULL)
+		secondary->flags |= HIDE_MODEL;
+}
+#endif
+
 void VehTurbo_VisualTransformBucket(struct Thread *turboThread)
 {
 #if defined(CTR_NATIVE)
@@ -164,6 +343,17 @@ void VehTurbo_VisualTransformBucket(struct Thread *turboThread)
 			VehTurbo_TransformOffset(instanceDriver, instanceDriver->scale.x * TURBO_FIRE_RIGHT_X_NUMERATOR >> TURBO_FIRE_RIGHT_X_SHIFT,
 			                         instanceDriver->scale.y * TURBO_FIRE_Y_NUMERATOR >> TURBO_FIRE_Y_SHIFT,
 			                         instanceDriver->scale.z * TURBO_FIRE_Z_NUMERATOR >> TURBO_FIRE_Z_SHIFT, &secondary->matrix.t[0]);
+
+			/*
+			 * Custom kart exhaust attachments override both flame position and
+			 * orientation. Missing/incomplete mounts retain the vanilla transform.
+			 */
+			VehTurbo_ApplyCustomExhaustTransform(
+				turbo->driver, instance, 0, fireSize, 0);
+			VehTurbo_ApplyCustomExhaustTransform(
+				turbo->driver, secondary, 1, fireSize, 1);
+			VehTurbo_EnforceCustomExhaustCount(
+				turbo->driver, instance, secondary);
 		}
 		turboThread = turboThread->siblingThread;
 	}
@@ -280,6 +470,13 @@ void VehTurbo_ThTick(struct Thread *turboThread)
 	                         instanceDriver->scale.y * TURBO_FIRE_Y_NUMERATOR >> TURBO_FIRE_Y_SHIFT,
 	                         instanceDriver->scale.z * TURBO_FIRE_Z_NUMERATOR >> TURBO_FIRE_Z_SHIFT, &turbo->inst->matrix.t[0]);
 
+#if defined(CTR_NATIVE)
+	VehTurbo_ApplyCustomExhaustTransform(
+		driver, instance, 0, fireSize, 0);
+	VehTurbo_ApplyCustomExhaustTransform(
+		driver, turbo->inst, 1, fireSize, 1);
+#endif
+
 	// decrease turbo visibility cooldown by elapsed milliseconds per frame, ~32
 	s16 elapsedTime = turbo->fireVisibilityCooldown - gGT->elapsedTimeMS;
 	turbo->fireVisibilityCooldown = elapsedTime;
@@ -296,6 +493,12 @@ void VehTurbo_ThTick(struct Thread *turboThread)
 		instance->flags &= ~HIDE_MODEL;
 		turbo->inst->flags &= ~HIDE_MODEL;
 	}
+
+#if defined(CTR_NATIVE)
+	/* Keep explicit 0/1-exhaust kart layouts from reviving hidden flames. */
+	VehTurbo_EnforceCustomExhaustCount(
+		driver, instance, turbo->inst);
+#endif
 
 	if (instance->alphaScale < TURBO_ALPHA_RUMBLE_THRESHOLD)
 	{

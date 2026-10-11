@@ -288,7 +288,7 @@ int VehPickState_NewState(struct Driver *victimDriver, int damageType, struct Dr
 	}
 
 	victimDriver->kartState = KS_NORMAL;
-	victimDriver->reserves = 0;
+	NativeReserves_Set(victimDriver, 0);
 	victimDriver->turbo_outsideTimer = 0;
 	victimDriver->matrixArray = BAKED_GTE_MATRIX_NONE;
 	victimDriver->matrixIndex = 0;

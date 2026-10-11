@@ -1,6 +1,14 @@
 #include <common.h>
 #if defined(CTR_NATIVE)
+#include <NativeRacerVisual.h>
+#include <platform/native_gltf.h>
 #include <platform/native_obj.h>
+#include <platform/native_input.h>
+#include <platform/native_assets.h>
+#include <platform/native_renderer.h>
+#include <SDL3/SDL.h>
+#include <RacerLoadout.h>
+#include <VehiclePartRegistry.h>
 #endif
 
 enum
@@ -45,6 +53,13 @@ enum
 	MM_CHARACTER_SELECT_ICON_DECAL_OFFSET_Y = 4,
 	MM_CHARACTER_SELECT_ICON_RECT_W = 0x34,
 	MM_CHARACTER_SELECT_ICON_RECT_H = 0x21,
+	/* Retail driver portraits occupy about 40x25 logical pixels inside the
+	 * 52x33 selector frame. Community icon PNGs are commonly square (128x128),
+	 * so drawing them with source aspect in CTR's non-square UI space makes
+	 * faces look unnaturally narrow. Fit custom icons to the retail portrait
+	 * aspect first, then scale that frame down only when a paged slot is tighter. */
+	MM_CHARACTER_SELECT_NATIVE_ICON_W = 0x28,
+	MM_CHARACTER_SELECT_NATIVE_ICON_H = 0x19,
 	MM_CHARACTER_SELECT_CURSOR_LABEL_OFFSET_X = -6,
 	MM_CHARACTER_SELECT_CURSOR_LABEL_OFFSET_Y = -3,
 	MM_CHARACTER_SELECT_HIGHLIGHT_OFFSET_X = 3,
@@ -98,6 +113,505 @@ static s16 s_characterCursor;
 static s16 s_characterCursor2P[2];
 static s16 s_characterCursor3P[3];
 static s16 s_characterCursor4P[4];
+
+struct MMCharacterNativeIcon
+{
+	int characterID;
+	TextureID texture;
+	int width;
+	int height;
+	struct MMCharacterNativeIcon *next;
+};
+
+static struct MMCharacterNativeIcon *s_characterNativeIcons;
+
+static struct MMCharacterNativeIcon *MM_Characters_RosterGetNativeIcon(int characterID)
+{
+	struct MMCharacterNativeIcon *entry;
+	const struct CharacterDef *character;
+	const char *iconPath;
+	char relativePath[768];
+	char resolvedPath[1024];
+	SDL_Surface *source;
+	SDL_Surface *rgba;
+	unsigned char *pixels;
+	int pathLen;
+
+	if (characterID <= NITROS_OXIDE)
+		return NULL;
+
+	for (entry = s_characterNativeIcons; entry != NULL; entry = entry->next)
+	{
+		if (entry->characterID == characterID)
+			return entry->texture != 0 ? entry : NULL;
+	}
+
+	character = CharacterRegistry_GetByID(characterID);
+	iconPath = CharacterRegistry_GetIconPath(characterID);
+	if (character == NULL || iconPath == NULL || !*iconPath)
+		return NULL;
+
+	entry = (struct MMCharacterNativeIcon *)calloc(1, sizeof(*entry));
+	if (entry == NULL)
+		return NULL;
+
+	entry->characterID = characterID;
+	entry->next = s_characterNativeIcons;
+	s_characterNativeIcons = entry;
+
+	pathLen = snprintf(relativePath, sizeof(relativePath),
+		"mods/racers/%s/%s", character->slug, iconPath);
+	if (pathLen <= 0 || (size_t)pathLen >= sizeof(relativePath) ||
+		!NativeAssets_ResolvePath(relativePath, resolvedPath, sizeof(resolvedPath)))
+	{
+		SDL_Log("Character icon %s: could not resolve %s",
+			character->slug, iconPath);
+		return NULL;
+	}
+
+	source = SDL_LoadPNG(resolvedPath);
+	if (source == NULL)
+		source = SDL_LoadBMP(resolvedPath);
+	if (source == NULL)
+	{
+		SDL_Log("Character icon %s: could not load %s",
+			character->slug, resolvedPath);
+		return NULL;
+	}
+
+	rgba = SDL_ConvertSurface(source, SDL_PIXELFORMAT_RGBA32);
+	SDL_DestroySurface(source);
+	if (rgba == NULL)
+		return NULL;
+
+	if (rgba->w <= 0 || rgba->h <= 0 || rgba->w > 256 || rgba->h > 256)
+	{
+		SDL_DestroySurface(rgba);
+		return NULL;
+	}
+
+	pixels = (unsigned char *)malloc((size_t)rgba->w * (size_t)rgba->h * 4u);
+	if (pixels == NULL)
+	{
+		SDL_DestroySurface(rgba);
+		return NULL;
+	}
+
+	for (int y = 0; y < rgba->h; ++y)
+	{
+		memcpy(pixels + (size_t)y * (size_t)rgba->w * 4u,
+			(const unsigned char *)rgba->pixels + (size_t)y * rgba->pitch,
+			(size_t)rgba->w * 4u);
+	}
+
+	entry->texture = NativeRenderer_CreateImageTexture(pixels, rgba->w, rgba->h);
+	entry->width = rgba->w;
+	entry->height = rgba->h;
+	free(pixels);
+	SDL_DestroySurface(rgba);
+
+	if (entry->texture == 0)
+		return NULL;
+
+	SDL_Log("Character icon %s: loaded %s (%dx%d)",
+		character->slug, iconPath, entry->width, entry->height);
+	return entry;
+}
+
+static b32 MM_Characters_RosterDrawNativeIcon(
+	struct GameTracker *gGT,
+	int characterID,
+	const RECT *slotRect,
+	Color iconColor)
+{
+	struct MMCharacterNativeIcon *nativeIcon;
+	struct PrimMem *primMem;
+	uint32_t *ot;
+	DR_PSYX_TEX_FT4 *packet;
+	POLY_FT4 *poly;
+	const size_t bytes = sizeof(DR_PSYX_TEX_FT4);
+	int maxW;
+	int maxH;
+	int drawW;
+	int drawH;
+	int x;
+	int y;
+
+	nativeIcon = MM_Characters_RosterGetNativeIcon(characterID);
+	if (nativeIcon == NULL || nativeIcon->texture == 0 ||
+		gGT == NULL || slotRect == NULL)
+		return false;
+
+	maxW = slotRect->w - 4;
+	maxH = slotRect->h - 4;
+	if (maxW <= 0 || maxH <= 0)
+		return false;
+
+	/* Match the retail selector's logical portrait aspect instead of the raw
+	 * PNG aspect. This is intentional: community icons such as the 128x128
+	 * Tron Bonne portrait are authored square, while CTR draws portraits in a
+	 * wider logical rectangle. Preserving the PNG's 1:1 aspect here was the
+	 * reason custom faces looked squeezed/narrow compared with retail icons. */
+	drawW = MM_CHARACTER_SELECT_NATIVE_ICON_W;
+	drawH = MM_CHARACTER_SELECT_NATIVE_ICON_H;
+	if (drawW > maxW)
+	{
+		drawW = maxW;
+		drawH = (MM_CHARACTER_SELECT_NATIVE_ICON_H * drawW) /
+			MM_CHARACTER_SELECT_NATIVE_ICON_W;
+	}
+	if (drawH > maxH)
+	{
+		drawH = maxH;
+		drawW = (MM_CHARACTER_SELECT_NATIVE_ICON_W * drawH) /
+			MM_CHARACTER_SELECT_NATIVE_ICON_H;
+	}
+	if (drawW < 1) drawW = 1;
+	if (drawH < 1) drawH = 1;
+
+	x = slotRect->x + 2 + (maxW - drawW) / 2;
+	y = slotRect->y + 2 + (maxH - drawH) / 2;
+
+	primMem = &gGT->backBuffer->primMem;
+	ot = gGT->pushBuffer_UI.ptrOT;
+	if ((char *)primMem->cursor + bytes >= (char *)primMem->guardEnd)
+		return false;
+
+	packet = (DR_PSYX_TEX_FT4 *)primMem->cursor;
+	memset(packet, 0, bytes);
+	setlen(packet, (int)(bytes / sizeof(uint32_t)) - 1);
+	packet->code[0] = 0xb4000000u |
+		((uint32_t)nativeIcon->texture & 0x00ffffffu);
+	packet->code[1] = (uint32_t)nativeIcon->width |
+		((uint32_t)nativeIcon->height << 16);
+
+	poly = &packet->poly;
+	setPolyFT4(poly);
+	setRGB0(poly, iconColor.r, iconColor.g, iconColor.b);
+
+	poly->x0 = (s16)x;         poly->y0 = (s16)y;
+	poly->x1 = (s16)(x+drawW); poly->y1 = (s16)y;
+	poly->x2 = (s16)x;         poly->y2 = (s16)(y+drawH);
+	poly->x3 = (s16)(x+drawW); poly->y3 = (s16)(y+drawH);
+
+	poly->u0 = 0; poly->v0 = 0;
+	poly->u1 = (u8)(nativeIcon->width - 1); poly->v1 = 0;
+	poly->u2 = 0; poly->v2 = (u8)(nativeIcon->height - 1);
+	poly->u3 = (u8)(nativeIcon->width - 1);
+	poly->v3 = (u8)(nativeIcon->height - 1);
+	poly->tpage = 0;
+	poly->clut = 0;
+
+	addPrim(ot, packet);
+	primMem->cursor = (char *)packet + bytes;
+	return true;
+}
+
+static b32 MM_Characters_DuplicateSelectionsAllowed(void)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	const u32 storyMask =
+		ADVENTURE_MODE | ADVENTURE_BOSS | ADVENTURE_CUP | ADVENTURE_ARENA;
+
+	return (gGT != NULL) && ((gGT->gameMode1 & storyMask) == 0);
+}
+
+enum NativeLoadoutInputResult
+{
+	NATIVE_LOADOUT_INPUT_NONE = 0,
+	NATIVE_LOADOUT_INPUT_ACTIVE,
+	NATIVE_LOADOUT_INPUT_READY,
+};
+
+static int MM_Characters_LoadoutFirstStage(void)
+{
+	if (RacerLoadout_IsAdventureLocked())
+		return RACER_SELECT_READY;
+
+	if (VehiclePartRegistry_GetCount(VEHICLE_PART_KART) > 0)
+		return RACER_SELECT_KART;
+
+	if (VehiclePartRegistry_GetCount(VEHICLE_PART_WHEELS) > 0)
+		return RACER_SELECT_WHEELS;
+
+	return RACER_SELECT_READY;
+}
+
+static int MM_Characters_LoadoutPreviousStage(int playerIndex, int stage)
+{
+	if (stage == RACER_SELECT_READY)
+	{
+		if (VehiclePartRegistry_GetCount(VEHICLE_PART_WHEELS) > 0)
+			return RACER_SELECT_WHEELS;
+        if (VehiclePartRegistry_GetColorCount(
+                RacerLoadout_GetEffectiveKart(playerIndex)) > 1)
+            return RACER_SELECT_KART_COLOR;
+        if (VehiclePartRegistry_GetCount(VEHICLE_PART_KART) > 0)
+            return RACER_SELECT_KART;
+    }
+
+    if (stage == RACER_SELECT_WHEELS)
+    {
+        if (VehiclePartRegistry_GetColorCount(
+                RacerLoadout_GetEffectiveKart(playerIndex)) > 1)
+            return RACER_SELECT_KART_COLOR;
+        if (VehiclePartRegistry_GetCount(VEHICLE_PART_KART) > 0)
+            return RACER_SELECT_KART;
+    }
+
+    if (stage == RACER_SELECT_KART_COLOR)
+        return RACER_SELECT_KART;
+
+    return RACER_SELECT_CHARACTER;
+}
+
+static int MM_Characters_LoadoutNextStage(int playerIndex, int stage)
+{
+    if (stage == RACER_SELECT_KART)
+    {
+        int kartID = RacerLoadout_GetEffectiveKart(playerIndex);
+        int availableColors = VehiclePartRegistry_GetColorCount(kartID);
+        Platform_Log("[KART SELECT] player=%d kart=%d colors=%d next=%s\n",
+                     playerIndex, kartID, availableColors,
+                     availableColors > 1 ? "COLOR" : "WHEELS/READY");
+        if (availableColors > 1)
+            return RACER_SELECT_KART_COLOR;
+    }
+
+    if ((stage == RACER_SELECT_KART ||
+         stage == RACER_SELECT_KART_COLOR) &&
+        VehiclePartRegistry_GetCount(VEHICLE_PART_WHEELS) > 0)
+        return RACER_SELECT_WHEELS;
+
+    return RACER_SELECT_READY;
+}
+
+static void MM_Characters_LoadoutCyclePart(int playerIndex, int stage, int direction)
+{
+	int kind = stage == RACER_SELECT_KART ?
+		VEHICLE_PART_KART : VEHICLE_PART_WHEELS;
+	int count = VehiclePartRegistry_GetCount(kind);
+	int current = stage == RACER_SELECT_KART ?
+		RacerLoadout_GetKart(playerIndex) :
+		RacerLoadout_GetWheels(playerIndex);
+	int slot;
+	int next;
+
+	if (count <= 0)
+		return;
+
+	/* Body-only custom characters have no embedded/original kart to fall back
+	   to, so their kart stage contains only actual registered kart assets. */
+	if (stage == RACER_SELECT_KART &&
+		CharacterRegistry_IsModularBody(
+			RacerLoadout_GetCharacter(playerIndex)))
+	{
+		int base = current >= 0 ? current : 0;
+		next = (base + direction + count) % count;
+	}
+	else
+	{
+		/* Legacy/retail loadouts keep ORIGINAL as slot zero. */
+		slot = current < 0 ? 0 : current + 1;
+		slot = (slot + direction + count + 1) % (count + 1);
+		next = slot - 1;
+	}
+
+	if (stage == RACER_SELECT_KART)
+		RacerLoadout_SetKart(playerIndex, next);
+	else
+		RacerLoadout_SetWheels(playerIndex, next);
+
+	OtherFX_Play(0, 1);
+}
+
+static int MM_Characters_LoadoutHandlePartInput(int playerIndex, u32 button)
+{
+	int stage = RacerLoadout_GetSelectionPart(playerIndex);
+
+    if (stage != RACER_SELECT_KART &&
+        stage != RACER_SELECT_KART_COLOR &&
+        stage != RACER_SELECT_WHEELS)
+        return NATIVE_LOADOUT_INPUT_NONE;
+
+    if (stage == RACER_SELECT_KART_COLOR)
+    {
+        int kartID = RacerLoadout_GetEffectiveKart(playerIndex);
+        int count = VehiclePartRegistry_GetColorCount(kartID);
+        int index = RacerLoadout_GetKartColor(playerIndex);
+        if (count <= 1)
+            return NATIVE_LOADOUT_INPUT_ACTIVE;
+
+        if (button & BTN_LEFT)
+        {
+            RacerLoadout_SetKartColor(
+                playerIndex, (index + count - 1) % count);
+            OtherFX_Play(0, 1);
+        }
+        else if (button & BTN_RIGHT)
+        {
+            RacerLoadout_SetKartColor(
+                playerIndex, (index + 1) % count);
+            OtherFX_Play(0, 1);
+        }
+
+        if (button & MM_CHARACTER_SELECT_INPUT_CONFIRM)
+        {
+            int nextStage =
+                MM_Characters_LoadoutNextStage(playerIndex, stage);
+            RacerLoadout_SetSelectionPart(playerIndex, nextStage);
+            OtherFX_Play(1, 1);
+            return nextStage == RACER_SELECT_READY ?
+                NATIVE_LOADOUT_INPUT_READY :
+                NATIVE_LOADOUT_INPUT_ACTIVE;
+        }
+        if (button & MM_CHARACTER_SELECT_INPUT_BACK)
+        {
+            RacerLoadout_SetSelectionPart(
+                playerIndex,
+                MM_Characters_LoadoutPreviousStage(playerIndex, stage));
+            OtherFX_Play(2, 1);
+        }
+        return NATIVE_LOADOUT_INPUT_ACTIVE;
+    }
+
+    if ((button & BTN_LEFT) != 0)
+		MM_Characters_LoadoutCyclePart(playerIndex, stage, -1);
+	else if ((button & BTN_RIGHT) != 0)
+		MM_Characters_LoadoutCyclePart(playerIndex, stage, 1);
+
+	if ((button & MM_CHARACTER_SELECT_INPUT_CONFIRM) != 0)
+	{
+		int nextStage = MM_Characters_LoadoutNextStage(playerIndex, stage);
+		RacerLoadout_SetSelectionPart(playerIndex, nextStage);
+		OtherFX_Play(1, 1);
+		return nextStage == RACER_SELECT_READY ?
+			NATIVE_LOADOUT_INPUT_READY :
+			NATIVE_LOADOUT_INPUT_ACTIVE;
+	}
+
+	if ((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0)
+	{
+		RacerLoadout_SetSelectionPart(
+			playerIndex,
+			MM_Characters_LoadoutPreviousStage(playerIndex, stage));
+		OtherFX_Play(2, 1);
+	}
+
+	return NATIVE_LOADOUT_INPUT_ACTIVE;
+}
+
+static b32 MM_Characters_LoadoutConfirmCharacter(int playerIndex, int characterID)
+{
+	int nextStage;
+	const char *defaultKartSlug;
+	int defaultKartID;
+
+	RacerLoadout_SetCharacter(playerIndex, characterID);
+
+	defaultKartSlug = CharacterRegistry_GetKartSlug(characterID);
+	defaultKartID = defaultKartSlug ?
+		VehiclePartRegistry_GetIDBySlug(VEHICLE_PART_KART, defaultKartSlug) : -1;
+
+	if (defaultKartID >= 0)
+	{
+		/* character.ini may provide an initial kart, but the player can still
+		   change it in the independent kart-selection stage. */
+		RacerLoadout_SetKart(playerIndex, defaultKartID);
+	}
+	else if (CharacterRegistry_IsModularBody(characterID) &&
+		VehiclePartRegistry_GetCount(VEHICLE_PART_KART) > 0)
+	{
+		/* A body-only character requires a separate kart. Start on the first
+		   registered kart instead of presenting an invalid ORIGINAL slot. */
+		RacerLoadout_SetKart(playerIndex, 0);
+	}
+	else
+	{
+		RacerLoadout_SetKart(playerIndex, RACER_LOADOUT_ORIGINAL);
+	}
+
+	RacerLoadout_SetWheels(playerIndex, RACER_LOADOUT_ORIGINAL);
+	nextStage = MM_Characters_LoadoutFirstStage();
+	RacerLoadout_SetSelectionPart(playerIndex, nextStage);
+
+	return nextStage == RACER_SELECT_READY;
+}
+
+static void MM_Characters_LoadoutUndoReady(int playerIndex)
+{
+	RacerLoadout_SetSelectionPart(
+		playerIndex,
+		MM_Characters_LoadoutPreviousStage(playerIndex, RACER_SELECT_READY));
+}
+
+static void MM_Characters_LoadoutMarkReady(int playerIndex, int playerCount)
+{
+	u16 readyMask = (u16)((1U << playerCount) - 1U);
+
+	sdata->characterSelectFlags |= (u16)(1U << playerIndex);
+
+	if ((sdata->characterSelectFlags & readyMask) == readyMask)
+	{
+		D230.characterSelectExitsForward = 1;
+		D230.characterSelectMenuState = EXITING_MENU;
+	}
+}
+
+static const char *MM_Characters_LoadoutPartName(int playerIndex, int stage)
+{
+	int kind;
+	int partID;
+
+	if (stage == RACER_SELECT_KART)
+	{
+		kind = VEHICLE_PART_KART;
+		partID = RacerLoadout_GetKart(playerIndex);
+	}
+	else
+	{
+		kind = VEHICLE_PART_WHEELS;
+		partID = RacerLoadout_GetWheels(playerIndex);
+	}
+
+	if (partID < 0)
+		return "ORIGINAL";
+
+	return VehiclePartRegistry_GetDisplayName(kind, partID);
+}
+
+static void MM_Characters_LoadoutDrawStatus(int playerIndex,
+	int centerX, int y, int maxNameChars)
+{
+	char line[96];
+	int stage = RacerLoadout_GetSelectionPart(playerIndex);
+
+	if (stage == RACER_SELECT_CHARACTER)
+		return;
+
+	if (stage == RACER_SELECT_READY)
+	{
+		snprintf(line, sizeof(line), "READY");
+	}
+    else if (stage == RACER_SELECT_KART_COLOR)
+    {
+        int kartID = RacerLoadout_GetEffectiveKart(playerIndex);
+        const char *name = VehiclePartRegistry_GetColorName(
+            kartID, RacerLoadout_GetKartColor(playerIndex));
+        snprintf(line, sizeof(line), "COLOR  < %.*s >",
+                 maxNameChars, name ? name : "DEFAULT");
+    }
+    else
+    {
+        const char *kind = stage == RACER_SELECT_KART ? "KART" : "WHEELS";
+        const char *name = MM_Characters_LoadoutPartName(playerIndex, stage);
+        snprintf(line, sizeof(line), "%s  < %.*s >",
+                 kind, maxNameChars, name ? name : "ORIGINAL");
+    }
+
+	DecalFont_DrawLine(line, centerX, y,
+		FONT_SMALL, JUSTIFY_CENTER | WHITE);
+}
 
 static b32 MM_Characters_RosterCharacterUnlocked(int characterID)
 {
@@ -230,6 +744,38 @@ static struct Icon *MM_Characters_RosterGetIcon(
 		data.MetaDataCharacters[iconCharacterID].iconID];
 }
 
+static void MM_Characters_RosterDrawIcon(
+	struct GameTracker *gGT,
+	int characterID,
+	const RECT *slotRect,
+	Color iconColor)
+{
+	struct Icon *icon;
+
+	if (MM_Characters_RosterDrawNativeIcon(
+		gGT, characterID, slotRect, iconColor))
+	{
+		return;
+	}
+
+	icon = MM_Characters_RosterGetIcon(gGT, characterID);
+	if (icon == NULL)
+		return;
+
+	RECTMENU_DrawPolyGT4(
+		icon,
+		slotRect->x + 2,
+		slotRect->y + 2,
+		&gGT->backBuffer->primMem,
+		gGT->pushBuffer_UI.ptrOT,
+		iconColor.self,
+		iconColor.self,
+		iconColor.self,
+		iconColor.self,
+		TRANS_50_DECAL,
+		FP(1.0));
+}
+
 static const char *MM_Characters_RosterGetDisplayName(int characterID)
 {
 	if (characterID > NITROS_OXIDE)
@@ -267,7 +813,7 @@ static void MM_Characters_RosterApplySelection(int moveDirection)
 {
 	int characterID = MM_Characters_RosterGetSelectedCharacterID();
 	if (characterID < 0) return;
-	data.characterIDs[0] = (s16)characterID;
+	RacerLoadout_SetCharacter(0, characterID);
 	D230.characterSelectPlayerState.modelMoveDir[0] = (s16)moveDirection;
 }
 
@@ -381,7 +927,8 @@ static void MM_Characters_Roster2PRestoreSelection(void)
 		}
 	}
 
-	if (s_characterCursor2P[0] == s_characterCursor2P[1])
+	if (!MM_Characters_DuplicateSelectionsAllowed() &&
+		(s_characterCursor2P[0] == s_characterCursor2P[1]))
 	{
 		s_characterCursor2P[1] =
 			(s16)((s_characterCursor2P[0] + 1) %
@@ -416,7 +963,7 @@ static void MM_Characters_Roster2PApplySelection(
 	if (characterID < 0)
 		return;
 
-	data.characterIDs[playerIndex] = (s16)characterID;
+	RacerLoadout_SetCharacter(playerIndex, characterID);
 	D230.characterSelectPlayerState.modelMoveDir[playerIndex] =
 		(s16)moveDirection;
 }
@@ -450,14 +997,16 @@ static void MM_Characters_Roster2PChangePage(int direction)
 			}
 
 			if ((cursor < 0) || (cursor >= pageCount) ||
-				((playerIndex == 1) &&
+				(!MM_Characters_DuplicateSelectionsAllowed() &&
+					(playerIndex == 1) &&
 					(cursor == s_characterCursor2P[0])))
 			{
 				cursor = playerIndex;
 				if (cursor >= pageCount)
 					cursor = 0;
 
-				if ((playerIndex == 1) &&
+				if (!MM_Characters_DuplicateSelectionsAllowed() &&
+					(playerIndex == 1) &&
 					(cursor == s_characterCursor2P[0]) &&
 					(pageCount > 1))
 				{
@@ -525,7 +1074,8 @@ static void MM_Characters_Roster2PMoveCursor(
 
 	int candidate = cursor + delta;
 
-	while (candidate == otherCursor)
+	while (!MM_Characters_DuplicateSelectionsAllowed() &&
+		(candidate == otherCursor))
 	{
 		int next = candidate + delta;
 
@@ -556,6 +1106,9 @@ static b32 MM_Characters_Roster3PCursorTaken(
 	int playerIndex,
 	int cursor)
 {
+	if (MM_Characters_DuplicateSelectionsAllowed())
+		return false;
+
 	for (int otherPlayer = 0; otherPlayer < 3; otherPlayer++)
 	{
 		if ((otherPlayer != playerIndex) &&
@@ -641,7 +1194,7 @@ static void MM_Characters_Roster3PApplySelection(
 	if (characterID < 0)
 		return;
 
-	data.characterIDs[playerIndex] = (s16)characterID;
+	RacerLoadout_SetCharacter(playerIndex, characterID);
 	D230.characterSelectPlayerState.modelMoveDir[playerIndex] =
 		(s16)moveDirection;
 }
@@ -779,6 +1332,9 @@ static b32 MM_Characters_Roster4PCursorTaken(
 	int playerIndex,
 	int cursor)
 {
+	if (MM_Characters_DuplicateSelectionsAllowed())
+		return false;
+
 	for (int otherPlayer = 0; otherPlayer < 4; otherPlayer++)
 	{
 		if ((otherPlayer != playerIndex) &&
@@ -864,7 +1420,7 @@ static void MM_Characters_Roster4PApplySelection(
 	if (characterID < 0)
 		return;
 
-	data.characterIDs[playerIndex] = (s16)characterID;
+	RacerLoadout_SetCharacter(playerIndex, characterID);
 	D230.characterSelectPlayerState.modelMoveDir[playerIndex] =
 		(s16)moveDirection;
 }
@@ -1073,11 +1629,31 @@ static void MM_Characters_RosterDrawDriverWindow(
 		&D230.characterSelect_BlueRectColors[0],
 		&gGT->pushBuffer[0].ptrOT[0x3ff],
 		&gGT->backBuffer->primMem);
+
+	MM_Characters_LoadoutDrawStatus(
+		0,
+		drawRect.x + (drawRect.w >> 1),
+		drawRect.y + drawRect.h - 14,
+		18);
 }
 
 static void MM_Characters_RosterDrawHeader(u32 *ot)
 {
 	char pageText[32];
+	char pagePrev[48] = "L1";
+	char pageNext[48] = "R1";
+	int shoulderFont = FONT_BIG;
+
+#if defined(CTR_NATIVE)
+	Platform_InputFormatPlayerBindingName(
+		0, PLATFORM_INPUT_ACTION_L1, pagePrev, sizeof(pagePrev));
+	Platform_InputFormatPlayerBindingName(
+		0, PLATFORM_INPUT_ACTION_R1, pageNext, sizeof(pageNext));
+
+	if ((int)strlen(pagePrev) > 4 || (int)strlen(pageNext) > 4)
+		shoulderFont = FONT_SMALL;
+#endif
+
 	snprintf(
 		pageText,
 		sizeof(pageText),
@@ -1092,17 +1668,18 @@ static void MM_Characters_RosterDrawHeader(u32 *ot)
 	 */
 	int headerY = MM_CHARACTER_SELECT_PAGE_HEADER_Y - 10;
 
-	/* Symmetric spacing around the centered page counter. */
-	int l1Width = 42;
+	/* Symmetric spacing around the centered page counter.
+	 * Wider shoulder boxes keep full keyboard names readable. */
+	int l1Width = 72;
 	int pageWidth = 54;
-	int r1Width = 42;
+	int r1Width = 72;
 
 	RECTMENU_DrawQuip(
-		"L1",
+		pagePrev,
 		MM_CHARACTER_SELECT_PAGE_L1_X,
 		headerY,
 		l1Width,
-		FONT_BIG,
+		shoulderFont,
 		JUSTIFY_CENTER | WHITE,
 		0);
 
@@ -1116,11 +1693,11 @@ static void MM_Characters_RosterDrawHeader(u32 *ot)
 		0);
 
 	RECTMENU_DrawQuip(
-		"R1",
+		pageNext,
 		MM_CHARACTER_SELECT_PAGE_R1_X,
 		headerY,
 		r1Width,
-		FONT_BIG,
+		shoulderFont,
 		JUSTIFY_CENTER | WHITE,
 		0);
 
@@ -1135,7 +1712,9 @@ static void MM_Characters_RosterMenuProc(
 	b32 playerSelected = (sdata->characterSelectFlags & 1) != 0;
 
 #if defined(CTR_NATIVE)
-	if ((D230.characterSelectMenuState == IN_MENU) && !playerSelected)
+	if ((D230.characterSelectMenuState == IN_MENU) &&
+		!playerSelected &&
+		(RacerLoadout_GetSelectionPart(0) == RACER_SELECT_CHARACTER))
 	{
 		int mouseX;
 		int mouseY;
@@ -1213,35 +1792,55 @@ static void MM_Characters_RosterMenuProc(
 	{
 		if (!playerSelected)
 		{
-			if ((button & BTN_L1) != 0)
-				MM_Characters_RosterChangePage(-1);
-			else if ((button & BTN_R1) != 0)
-				MM_Characters_RosterChangePage(1);
-			else if ((button & MM_CHARACTER_SELECT_INPUT_DPAD) != 0)
-				MM_Characters_RosterMoveCursor(button);
+			int loadoutResult =
+				MM_Characters_LoadoutHandlePartInput(0, button);
 
-			int selectedCharacterID =
-				MM_Characters_RosterGetSelectedCharacterID();
-
-			if (((button & MM_CHARACTER_SELECT_INPUT_CONFIRM) != 0) &&
-				(selectedCharacterID >= 0))
+			if (loadoutResult == NATIVE_LOADOUT_INPUT_READY)
 			{
 				sdata->characterSelectFlags |= 1;
 				D230.characterSelectExitsForward = 1;
 				D230.characterSelectMenuState = EXITING_MENU;
-				OtherFX_Play(1, 1);
 			}
-
-			if ((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0)
+			else if (loadoutResult == NATIVE_LOADOUT_INPUT_NONE)
 			{
-				D230.characterSelectExitsForward = 0;
-				D230.characterSelectMenuState = EXITING_MENU;
-				OtherFX_Play(2, 1);
+				if ((button & BTN_L1) != 0)
+					MM_Characters_RosterChangePage(-1);
+				else if ((button & BTN_R1) != 0)
+					MM_Characters_RosterChangePage(1);
+				else if ((button & MM_CHARACTER_SELECT_INPUT_DPAD) != 0)
+					MM_Characters_RosterMoveCursor(button);
+
+				int selectedCharacterID =
+					MM_Characters_RosterGetSelectedCharacterID();
+
+				if (((button & MM_CHARACTER_SELECT_INPUT_CONFIRM) != 0) &&
+					(selectedCharacterID >= 0))
+				{
+					b32 ready =
+						MM_Characters_LoadoutConfirmCharacter(
+							0, selectedCharacterID);
+					OtherFX_Play(1, 1);
+
+					if (ready)
+					{
+						sdata->characterSelectFlags |= 1;
+						D230.characterSelectExitsForward = 1;
+						D230.characterSelectMenuState = EXITING_MENU;
+					}
+				}
+
+				if ((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0)
+				{
+					D230.characterSelectExitsForward = 0;
+					D230.characterSelectMenuState = EXITING_MENU;
+					OtherFX_Play(2, 1);
+				}
 			}
 		}
 		else if ((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0)
 		{
 			sdata->characterSelectFlags &= ~1;
+			MM_Characters_LoadoutUndoReady(0);
 			OtherFX_Play(2, 1);
 		}
 	}
@@ -1307,27 +1906,14 @@ static void MM_Characters_RosterMenuProc(
 
 		if (characterID >= 0)
 		{
-			struct Icon *icon =
-				MM_Characters_RosterGetIcon(gGT, characterID);
+			Color iconColor =
+				D230.characterSelect_NeutralColor;
 
-			if (icon != NULL)
-			{
-				Color iconColor =
-					D230.characterSelect_NeutralColor;
-
-				RECTMENU_DrawPolyGT4(
-					icon,
-					drawRect.x + 2,
-					drawRect.y + 2,
-					&gGT->backBuffer->primMem,
-					gGT->pushBuffer_UI.ptrOT,
-					iconColor.self,
-					iconColor.self,
-					iconColor.self,
-					iconColor.self,
-					TRANS_50_DECAL,
-					FP(1.0));
-			}
+			MM_Characters_RosterDrawIcon(
+				gGT,
+				characterID,
+				&drawRect,
+				iconColor);
 		}
 
 		if (slotSelected)
@@ -1488,6 +2074,12 @@ static void MM_Characters_RosterMPDrawDriverWindows(
 				JUSTIFY_CENTER | ORANGE);
 		}
 
+		MM_Characters_LoadoutDrawStatus(
+			playerIndex,
+			drawRect.x + (drawRect.w >> 1),
+			drawRect.y + drawRect.h - 12,
+			playerCount >= 3 ? 10 : 16);
+
 		D230.characterSelectPlayerState.angle[playerIndex] +=
 			MM_CHARACTER_SELECT_SPIN_STEP *
 			Platform_GetLegacy30HzTicks();
@@ -1508,53 +2100,62 @@ static void MM_Characters_Roster2PMenuProc(
 
 			if (!playerSelected)
 			{
-				if ((button & BTN_L1) != 0)
-				{
-					MM_Characters_Roster2PChangePage(-1);
-					button &= ~(BTN_L1 | BTN_R1);
-				}
-				else if ((button & BTN_R1) != 0)
-				{
-					MM_Characters_Roster2PChangePage(1);
-					button &= ~(BTN_L1 | BTN_R1);
-				}
-				else if ((button & MM_CHARACTER_SELECT_INPUT_DPAD) != 0)
-				{
-					MM_Characters_Roster2PMoveCursor(
-						playerIndex,
-						button);
-				}
+				int loadoutResult =
+					MM_Characters_LoadoutHandlePartInput(
+						playerIndex, button);
 
-				int selectedCharacterID =
-					MM_Characters_Roster2PGetSelectedCharacterID(
-						playerIndex);
-
-				if (((button & MM_CHARACTER_SELECT_INPUT_CONFIRM) != 0) &&
-					(selectedCharacterID >= 0))
+				if (loadoutResult == NATIVE_LOADOUT_INPUT_READY)
 				{
-					sdata->characterSelectFlags |=
-						(u16)(1 << playerIndex);
-					OtherFX_Play(1, 1);
-
-					if ((sdata->characterSelectFlags & 3) == 3)
+					MM_Characters_LoadoutMarkReady(playerIndex, 2);
+				}
+				else if (loadoutResult == NATIVE_LOADOUT_INPUT_NONE)
+				{
+					if ((button & BTN_L1) != 0)
 					{
-						D230.characterSelectExitsForward = 1;
-						D230.characterSelectMenuState = EXITING_MENU;
+						MM_Characters_Roster2PChangePage(-1);
+						button &= ~(BTN_L1 | BTN_R1);
 					}
-				}
+					else if ((button & BTN_R1) != 0)
+					{
+						MM_Characters_Roster2PChangePage(1);
+						button &= ~(BTN_L1 | BTN_R1);
+					}
+					else if ((button & MM_CHARACTER_SELECT_INPUT_DPAD) != 0)
+					{
+						MM_Characters_Roster2PMoveCursor(
+							playerIndex,
+							button);
+					}
 
-				if ((playerIndex == 0) &&
-					((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0))
-				{
-					D230.characterSelectExitsForward = 0;
-					D230.characterSelectMenuState = EXITING_MENU;
-					OtherFX_Play(2, 1);
+					int selectedCharacterID =
+						MM_Characters_Roster2PGetSelectedCharacterID(
+							playerIndex);
+
+					if (((button & MM_CHARACTER_SELECT_INPUT_CONFIRM) != 0) &&
+						(selectedCharacterID >= 0))
+					{
+						b32 ready =
+							MM_Characters_LoadoutConfirmCharacter(
+								playerIndex, selectedCharacterID);
+						OtherFX_Play(1, 1);
+						if (ready)
+							MM_Characters_LoadoutMarkReady(playerIndex, 2);
+					}
+
+					if ((playerIndex == 0) &&
+						((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0))
+					{
+						D230.characterSelectExitsForward = 0;
+						D230.characterSelectMenuState = EXITING_MENU;
+						OtherFX_Play(2, 1);
+					}
 				}
 			}
 			else if ((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0)
 			{
 				sdata->characterSelectFlags &=
 					(u16)~(1 << playerIndex);
+				MM_Characters_LoadoutUndoReady(playerIndex);
 				OtherFX_Play(2, 1);
 			}
 
@@ -1638,39 +2239,26 @@ static void MM_Characters_Roster2PMenuProc(
 
 		if (characterID >= 0)
 		{
-			struct Icon *icon =
-				MM_Characters_RosterGetIcon(gGT, characterID);
+			Color iconColor =
+				D230.characterSelect_NeutralColor;
 
-			if (icon != NULL)
+			for (int playerIndex = 0;
+				playerIndex < 2;
+				playerIndex++)
 			{
-				Color iconColor =
-					D230.characterSelect_NeutralColor;
-
-				for (int playerIndex = 0;
-					playerIndex < 2;
-					playerIndex++)
+				if ((s_characterCursor2P[playerIndex] == slot) &&
+					(((sdata->characterSelectFlags >> playerIndex) & 1U) != 0))
 				{
-					if ((s_characterCursor2P[playerIndex] == slot) &&
-						(((sdata->characterSelectFlags >> playerIndex) & 1U) != 0))
-					{
-						iconColor =
-							D230.characterSelect_ChosenColor;
-					}
+					iconColor =
+						D230.characterSelect_ChosenColor;
 				}
-
-				RECTMENU_DrawPolyGT4(
-					icon,
-					drawRect.x + 2,
-					drawRect.y + 2,
-					&gGT->backBuffer->primMem,
-					gGT->pushBuffer_UI.ptrOT,
-					iconColor.self,
-					iconColor.self,
-					iconColor.self,
-					iconColor.self,
-					TRANS_50_DECAL,
-					FP(1.0));
 			}
+
+			MM_Characters_RosterDrawIcon(
+				gGT,
+				characterID,
+				&drawRect,
+				iconColor);
 		}
 
 		for (int playerIndex = 0; playerIndex < 2; playerIndex++)
@@ -1725,53 +2313,62 @@ static void MM_Characters_Roster3PMenuProc(
 
 			if (!playerSelected)
 			{
-				if ((button & BTN_L1) != 0)
-				{
-					MM_Characters_Roster3PChangePage(-1);
-					button &= ~(BTN_L1 | BTN_R1);
-				}
-				else if ((button & BTN_R1) != 0)
-				{
-					MM_Characters_Roster3PChangePage(1);
-					button &= ~(BTN_L1 | BTN_R1);
-				}
-				else if ((button & MM_CHARACTER_SELECT_INPUT_DPAD) != 0)
-				{
-					MM_Characters_Roster3PMoveCursor(
-						playerIndex,
-						button);
-				}
+				int loadoutResult =
+					MM_Characters_LoadoutHandlePartInput(
+						playerIndex, button);
 
-				int selectedCharacterID =
-					MM_Characters_Roster3PGetSelectedCharacterID(
-						playerIndex);
-
-				if (((button & MM_CHARACTER_SELECT_INPUT_CONFIRM) != 0) &&
-					(selectedCharacterID >= 0))
+				if (loadoutResult == NATIVE_LOADOUT_INPUT_READY)
 				{
-					sdata->characterSelectFlags |=
-						(u16)(1 << playerIndex);
-					OtherFX_Play(1, 1);
-
-					if ((sdata->characterSelectFlags & 7) == 7)
+					MM_Characters_LoadoutMarkReady(playerIndex, 3);
+				}
+				else if (loadoutResult == NATIVE_LOADOUT_INPUT_NONE)
+				{
+					if ((button & BTN_L1) != 0)
 					{
-						D230.characterSelectExitsForward = 1;
-						D230.characterSelectMenuState = EXITING_MENU;
+						MM_Characters_Roster3PChangePage(-1);
+						button &= ~(BTN_L1 | BTN_R1);
 					}
-				}
+					else if ((button & BTN_R1) != 0)
+					{
+						MM_Characters_Roster3PChangePage(1);
+						button &= ~(BTN_L1 | BTN_R1);
+					}
+					else if ((button & MM_CHARACTER_SELECT_INPUT_DPAD) != 0)
+					{
+						MM_Characters_Roster3PMoveCursor(
+							playerIndex,
+							button);
+					}
 
-				if ((playerIndex == 0) &&
-					((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0))
-				{
-					D230.characterSelectExitsForward = 0;
-					D230.characterSelectMenuState = EXITING_MENU;
-					OtherFX_Play(2, 1);
+					int selectedCharacterID =
+						MM_Characters_Roster3PGetSelectedCharacterID(
+							playerIndex);
+
+					if (((button & MM_CHARACTER_SELECT_INPUT_CONFIRM) != 0) &&
+						(selectedCharacterID >= 0))
+					{
+						b32 ready =
+							MM_Characters_LoadoutConfirmCharacter(
+								playerIndex, selectedCharacterID);
+						OtherFX_Play(1, 1);
+						if (ready)
+							MM_Characters_LoadoutMarkReady(playerIndex, 3);
+					}
+
+					if ((playerIndex == 0) &&
+						((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0))
+					{
+						D230.characterSelectExitsForward = 0;
+						D230.characterSelectMenuState = EXITING_MENU;
+						OtherFX_Play(2, 1);
+					}
 				}
 			}
 			else if ((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0)
 			{
 				sdata->characterSelectFlags &=
 					(u16)~(1 << playerIndex);
+				MM_Characters_LoadoutUndoReady(playerIndex);
 				OtherFX_Play(2, 1);
 			}
 
@@ -1851,39 +2448,26 @@ static void MM_Characters_Roster3PMenuProc(
 
 		if (characterID >= 0)
 		{
-			struct Icon *icon =
-				MM_Characters_RosterGetIcon(gGT, characterID);
+			Color iconColor =
+				D230.characterSelect_NeutralColor;
 
-			if (icon != NULL)
+			for (int playerIndex = 0;
+				playerIndex < 3;
+				playerIndex++)
 			{
-				Color iconColor =
-					D230.characterSelect_NeutralColor;
-
-				for (int playerIndex = 0;
-					playerIndex < 3;
-					playerIndex++)
+				if ((s_characterCursor3P[playerIndex] == slot) &&
+					(((sdata->characterSelectFlags >> playerIndex) & 1U) != 0))
 				{
-					if ((s_characterCursor3P[playerIndex] == slot) &&
-						(((sdata->characterSelectFlags >> playerIndex) & 1U) != 0))
-					{
-						iconColor =
-							D230.characterSelect_ChosenColor;
-					}
+					iconColor =
+						D230.characterSelect_ChosenColor;
 				}
-
-				RECTMENU_DrawPolyGT4(
-					icon,
-					drawRect.x + 2,
-					drawRect.y + 2,
-					&gGT->backBuffer->primMem,
-					gGT->pushBuffer_UI.ptrOT,
-					iconColor.self,
-					iconColor.self,
-					iconColor.self,
-					iconColor.self,
-					TRANS_50_DECAL,
-					FP(1.0));
 			}
+
+			MM_Characters_RosterDrawIcon(
+				gGT,
+				characterID,
+				&drawRect,
+				iconColor);
 		}
 
 		for (int playerIndex = 0; playerIndex < 3; playerIndex++)
@@ -1937,53 +2521,62 @@ static void MM_Characters_Roster4PMenuProc(
 
 			if (!playerSelected)
 			{
-				if ((button & BTN_L1) != 0)
-				{
-					MM_Characters_Roster4PChangePage(-1);
-					button &= ~(BTN_L1 | BTN_R1);
-				}
-				else if ((button & BTN_R1) != 0)
-				{
-					MM_Characters_Roster4PChangePage(1);
-					button &= ~(BTN_L1 | BTN_R1);
-				}
-				else if ((button & MM_CHARACTER_SELECT_INPUT_DPAD) != 0)
-				{
-					MM_Characters_Roster4PMoveCursor(
-						playerIndex,
-						button);
-				}
+				int loadoutResult =
+					MM_Characters_LoadoutHandlePartInput(
+						playerIndex, button);
 
-				int selectedCharacterID =
-					MM_Characters_Roster4PGetSelectedCharacterID(
-						playerIndex);
-
-				if (((button & MM_CHARACTER_SELECT_INPUT_CONFIRM) != 0) &&
-					(selectedCharacterID >= 0))
+				if (loadoutResult == NATIVE_LOADOUT_INPUT_READY)
 				{
-					sdata->characterSelectFlags |=
-						(u16)(1 << playerIndex);
-					OtherFX_Play(1, 1);
-
-					if ((sdata->characterSelectFlags & 15) == 15)
+					MM_Characters_LoadoutMarkReady(playerIndex, 4);
+				}
+				else if (loadoutResult == NATIVE_LOADOUT_INPUT_NONE)
+				{
+					if ((button & BTN_L1) != 0)
 					{
-						D230.characterSelectExitsForward = 1;
-						D230.characterSelectMenuState = EXITING_MENU;
+						MM_Characters_Roster4PChangePage(-1);
+						button &= ~(BTN_L1 | BTN_R1);
 					}
-				}
+					else if ((button & BTN_R1) != 0)
+					{
+						MM_Characters_Roster4PChangePage(1);
+						button &= ~(BTN_L1 | BTN_R1);
+					}
+					else if ((button & MM_CHARACTER_SELECT_INPUT_DPAD) != 0)
+					{
+						MM_Characters_Roster4PMoveCursor(
+							playerIndex,
+							button);
+					}
 
-				if ((playerIndex == 0) &&
-					((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0))
-				{
-					D230.characterSelectExitsForward = 0;
-					D230.characterSelectMenuState = EXITING_MENU;
-					OtherFX_Play(2, 1);
+					int selectedCharacterID =
+						MM_Characters_Roster4PGetSelectedCharacterID(
+							playerIndex);
+
+					if (((button & MM_CHARACTER_SELECT_INPUT_CONFIRM) != 0) &&
+						(selectedCharacterID >= 0))
+					{
+						b32 ready =
+							MM_Characters_LoadoutConfirmCharacter(
+								playerIndex, selectedCharacterID);
+						OtherFX_Play(1, 1);
+						if (ready)
+							MM_Characters_LoadoutMarkReady(playerIndex, 4);
+					}
+
+					if ((playerIndex == 0) &&
+						((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0))
+					{
+						D230.characterSelectExitsForward = 0;
+						D230.characterSelectMenuState = EXITING_MENU;
+						OtherFX_Play(2, 1);
+					}
 				}
 			}
 			else if ((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0)
 			{
 				sdata->characterSelectFlags &=
 					(u16)~(1 << playerIndex);
+				MM_Characters_LoadoutUndoReady(playerIndex);
 				OtherFX_Play(2, 1);
 			}
 
@@ -2063,39 +2656,26 @@ static void MM_Characters_Roster4PMenuProc(
 
 		if (characterID >= 0)
 		{
-			struct Icon *icon =
-				MM_Characters_RosterGetIcon(gGT, characterID);
+			Color iconColor =
+				D230.characterSelect_NeutralColor;
 
-			if (icon != NULL)
+			for (int playerIndex = 0;
+				playerIndex < 4;
+				playerIndex++)
 			{
-				Color iconColor =
-					D230.characterSelect_NeutralColor;
-
-				for (int playerIndex = 0;
-					playerIndex < 4;
-					playerIndex++)
+				if ((s_characterCursor4P[playerIndex] == slot) &&
+					(((sdata->characterSelectFlags >> playerIndex) & 1U) != 0))
 				{
-					if ((s_characterCursor4P[playerIndex] == slot) &&
-						(((sdata->characterSelectFlags >> playerIndex) & 1U) != 0))
-					{
-						iconColor =
-							D230.characterSelect_ChosenColor;
-					}
+					iconColor =
+						D230.characterSelect_ChosenColor;
 				}
-
-				RECTMENU_DrawPolyGT4(
-					icon,
-					drawRect.x + 2,
-					drawRect.y + 2,
-					&gGT->backBuffer->primMem,
-					gGT->pushBuffer_UI.ptrOT,
-					iconColor.self,
-					iconColor.self,
-					iconColor.self,
-					iconColor.self,
-					TRANS_50_DECAL,
-					FP(1.0));
 			}
+
+			MM_Characters_RosterDrawIcon(
+				gGT,
+				characterID,
+				&drawRect,
+				iconColor);
 		}
 
 		for (int playerIndex = 0; playerIndex < 4; playerIndex++)
@@ -2337,12 +2917,22 @@ void MM_Characters_DrawWindows(b32 boolShowDrivers)
 		driverInst->animFrame = 0;
 		driverInst->vertSplit = 0;
 
-		struct Model *model = MM_Characters_GetModelByName(MM_Characters_RosterGetPreviewModelName((int)*currCharacterID));
+#if defined(CTR_NATIVE)
+		struct Model *model =
+			NativeRacerVisual_ResolveModel((int)*currCharacterID);
+#else
+		struct Model *model =
+			MM_Characters_GetModelByName(
+				MM_Characters_RosterGetPreviewModelName((int)*currCharacterID));
 		if (model == NULL)
 		{
-			int fallbackID = MM_Characters_RosterGetFallbackRetailID((int)*currCharacterID);
-			model = MM_Characters_GetModelByName(data.MetaDataCharacters[fallbackID].name_Debug);
+			int fallbackID =
+				MM_Characters_RosterGetFallbackRetailID((int)*currCharacterID);
+			model =
+				MM_Characters_GetModelByName(
+					data.MetaDataCharacters[fallbackID].name_Debug);
 		}
+#endif
 
 #if defined(CTR_NATIVE)
 		/*
@@ -2351,6 +2941,7 @@ void MM_Characters_DrawWindows(b32 boolShowDrivers)
 		 * we fell back to retail, keep retail wheels visible.
 		 */
 		if ((NativeObj_GetMesh(model) != NULL) &&
+			!CharacterRegistry_IsModularBody((int)*currCharacterID) &&
 			!CharacterRegistry_HasWheels((int)*currCharacterID))
 			gGT->drivers[playerIndex]->wheelSize = 0;
 		else
@@ -2630,6 +3221,12 @@ void MM_Characters_BackupIDs(void)
 void MM_Characters_PreventOverlap(void)
 {
 	struct GameTracker *gGT = sdata->gGT;
+
+#if defined(CTR_NATIVE)
+	if (MM_Characters_DuplicateSelectionsAllowed())
+		return;
+#endif
+
 	s8 availableDefaultCharacters[MM_CHARACTER_SELECT_DEFAULT_DRIVER_COUNT];
 
 	// default 0,1,2,3,4,5,6,7
@@ -2701,6 +3298,9 @@ void MM_Characters_RestoreIDs(void)
 	MM_Characters_SetMenuLayout();
 
 #if defined(CTR_NATIVE)
+	VehiclePartRegistry_Init();
+	RacerLoadout_ResetAll();
+
 	if (gGT->numPlyrNextGame == 1)
 	{
 		MM_Characters_RosterRestoreSelection();

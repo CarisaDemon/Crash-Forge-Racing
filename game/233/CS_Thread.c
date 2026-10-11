@@ -366,7 +366,14 @@ int CS_Thread_UseOpcode(struct Instance *instance, struct CutsceneObj *cs)
 			gGT->pushBuffer[0].distanceToScreen_CURR = gGT->pushBuffer[0].distanceToScreen_PREV;
 		}
 
-		if ((sdata->gGamepads->gamepad[0].buttonsTapped & BTN_START) != 0)
+		/* Keep Start as the retail cutscene skip. On native builds,
+		 * Triangle also skips the boot Naughty Dog crate when skippable. */
+		if (((sdata->gGamepads->gamepad[0].buttonsTapped & BTN_START) != 0)
+#if defined(CTR_NATIVE)
+		    || ((gGT->levelID == NAUGHTY_DOG_CRATE) &&
+		        ((sdata->gGamepads->gamepad[0].buttonsTapped & BTN_TRIANGLE) != 0))
+#endif
+		   )
 		{
 			gGT->clockEffectEnabled &= ~CAM_PATH_FLAG_CLOCK_EFFECT;
 			if ((u32)(gGT->levelID - CREDITS_CRASH) >= CS_CREDITS_LEVEL_COUNT)

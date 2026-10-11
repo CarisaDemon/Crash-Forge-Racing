@@ -12,6 +12,7 @@ void NativeRenderer_ResetDevice(void);
 void NativeRenderer_BeginScene(void);
 void NativeRenderer_EndScene(void);
 void NativeRenderer_UpdateSwapIntervalState(int swapInterval);
+void NativeRenderer_InvalidateSwapIntervalState(void);
 void NativeRenderer_SwapWindow(void);
 void NativeRenderer_StoreFrameBuffer(int x, int y, int w, int h);
 void NativeRenderer_StoreFrameBufferDeferred(int x, int y, int w, int h);
@@ -33,6 +34,8 @@ TextureID NativeRenderer_GetWhiteTexture(void);
 TextureID NativeRenderer_CreateImageTexture(const u8 *rgba, int width, int height);
 void NativeRenderer_ReleaseImageTexture(TextureID texture);
 void NativeRenderer_SetBlendMode(BlendMode blendMode);
+int NativeRenderer_CanSinglePassPSXTexturedSemiTrans(BlendMode blendMode);
+void NativeRenderer_SetPSXTexturedSemiTransBlendMode(BlendMode blendMode);
 void NativeRenderer_SetStencilMode(int drawPrim);
 void NativeRenderer_SetOffscreenState(const RECT16 *offscreenRect, const DISPENV *displayEnv, int enable);
 void NativeRenderer_SetupClipMode(const RECT16 *clipRect, const DISPENV *displayEnv, int enable);
@@ -41,8 +44,69 @@ void NativeRenderer_SetOverrideTextureSize(int width, int height);
 void NativeRenderer_SetPSXTextureSemiTransPass(int pass);
 void NativeRenderer_SetPSXTextureOutputSTP(int enabled);
 void NativeRenderer_SetPSXDrawMaskSet(int maskSet);
+int NativeRenderer_GetGpuTimingEnabled(void);
+void NativeRenderer_SetGpuTimingEnabled(int enabled);
+double NativeRenderer_GetLastGpuFrameMs(void);
+int NativeRenderer_GetExperimentalCompactVRAM(void);
+void NativeRenderer_SetExperimentalCompactVRAM(int enabled);
+int NativeRenderer_GetExperimentalZBuffer(void);
+void NativeRenderer_SetExperimentalZBuffer(int enabled);
+void NativeRenderer_SetExperimentalDepthEligible(int eligible);
+int NativeRenderer_GetLevelPCDepthSceneActive(void);
 void NativeRenderer_UpdateVertexBuffer(const GrVertex *vertices, int count);
 void NativeRenderer_DrawTriangles(int startVertex, int triangles);
+
+/* Experimental static-world PC renderer. Disabled unless the game-side debug
+ * gate explicitly uploads/queues a level. The legacy PS1 renderer remains the
+ * fallback for every unsupported block. */
+int NativeRenderer_LevelPCEnabled(void);
+int NativeRenderer_LevelPCManualPlaytest(void);
+int NativeRenderer_LevelPCUpload(const void *meshKey, const NativeLevelPCVertex *vertices, const u8 *faceTypes,
+	int vertexCount, int blockCount);
+void NativeRenderer_LevelPCBeginFrame(const void *meshKey, const s16 viewM[3][3], const s32 viewT[3],
+                                      int geomScreen, int viewportW, int viewportH, int wide);
+float NativeRenderer_LevelPCWorldDepthQA(float x, float y, float z);
+int NativeRenderer_LevelPCQueueBlock(const void *meshKey, int blockIndex);
+void NativeRenderer_LevelPCDrawQueued(void);
+void NativeRenderer_LevelPCReset(void);
+/* Stress-only world-space vertex GPU transform feedback against original PS1
+ * projected SXY/SZ. Hidden on screen. All real rasterization remains retail. */
+int NativeRenderer_LevelPCProjectionQAEnabled(void);
+void NativeRenderer_LevelPCProjectionQAReset(void);
+void NativeRenderer_LevelPCProjectionQAUpload(const void *meshKey,
+    const void *vertexArray,int vertexCount);
+void NativeRenderer_LevelPCProjectionQABegin(const void *meshKey,
+    const s16 viewM[3][3],const s32 viewT[3],int screen,int wide,
+    s32 offsetXQ16,s32 offsetYQ16);
+void NativeRenderer_LevelPCProjectionQARecord(const void *meshKey,
+    const void *vertexBase,const void *vertex,
+    int sx,int sy,int depth);
+void NativeRenderer_LevelPCProjectionQAFlush(void);
+struct DrawLevelOvr1PScratchVertex;
+void NativeRenderer_LevelPCMidpointQAReset(void);
+void NativeRenderer_LevelPCMidpointQARecord(
+    const struct DrawLevelOvr1PScratchVertex *a,
+    const struct DrawLevelOvr1PScratchVertex *b,
+    const struct DrawLevelOvr1PScratchVertex *mid);
+void NativeRenderer_LevelPCMidpointQAFlush(void);
+
+/* Stage-0 PC level validation: one legacy QuadBlock is drawn as a magenta
+ * wireframe after the normal renderer. It never replaces game geometry. */
+void NativeRenderer_LevelPCDebugQueueBlock(
+    const s16 positions[9][3],
+    const u8 colors[9][4],
+    const s16 viewM[3][3],
+    const s32 viewT[3],
+    int geomScreen,
+    int viewportW,
+    int viewportH,
+    int wide,
+    int blockIndex);
+void NativeRenderer_LevelPCDebugQueueTexturedFace(
+    const NativeLevelPCVertex vertices[6],
+    int blockIndex,
+    int faceIndex);
+void NativeRenderer_LevelPCDebugDrawQueued(void);
 void NativeRenderer_PushDebugLabel(const char *label);
 void NativeRenderer_PopDebugLabel(void);
 

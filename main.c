@@ -22,6 +22,7 @@
 #include "platform/native_assets.h"
 #include "platform/native_log.h"
 #include "platform/native_memory.h"
+#include "platform/native_jobs.h"
 #include "platform/native_perf.h"
 #include "platform/native_replay_scheduler.h"
 #include "platform/native_savestate.h"
@@ -43,8 +44,11 @@
 
 #include "platform/native_disc_image.c"
 #include "platform/native_assets.c"
+#include "platform/native_mod_packages.c"
+#include "platform/native_custom_tracks.c"
 #include "platform/native_audio.c"
 #include "platform/native_custom_music.c"
+#include "platform/native_jobs.c"
 #include "platform/native_memory.c"
 #include "platform/native_checkpoint.c"
 #include "platform/native_checkpoint_file.c"
@@ -54,6 +58,7 @@
 #include "platform/native_gte_core.c"
 #include "platform/native_glad.c"
 #include "platform/native_input.c"
+#include "platform/native_input_glyphs.c"
 #include "platform/native_inline_c.c"
 #include "platform/native_libapi.c"
 #include "platform/native_libetc.c"
@@ -68,7 +73,12 @@
 #include "platform/native_platform.c"
 #include "platform/native_replay_scheduler.c"
 #include "platform/native_renderer.c"
+#include "platform/native_level_pc.c"
+#include "platform/native_level_gpu_projection_qa.c"
+#include "platform/native_level_gpu_midpoint_qa.c"
+#include "platform/native_gltf.c"
 #include "platform/native_obj.c"
+#include "platform/native_gpu_model_qa.c"
 #include "platform/native_savestate.c"
 #include "platform/native_state.c"
 #include "platform/native_str.c"
@@ -146,6 +156,10 @@ static int NativeArg_IsVersion(const char *arg)
 
 int main(int argc, char *argv[])
 {
+#if defined(CTR_NATIVE)
+	NativeSession_ConfigureFromArgs(argc, argv);
+#endif
+
 	for (int argIndex = 1; argIndex < argc; argIndex++)
 	{
 		if (NativeArg_IsVersion(argv[argIndex]))
@@ -185,6 +199,26 @@ int main(int argc, char *argv[])
 		return NativeConsole_Return(1);
 	}
 
+#if defined(CTR_NATIVE)
+	/* Fast, non-graphical verification for creator-installed LEV/VRM packs.
+	   Does not start the game or touch keyboard/mouse. */
+	for (int argIndex = 1; argIndex < argc; argIndex++)
+	{
+		if (strcmp(argv[argIndex], "--list-custom-tracks") == 0)
+		{
+			NativeCustomTracks_Scan();
+			printf("[CustomTracks] found=%d\\n", NativeCustomTracks_Count());
+			for (int trackIndex = 0; trackIndex < NativeCustomTracks_Count(); trackIndex++)
+			{
+				printf("[CustomTracks] %d: %s\\n", trackIndex,
+				       NativeCustomTracks_Name(trackIndex));
+			}
+			fflush(stdout);
+			return 0;
+		}
+	}
+#endif
+
 #if defined(CTR_INTERNAL)
 	if (NativeReplayScheduler_PrepareReportFromArgs(argc, argv) != 0)
 	{
@@ -209,6 +243,8 @@ int main(int argc, char *argv[])
 	}
 #endif
 
+	NativeJobs_Init();
+
 	Platform_InitScratchpad();
 	Platform_RepairResidentPointers(0);
 
@@ -216,6 +252,7 @@ int main(int argc, char *argv[])
 	if (NativeReplayScheduler_ConfigureFromArgs(argc, argv) != 0)
 	{
 		Platform_LogFlush();
+		NativeJobs_Shutdown();
 		Platform_Shutdown();
 		return NativeConsole_Return(1);
 	}
@@ -228,10 +265,14 @@ int main(int argc, char *argv[])
 
 #if defined(CTR_NATIVE)
 	/* Release host-side mod resources while the renderer/context still exists. */
+#if defined(CTR_CSEQ_LIBERATION)
+	NativeMusicRegistry_Shutdown();
+#endif
 	NativeObj_Shutdown();
 	CharacterRegistry_Shutdown();
 #endif
 
+	NativeJobs_Shutdown();
 	Platform_Shutdown();
 	return NativeConsole_Return(result);
 }

@@ -1,5 +1,9 @@
 #include <common.h>
 
+#if defined(CTR_NATIVE)
+#include "NativeHUD.c"
+#endif
+
 // To do: add a header
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80052f98-0x80054298.
@@ -49,6 +53,10 @@ void UI_RenderFrame_Racing()
 	int numPlyr = gGT->numPlyrCurrGame;
 	int gameMode1 = gGT->gameMode1;
 
+#if defined(CTR_NATIVE)
+	NativeHUD_HandleGameplayToggle();
+#endif
+
 	// Get pointer to array of HUD structs
 	hudStructPtr = (struct UiElement2D *)data.hudStructPtr[numPlyr - 1];
 
@@ -81,14 +89,16 @@ void UI_RenderFrame_Racing()
 	{
 		if ((gGT->hudFlags & HUD_FLAG_RENDER_LESS) == 0)
 		{
-			// If you press Triangle
+#if !defined(CTR_NATIVE)
+			// Retail: Triangle toggles map and speedometer.
 			if ((sdata->gGamepads->gamepad[0].buttonsTapped & 0x40000) != 0)
 			{
-				// if & 8, remove bit 8,
-				// if !& 8, add bit 8,
-				// toggle map and speedometer
 				sdata->HudAndDebugFlags ^= 8;
 			}
+#else
+			/* NativeHUD_HandleGameplayToggle owns Triangle during gameplay.
+			 * The map stays visible; only the speedometer style swaps. */
+#endif
 		}
 		else
 		{
@@ -179,6 +189,33 @@ void UI_RenderFrame_Racing()
 				}
 			}
 
+#if defined(CTR_NATIVE)
+			if (numPlyr < 2)
+			{
+				/* The UI OT is prepend-based: submit jump meter first so it
+				 * renders in front of either speedometer style. */
+				UI_JumpMeter_Draw(
+					hudStructPtr[UI_HUD_SLOT_JUMP_METER].x,
+					hudStructPtr[UI_HUD_SLOT_JUMP_METER].y,
+					playerStruct);
+
+				/* Only the speedometer itself swaps. Saffi ON removes the CTR
+				 * needle/background; Saffi OFF restores them. */
+				if (!NativeHUD_GetSaffiEnabled())
+				{
+					UI_DrawSpeedNeedle(
+						hudStructPtr[UI_HUD_SLOT_SPEEDOMETER].x + offset,
+						hudStructPtr[UI_HUD_SLOT_SPEEDOMETER].y + NATIVE_HUD_RETAIL_SPEEDOMETER_OFFSET_Y,
+						playerStruct);
+					UI_DrawSpeedBGOffsetY(NATIVE_HUD_RETAIL_SPEEDOMETER_OFFSET_Y);
+				}
+
+				UI_DrawSlideMeter(
+					hudStructPtr[UI_HUD_SLOT_SLIDE_METER].x + offset,
+					hudStructPtr[UI_HUD_SLOT_SLIDE_METER].y,
+					playerStruct);
+			}
+#else
 			if (
 			    // numPlyrCurrGame is less than 2 (1P mode)
 			    (numPlyr < 2) &&
@@ -190,6 +227,7 @@ void UI_RenderFrame_Racing()
 				UI_DrawSlideMeter(hudStructPtr[UI_HUD_SLOT_SLIDE_METER].x + offset, hudStructPtr[UI_HUD_SLOT_SLIDE_METER].y, playerStruct);
 				UI_DrawSpeedBG();
 			}
+#endif
 
 			if ((playerStruct->actionsFlagSet & ACTION_RACE_FINISHED) == 0)
 			{
@@ -556,6 +594,12 @@ void UI_RenderFrame_Racing()
 				}
 			}
 
+#if defined(CTR_NATIVE)
+			/* Extra PC HUD is presentation-only. It reads Driver state after the
+			   retail HUD has rendered and never updates kart physics/timers. */
+			NativeHUD_RenderPlayerExtras(playerStruct);
+#endif
+
 			// go to next player
 			// thread = thread->sibling
 			playerThread = playerThread->siblingThread;
@@ -763,13 +807,24 @@ void UI_RenderFrame_Racing()
 
 	if (levPtrMap != 0)
 	{
+#if defined(CTR_NATIVE)
+		/* Native map is independent of the speedometer toggle and stays visible.
+		 * Keep the existing 1P/3P layouts; Triangle never hides it. */
+		if ((numPlyr == 1) || (numPlyr == 3))
+#else
 		if (((numPlyr == 1)
 
 		     // if want to draw map, not speedometer
 		     && (sdata->HudAndDebugFlags & 8) == 0) ||
 
 		    (numPlyr == 3))
+#endif
 		{
+#if defined(CTR_NATIVE)
+			UI_Map_NativeSetScreenOffset(
+				0,
+				(numPlyr == 1) ? -60 : 0);
+#endif
 			local_30[0] = 0;
 
 			UI_Map_DrawDrivers(levPtrMap, gGT->threadBuckets[PLAYER].thread, local_30);
@@ -781,6 +836,10 @@ void UI_RenderFrame_Racing()
 
 			mapPosX = 500;
 			mapPosY = 195;
+#if defined(CTR_NATIVE)
+			if (numPlyr == 1)
+				mapPosY -= 60;
+#endif
 
 			if (numPlyr == 3)
 			{
@@ -804,6 +863,9 @@ void UI_RenderFrame_Racing()
 
 			    // color, in this case white
 			    1);
+#if defined(CTR_NATIVE)
+			UI_Map_NativeSetScreenOffset(0, 0);
+#endif
 		}
 	}
 

@@ -1,5 +1,240 @@
 #include <common.h>
 
+#if defined(CTR_NATIVE)
+#include <platform/native_perf.h>
+#include <CharacterRegistry.h>
+#include <VehiclePartRegistry.h>
+#include <RacerLoadout.h>
+#include <platform/native_obj.h>
+#include <NativeReserves.h>
+#include <SDL3/SDL.h>
+
+static u32 s_nativeBotLoadoutRng;
+
+/* Log the RESOLVED loadout used by this bot, not only the random pick's
+ * requested ID. Bots can inherit original kart/wheels or retail fallbacks. */
+static void BOTS_NativeLogResolvedLoadout(int driverID, const char *reason)
+{
+    const int character=RacerLoadout_GetCharacter(driverID);
+    const int kart=RacerLoadout_GetEffectiveKart(driverID);
+    const int wheels=RacerLoadout_GetEffectiveWheels(driverID);
+    const int color=RacerLoadout_GetKartColor(driverID);
+    const char *charName=CharacterRegistry_GetDisplayName(character);
+    const char *kartName=VehiclePartRegistry_GetDisplayName(VEHICLE_PART_KART,kart);
+    const char *wheelName=VehiclePartRegistry_GetDisplayName(VEHICLE_PART_WHEELS,wheels);
+    Platform_Log(
+        "[BOT LOADOUT] reason=%s bot=%d character=%d(%s) kart=%d(%s) wheels=%d(%s) color=%d\\n",
+        reason ? reason : "race",driverID,character,
+        charName?charName:"retail/unknown",kart,
+        kartName?kartName:"original/inherited",wheels,
+        wheelName?wheelName:"original/inherited",color);
+}
+
+static u32 BOTS_NativeLoadoutRandom(void)
+{
+	u32 x = s_nativeBotLoadoutRng;
+
+	if (x == 0)
+	{
+		struct GameTracker *gGT = sdata->gGT;
+		x = (u32)SDL_GetTicks() ^ 0x9e3779b9u;
+		if (gGT != NULL)
+			x ^= ((u32)(gGT->levelID + 1) * 0x85ebca6bu);
+		if (x == 0)
+			x = 0x6d2b79f5u;
+	}
+
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	s_nativeBotLoadoutRng = x;
+	return x;
+}
+
+static int BOTS_NativeLoadoutRange(int count)
+{
+	if (count <= 1)
+		return 0;
+	return (int)(BOTS_NativeLoadoutRandom() % (u32)count);
+}
+
+static void BOTS_NativeRandomizeLoadout(int driverID)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	const struct CharacterDef *character;
+	int characterID;
+	int modCount;
+	int kartID = RACER_LOADOUT_INHERIT;
+	int wheelID = RACER_LOADOUT_INHERIT;
+
+	if (gGT == NULL || driverID < 0 || driverID >= RACER_LOADOUT_MAX_DRIVERS)
+		return;
+
+	/* Story/Adventure keeps its authored opponents and vehicle assumptions. */
+	if (RacerLoadout_IsAdventureLocked())
+		return;
+
+	/* Human slots are never changed here. */
+	if (driverID < gGT->numPlyrCurrGame)
+		return;
+
+	characterID = data.characterIDs[driverID];
+	modCount = CharacterRegistry_GetModCount();
+
+	/* Normal races mix the already-authored retail bot with every enabled
+	   custom racer. Stress Test bypasses this function and remains custom-only. */
+	if (modCount > 0)
+	{
+		int pick = BOTS_NativeLoadoutRange(modCount + 1);
+		if (pick > 0)
+		{
+			const struct CharacterDef *custom =
+				CharacterRegistry_GetByRosterIndex(16 + (pick - 1));
+			if (custom != NULL)
+				characterID = custom->id;
+		}
+	}
+
+	RacerLoadout_ResetSlot(driverID, characterID);
+	RacerLoadout_SetCharacter(driverID, characterID);
+	character = CharacterRegistry_GetByID(characterID);
+
+	if (character != NULL)
+	{
+		const int isRetail =
+			(character->flags & CHARACTER_REGISTRY_FLAG_RETAIL) != 0;
+		const int isModular = CharacterRegistry_IsModularBody(characterID);
+
+		/* Legacy combined custom racers keep their baked kart/wheels untouched. */
+		if (!isRetail && !isModular)
+			goto LogSelection;
+
+		if (isModular)
+		{
+			int kartCount = VehiclePartRegistry_GetCount(VEHICLE_PART_KART);
+			if (kartCount > 0)
+			{
+				const struct VehiclePartDef *kart = VehiclePartRegistry_GetByIndex(
+					VEHICLE_PART_KART, BOTS_NativeLoadoutRange(kartCount));
+				if (kart != NULL)
+				{
+					kartID = kart->id;
+					RacerLoadout_SetKart(driverID, kartID);
+				}
+			}
+		}
+
+		/* Wheels can be replaced safely on retail racers and modular bodies. */
+		if (isRetail || isModular)
+		{
+			int wheelCount = VehiclePartRegistry_GetCount(VEHICLE_PART_WHEELS);
+			if (wheelCount > 0)
+			{
+				const struct VehiclePartDef *wheels = VehiclePartRegistry_GetByIndex(
+					VEHICLE_PART_WHEELS, BOTS_NativeLoadoutRange(wheelCount));
+				if (wheels != NULL)
+				{
+					wheelID = wheels->id;
+					RacerLoadout_SetWheels(driverID, wheelID);
+				}
+			}
+		}
+	}
+
+LogSelection:
+	Platform_Log(
+		"[BOTLOADOUT] slot=%d char=%d kart=%d wheels=%d customMods=%d\n",
+		driverID, characterID, kartID, wheelID, modCount);
+    BOTS_NativeLogResolvedLoadout(driverID,"normal");
+}
+
+/* Stress tests should use actual textured 3D parts, not the tiny Your Dad
+ * kart or the cheap PS1 billboard wheels. Keep deterministic bot selection
+ * and leave every normal race/loadout path unchanged. */
+static int BOTS_NativeStressSelect3DPart(int kind, int botOrdinal)
+{
+	const int count = VehiclePartRegistry_GetCount(kind);
+
+	for (int offset = 0; offset < count; ++offset)
+	{
+		const struct VehiclePartDef *part = VehiclePartRegistry_GetByIndex(
+			kind, (botOrdinal + offset) % count);
+		const struct NativeObjMesh *mesh;
+		struct Model *model;
+
+		if (part == NULL ||
+			(kind == VEHICLE_PART_KART &&
+			 SDL_strcasecmp(part->slug, "your_dad") == 0))
+			continue;
+
+		model = NativeObj_LoadVehiclePart(kind, part->id);
+		mesh = model != NULL ? NativeObj_GetMesh(model) : NULL;
+		if (mesh == NULL || mesh->triangleCount <= 0)
+			continue;
+
+		/* An incomplete wheel pack would fall back to retail 2D wheels. */
+		if (kind == VEHICLE_PART_WHEELS &&
+			(mesh->wheelMask & 0xfu) != 0xfu)
+			continue;
+
+		return part->id;
+	}
+
+	return -1;
+}
+
+/* Called for the seven directly-spawned bots AND for demo-mode driver 0,
+ * which starts as the sole human player before becoming the eighth AI.
+ * Every stress driver receives a real modular racer with complete 3D parts. */
+void BOTS_NativeAssignStressLoadout(int driverID)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	const int modCount = CharacterRegistry_GetModCount();
+	const int botOrdinal = driverID == 0 ? 7 : driverID - 1;
+	int customID = -1;
+	int kartID;
+	int wheelID;
+
+	if (!NativePerf_IsStressTestActive() || gGT == NULL ||
+		driverID < 0 || driverID >= RACER_LOADOUT_MAX_DRIVERS ||
+		RacerLoadout_IsAdventureLocked())
+		return;
+
+	for (int offset = 0; offset < modCount; ++offset)
+	{
+		const struct CharacterDef *candidate =
+			CharacterRegistry_GetByRosterIndex(
+				16 + ((botOrdinal + offset) % modCount));
+		if (candidate != NULL && CharacterRegistry_IsModularBody(candidate->id))
+		{
+			customID = candidate->id;
+			break;
+		}
+	}
+
+	kartID = BOTS_NativeStressSelect3DPart(VEHICLE_PART_KART, botOrdinal);
+	wheelID = BOTS_NativeStressSelect3DPart(VEHICLE_PART_WHEELS, botOrdinal);
+	if (customID < 0 || kartID < 0 || wheelID < 0)
+	{
+		Platform_Log(
+			"[STRESSBOT] slot=%d no full modular 3D loadout (char=%d kart=%d wheels=%d)\n",
+			driverID, customID, kartID, wheelID);
+		return;
+	}
+
+	RacerLoadout_Init();
+	RacerLoadout_ResetSlot(driverID, customID);
+	RacerLoadout_SetCharacter(driverID, customID);
+	RacerLoadout_SetKart(driverID, kartID);
+	RacerLoadout_SetWheels(driverID, wheelID);
+	data.characterIDs[driverID] = customID;
+	Platform_Log(
+		"[STRESSBOT] slot=%d char=%d kart=%d wheels=%d (complete modular 3D)\n",
+		driverID, customID, kartID, wheelID);
+    BOTS_NativeLogResolvedLoadout(driverID,"stress");
+}
+#endif
+
 enum
 {
 	BOTS_ADV_MAX_LOSS_DIFFICULTY_INDEX = 10,
@@ -695,7 +930,7 @@ void BOTS_MaskGrab(struct Thread *botThread)
 	bot->rotCurr.z = (s16)CTR_MipsSll(frame->rot[2], BOTS_ROT_BYTE_SHIFT);
 
 	bot->turbo_MeterRoomLeft = 0;
-	bot->reserves = 0;
+	NativeReserves_Set(bot, 0);
 	bot->clockReceive = 0;
 	bot->squishTimer = 0;
 	bot->turbo_outsideTimer = 0;
@@ -863,11 +1098,7 @@ void BOTS_ThTick_Drive(struct Thread *botThread)
 
 	int elapsedMilliseconds = gGT->elapsedTimeMS; // local_34
 
-	botDriver->reserves = (s16)CTR_MipsSubLo((u16)botDriver->reserves, elapsedMilliseconds);
-	if (botDriver->reserves < 0)
-	{
-		botDriver->reserves = 0;
-	}
+	NativeReserves_Decrement(botDriver, elapsedMilliseconds);
 
 	botDriver->turbo_outsideTimer = (s16)CTR_MipsSubLo((u16)botDriver->turbo_outsideTimer, elapsedMilliseconds);
 	if (botDriver->turbo_outsideTimer < 0)
@@ -2809,7 +3040,7 @@ u32 BOTS_ChangeState(struct Driver *driverVictim, int damageType, struct Driver 
 
 			if ((data.characterIDs[driverVictim->driverID] != NITROS_OXIDE) || ((driverVictim->actionsFlagSet & ACTION_TOUCH_GROUND) != 0))
 			{
-				driverVictim->reserves = 0;
+				NativeReserves_Set(driverVictim, 0);
 				driverVictim->turbo_outsideTimer = 0;
 				driverVictim->botData.aiPhysics.reserved_0x5cc = 0;
 
@@ -2847,7 +3078,7 @@ u32 BOTS_ChangeState(struct Driver *driverVictim, int damageType, struct Driver 
 		driverVictim->botData.blastBounceCount = 0;
 		driverVictim->botData.aiPhysics.turboMeter = 0;
 		driverVictim->botData.aiDamageState = BOTS_DAMAGE_STATE_BLAST;
-		driverVictim->reserves = 0;
+		NativeReserves_Set(driverVictim, 0);
 		driverVictim->turbo_outsideTimer = 0;
 		driverVictim->botData.aiPhysics.reserved_0x5cc = 0;
 		driverVictim->botData.aiPhysics.speedY = sdata->AI_VelY_WhenBlasted_0x3000;
@@ -2884,7 +3115,7 @@ u32 BOTS_ChangeState(struct Driver *driverVictim, int damageType, struct Driver 
 		driverVictim->botData.aiPhysics.squishCooldown = 0x300;
 		driverVictim->botData.aiPhysics.rotXZ = 0xf00;
 		driverVictim->squishTimer = 0xf00;
-		driverVictim->reserves = 0;
+		NativeReserves_Set(driverVictim, 0);
 		driverVictim->turbo_outsideTimer = 0;
 		driverVictim->botData.aiPhysics.reserved_0x5cc = 0;
 		driverVictim->botData.aiPhysics.speedY = 0;
@@ -3073,6 +3304,23 @@ void BOTS_GotoStartingLine(struct Driver *d)
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80017164-0x80017318.
 struct Driver *BOTS_Driver_Init(int driverID)
 {
+#if defined(CTR_NATIVE)
+	/* Temporary performance-test stress mode:
+	 * - never changes Adventure/story bot identities;
+	 * - outside story, TEST uses only enabled custom racers;
+	 * - CharacterRegistry contains only enabled mods, so disabled entries
+	 *   from the Mods menu can never be selected here;
+	 * - selection is deterministic so benchmark runs stay comparable. */
+	if (NativePerf_IsStressTestActive())
+	{
+		BOTS_NativeAssignStressLoadout(driverID);
+	}
+	else
+	{
+		BOTS_NativeRandomizeLoadout(driverID);
+	}
+#endif
+
 	s8 initialNavPathIndex = sdata->driver_pathIndexIDs[driverID];
 	s8 navPathIndex = initialNavPathIndex;
 	while (1)

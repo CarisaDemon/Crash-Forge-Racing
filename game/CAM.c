@@ -1,5 +1,12 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#include <platform/native_custom_tracks.h>
+#endif
 
+#if defined(CTR_NATIVE)
+#include <platform/native_perf.h>
+#endif
 
 enum
 {
@@ -7,6 +14,144 @@ enum
 };
 
 CTR_STATIC_ASSERT(CAM_FOLLOW_DRIVER_QUAD_FLAGS_SKIP_TERRAIN_HEIGHT == 0x4100);
+
+#if defined(CTR_NATIVE)
+enum
+{
+	CAM_PERF_SPECTATOR_SWITCH_TICKS = 150,
+	CAM_PERF_SPECTATOR_MAX_DRIVERS = 8,
+};
+
+static u32 s_perfSpectatorRng = 0x435452u;
+static u32 s_perfSpectatorNextSwitch;
+static s8 s_perfSpectatorOrder[CAM_PERF_SPECTATOR_MAX_DRIVERS];
+static s8 s_perfSpectatorCount;
+static s8 s_perfSpectatorIndex;
+static s8 s_perfSpectatorLastDriver = -1;
+static s8 s_perfSpectatorWasActive;
+
+static u32 CAM_PerfSpectatorRandom(void)
+{
+	s_perfSpectatorRng =
+		s_perfSpectatorRng * 1664525u + 1013904223u;
+	return s_perfSpectatorRng;
+}
+
+static void CAM_PerfSpectatorReset(void)
+{
+	s_perfSpectatorRng = 0x435452u;
+	s_perfSpectatorNextSwitch = 0;
+	s_perfSpectatorCount = 0;
+	s_perfSpectatorIndex = 0;
+	s_perfSpectatorLastDriver = -1;
+	s_perfSpectatorWasActive = 0;
+}
+
+static void CAM_PerfSpectatorBuildOrder(struct GameTracker *gGT)
+{
+	s_perfSpectatorCount = 0;
+	s_perfSpectatorIndex = 0;
+
+	for (int driverID = 0; driverID < CAM_PERF_SPECTATOR_MAX_DRIVERS; ++driverID)
+	{
+		struct Driver *driver = gGT->drivers[driverID];
+
+		if ((driver == NULL) ||
+			(driver->instSelf == NULL) ||
+			((driver->actionsFlagSet & ACTION_BOT) == 0) ||
+			((driver->actionsFlagSet & ACTION_RACE_FINISHED) != 0))
+		{
+			continue;
+		}
+
+		s_perfSpectatorOrder[s_perfSpectatorCount++] = (s8)driverID;
+	}
+
+	for (int i = s_perfSpectatorCount - 1; i > 0; --i)
+	{
+		int j = (int)(CAM_PerfSpectatorRandom() % (u32)(i + 1));
+		s8 temp = s_perfSpectatorOrder[i];
+		s_perfSpectatorOrder[i] = s_perfSpectatorOrder[j];
+		s_perfSpectatorOrder[j] = temp;
+	}
+
+	if ((s_perfSpectatorCount > 1) &&
+		(s_perfSpectatorOrder[0] == s_perfSpectatorLastDriver))
+	{
+		s8 temp = s_perfSpectatorOrder[0];
+		s_perfSpectatorOrder[0] = s_perfSpectatorOrder[1];
+		s_perfSpectatorOrder[1] = temp;
+	}
+}
+
+static void CAM_PerfSpectatorUpdate(struct CameraDC *cDC, struct GameTracker *gGT)
+{
+	u32 frameCounter;
+
+	if (!NativePerf_IsStressTestActive() || !NativePerf_IsStressTestMeasuring())
+	{
+		if (s_perfSpectatorWasActive)
+			CAM_PerfSpectatorReset();
+		return;
+	}
+
+	/* TEST owns only the single spectator camera. */
+	if ((cDC == NULL) || (cDC->cameraID != 0) || (gGT == NULL) || (gGT->level1 == NULL))
+		return;
+
+	if ((gGT->gameMode1 &
+			(PAUSE_ALL | START_OF_RACE | MAIN_MENU | GAME_CUTSCENE)) != 0)
+	{
+		return;
+	}
+
+	frameCounter = (u32)sdata->frameCounter;
+
+	if (!s_perfSpectatorWasActive)
+	{
+		s_perfSpectatorWasActive = 1;
+		s_perfSpectatorNextSwitch = frameCounter;
+	}
+
+	if ((s32)(frameCounter - s_perfSpectatorNextSwitch) < 0)
+		return;
+
+	if (s_perfSpectatorIndex >= s_perfSpectatorCount)
+		CAM_PerfSpectatorBuildOrder(gGT);
+
+	while (s_perfSpectatorIndex < s_perfSpectatorCount)
+	{
+		const int driverID =
+			(int)s_perfSpectatorOrder[s_perfSpectatorIndex++];
+		struct Driver *driver = gGT->drivers[driverID];
+
+		if ((driver == NULL) ||
+			(driver->instSelf == NULL) ||
+			((driver->actionsFlagSet & ACTION_BOT) == 0) ||
+			((driver->actionsFlagSet & ACTION_RACE_FINISHED) != 0))
+		{
+			continue;
+		}
+
+		cDC->driverToFollow = driver;
+		cDC->cameraMode = 0;
+		cDC->flags |= CAMERA_FLAG_DIRECTION_CHANGED;
+		s_perfSpectatorLastDriver = (s8)driverID;
+		s_perfSpectatorNextSwitch =
+			frameCounter + CAM_PERF_SPECTATOR_SWITCH_TICKS;
+
+		Platform_Log(
+			"[PERF TEST] spectator camera -> bot=%d character=%d (%s)\n",
+			driverID,
+			(int)data.characterIDs[driverID],
+			CharacterRegistry_GetDisplayName(data.characterIDs[driverID]));
+		return;
+	}
+
+	/* No active bots remain. Try again shortly in case one is still spawning. */
+	s_perfSpectatorNextSwitch = frameCounter + 30;
+}
+#endif
 
 static u32 CAM_SkyboxGlow_PrimAddr(const void *prim)
 {
@@ -491,6 +636,19 @@ void CAM_StartOfRace(struct CameraDC *cDC)
 	struct GameTracker *gGT = sdata->gGT;
 	struct Level *level1 = gGT->level1;
 
+#if defined(CTR_NATIVE)
+	/* A selected community track does not need retail camera paths. */
+	if (NativeCustomTracks_IsSelected())
+	{
+		cDC->transitionFrame = 0;
+		cDC->transitionBlend = 0x1000;
+		cDC->transitionFrameCount = 0;
+		cDC->cameraMode = 0;
+		cDC->flags |= CAMERA_FLAG_RESET_RAIN_POS | CAMERA_FLAG_DIRECTION_CHANGED;
+		return;
+	}
+#endif
+
 	// if fly-in camera data exists and there is only one screen
 	s32 hasFlyInCamera = (2 < level1->cnt_restart_points);
 
@@ -544,6 +702,15 @@ void CAM_EndOfRace_Battle(struct CameraDC *cDC, struct Driver *d)
 void CAM_EndOfRace(struct CameraDC *cDC, struct Driver *d)
 {
 	struct GameTracker *gGT = sdata->gGT;
+
+#if defined(CTR_NATIVE)
+	/* Optional EOR camera data is absent in many community track LEVs. */
+	if (NativeCustomTracks_IsSelected())
+	{
+		CAM_EndOfRace_Battle(cDC, d);
+		return;
+	}
+#endif
 
 #if BUILD > SepReview
 
@@ -1105,7 +1272,6 @@ void CAM_FollowDriver_Normal(struct CameraDC *cDC, struct Driver *d, SVec3 *push
 	int cameraRotZ = d->rotCurr.z;
 	int legacyTicks = 1;
 #if defined(CTR_NATIVE)
-	static s32 s_cameraSpeedDebugElapsed[8];
 	legacyTicks = Platform_GetLegacy30HzTicks();
 	NativeWorld_DriverPosition(d, cameraDriverPos.v, NULL);
 	/* The Hub kart is rendered from the interpolated instance matrix, which
@@ -1131,6 +1297,9 @@ void CAM_FollowDriver_Normal(struct CameraDC *cDC, struct Driver *d, SVec3 *push
 	    ((gGT->gameMode1 & START_OF_RACE) == 0) &&
 
 	    // If you are holding R2
+#if defined(CTR_NATIVE)
+	    !NativeHangout_ShouldBlockGameplayInput() &&
+#endif
 	    ((pad->buttonsHeldCurrFrame & 0x200) != 0))
 	{
 		// Reverse the camera
@@ -1230,30 +1399,6 @@ void CAM_FollowDriver_Normal(struct CameraDC *cDC, struct Driver *d, SVec3 *push
 	cam->rot.y = 0;
 
 	uVar8 = VehCalc_MapToRange(cDC->cameraMoveSpeed, (s32)zoom->speedMin, (s32)zoom->speedMax, (s32)zoom->distMin, (s32)zoom->distMax);
-
-#if defined(CTR_NATIVE)
-	if (((int)d->driverID >= 0) && ((int)d->driverID < 8))
-	{
-		int driverID = (int)d->driverID;
-		s_cameraSpeedDebugElapsed[driverID] += gGT->elapsedTimeMS;
-		if (s_cameraSpeedDebugElapsed[driverID] >= 500)
-		{
-			s_cameraSpeedDebugElapsed[driverID] -= 500;
-			Platform_Log("[CAMDBG] id=%d hr=%d dt=%d approx=%d camSpeed=%d camDist=%d zoomSpeed=(%d,%d) zoomDist=(%d,%d) fireOff=%d\n",
-			             driverID,
-			             Platform_GetHighRefreshMode(),
-			             gGT->elapsedTimeMS,
-			             d->speedApprox,
-			             cDC->cameraMoveSpeed,
-			             (int)uVar8,
-			             (int)zoom->speedMin,
-			             (int)zoom->speedMax,
-			             (int)zoom->distMin,
-			             (int)zoom->distMax,
-			             cDC->fireSpeedZoom.distanceOffset);
-		}
-	}
-#endif
 
 	cam->rot.z = uVar8;
 
@@ -1792,6 +1937,23 @@ LAB_8001ab04:
 		// if startline camera
 		else
 		{
+#if defined(CTR_NATIVE)
+			if (NativeCustomTracks_IsSelected())
+			{
+				/* Last-resort safeguard if another path restores START_OF_RACE:
+				 * do not dereference the optional ST1_CAMERA_PATH. Use the
+				 * already computed normal chase camera position instead. */
+				local_40 = pb->pos;
+				local_38 = pb->rot;
+				x = 0x1000;
+				cDC->flags |= CAMERA_FLAG_RESET_RAIN_POS | CAMERA_FLAG_DIRECTION_CHANGED;
+				gGT->hudFlags |= HUD_FLAG_RACE_HUD | HUD_FLAG_RENDER_LESS;
+				gGT->gameMode1 &= ~(START_OF_RACE);
+				Platform_Log("[CustomTracks] Missing fly-in bypassed safely\n");
+			}
+			else
+#endif
+			{
 			struct SpawnType1 *st1 = gGT->level1->ptrSpawnType1;
 			void **pointers = ST1_GETPOINTERS(st1);
 			u8 *cameraPath = pointers[ST1_CAMERA_PATH];
@@ -1831,8 +1993,14 @@ LAB_8001ab04:
 				flyInDone = 1;
 			}
 
-			// Press Triangle
+#if defined(CTR_NATIVE)
+			/* Restore the original Triangle skip for the race presentation.
+			 * Keep Circle as an additional native shortcut. */
+			if ((pad->buttonsTapped & (BTN_TRIANGLE | BTN_CIRCLE)) != 0)
+#else
+			/* Retail behavior: Triangle skips the complete start-line fly-in. */
 			if ((pad->buttonsTapped & BTN_TRIANGLE) != 0)
+#endif
 			{
 				cDC->flags |= CAMERA_FLAG_RESET_RAIN_POS | CAMERA_FLAG_DIRECTION_CHANGED;
 				flyInDone = 1;
@@ -1843,6 +2011,7 @@ LAB_8001ab04:
 			{
 				gGT->hudFlags |= HUD_FLAG_RACE_HUD | HUD_FLAG_RENDER_LESS;
 				gGT->gameMode1 &= ~(START_OF_RACE);
+			}
 			}
 		}
 	}
@@ -2009,20 +2178,29 @@ void CAM_ThTick(struct Thread *t)
 	scratchpad = (s16 *)scratchWork;
 	struct CameraScratch *camThTick = &scratchWork->camera;
 	cDC = (struct CameraDC *)t->inst;
-	d = cDC->driverToFollow;
 	pb = cDC->pushBuffer;
 
 #if defined(CTR_NATIVE)
-	Platform_DebugFreecamUpdate(cDC, pb);
+	CAM_PerfSpectatorUpdate(cDC, gGT);
 #endif
+
+	d = cDC->driverToFollow;
 
 	if ((cDC->flags & CAMERA_FLAG_FROZEN) != 0)
 	{
+#if defined(CTR_NATIVE)
+		/* Frozen gameplay cameras may still be inspected with the debug view.
+		   This changes only the rendered push-buffer transform. */
+		Platform_DebugFreecamUpdate(cDC, pb);
+#endif
 		return;
 	}
 
 	if (((((gGT->gameMode1 & (PAUSE_ALL | START_OF_RACE | MAIN_MENU | GAME_CUTSCENE)) == 0) && (d->instSelf->thread->funcThTick == 0)) &&
 	     ((d->actionsFlagSet & ACTION_BOT) == 0)) &&
+#if defined(CTR_NATIVE)
+	    !NativeHangout_ShouldBlockGameplayInput() &&
+#endif
 	    (((d->kartState != KS_WARP_PAD && (d->kartState != KS_FREEZE)) &&
 	      (((gGT->gameMode2 & 4) == 0 && ((sdata->gGamepads->gamepad[cDC->cameraID].buttonsTapped & BTN_L2_one) != 0))))))
 	{
@@ -2505,6 +2683,26 @@ SkipNewCameraEOR:
 	CAM_FollowDriver_Normal(cDC, d, &pb->pos, scratchWork, ptrZoomData);
 
 LAB_8001c150:
+#if defined(CTR_NATIVE)
+	/* Apply debug freecam only after CTR's real camera state machine has fully
+	   advanced. This keeps intro/fly-in completion, traffic lights, pause and
+	   cutscene state completely independent from the debug view. */
+	Platform_DebugFreecamUpdate(cDC, pb);
+	if (Platform_DebugFreecamIsEnabled() && (cDC->cameraID == 0))
+	{
+		Vec3 freecamProbePos;
+		freecamProbePos.x = (s32)pb->pos.x;
+		freecamProbePos.y = (s32)pb->pos.y;
+		freecamProbePos.z = (s32)pb->pos.z;
+		/* Visibility follows the debug viewpoint, without changing gameplay
+		   cameraMode or transition counters. */
+		CAM_FindClosestQuadblock(
+			(struct ScratchpadStruct *)scratchWork,
+			cDC,
+			d,
+			&freecamProbePos);
+	}
+#endif
 	cDC->cameraModePrev = cDC->cameraMode;
 
 	if (cDC->ptrQuadBlock != 0)

@@ -1,6 +1,8 @@
 #include <common.h>
 #include <CharacterRegistry.h>
+#include <NativeRacerVisual.h>
 #if defined(CTR_NATIVE)
+#include <platform/native_gltf.h>
 #include <platform/native_obj.h>
 #endif
 
@@ -249,7 +251,25 @@ void VehBirth_TeleportSelf(struct Driver *d, u8 spawnFlag, int spawnPosY)
 		}
 		else if ((gGT->gameMode1 & ADVENTURE_ARENA) == 0)
 		{
-			VehBirth_SetStartlinePosition(d, level1, &posBottom);
+#if defined(CTR_NATIVE)
+			int customX;
+			int customY;
+			int customZ;
+			int customRotY;
+			if (NativeObj_CustomTrack_GetSpawn(
+			        &customX, &customY, &customZ, &customRotY))
+			{
+				posBottom.x = (s16)customX;
+				posBottom.y = (s16)customY;
+				posBottom.z = (s16)customZ;
+				d->actionsFlagSet |= ACTION_BEHIND_START_LINE;
+				d->distanceToFinish_checkpoint = 0;
+			}
+			else
+#endif
+			{
+				VehBirth_SetStartlinePosition(d, level1, &posBottom);
+			}
 		}
 		else if (gGT->podiumRewardID == NOFUNC)
 		{
@@ -275,7 +295,33 @@ void VehBirth_TeleportSelf(struct Driver *d, u8 spawnFlag, int spawnPosY)
 	posTop.y = (s16)CTR_MipsSubLo(posBottom.y, VEH_BIRTH_COLL_PROBE_TOP_Y_OFFSET);
 	posTop.z = posBottom.z;
 
-	COLL_SearchBSP_CallbackQUADBLK(&posTop, &posBottom, sps, 0);
+#if defined(CTR_NATIVE)
+	/* Spawn and ground probe must share the same TT activation condition.
+	   Loading/camera-intro bits must not send this kart to Crash Cove BSP. */
+	if (NativeObj_CustomTrack_GetSpawn(NULL, NULL, NULL, NULL))
+	{
+		sps->boolDidTouchQuadblock = 0;
+		sps->boolDidTouchHitbox = 0;
+		sps->Union.QuadBlockColl.hitPos = posBottom;
+		{
+			int customProbeHit = NativeObj_CustomTrack_VerticalProbe(
+			    posBottom.x, posTop.y, posBottom.y, posBottom.z, sps);
+			SDL_Log(
+			    "AssemblyLane spawn: mode1=0x%x active=%d hit=%d requested=(%d,%d,%d) resolved=(%d,%d,%d)",
+			    (unsigned)gGT->gameMode1,
+			    NativeObj_CustomTrack_IsActive(),
+			    customProbeHit,
+			    posBottom.x, posBottom.y, posBottom.z,
+			    sps->Union.QuadBlockColl.hitPos.x,
+			    sps->Union.QuadBlockColl.hitPos.y,
+			    sps->Union.QuadBlockColl.hitPos.z);
+		}
+	}
+	else
+#endif
+	{
+		COLL_SearchBSP_CallbackQUADBLK(&posTop, &posBottom, sps, 0);
+	}
 
 	if (sps->boolDidTouchQuadblock == 0)
 	{
@@ -334,7 +380,20 @@ void VehBirth_TeleportSelf(struct Driver *d, u8 spawnFlag, int spawnPosY)
 		}
 		else if ((gGT->gameMode1 & ADVENTURE_ARENA) == 0)
 		{
-			VehBirth_SetStartlineRotation(d, level1);
+#if defined(CTR_NATIVE)
+			int customRotY;
+			if (NativeObj_CustomTrack_GetSpawn(
+			        NULL, NULL, NULL, &customRotY))
+			{
+				d->rotCurr.x = 0;
+				d->rotCurr.y = (s16)customRotY;
+				d->rotCurr.z = 0;
+			}
+			else
+#endif
+			{
+				VehBirth_SetStartlineRotation(d, level1);
+			}
 		}
 		else if (gGT->podiumRewardID != NOFUNC)
 		{
@@ -660,12 +719,24 @@ void VehBirth_TireSprites(struct Thread *t)
 	{
 		const int characterID = data.characterIDs[driverID];
 		const int fallbackID = CharacterRegistry_GetDriverPackID(characterID);
-		const b32 externalOwnWheels =
+		const b32 skeletalBody =
+			(d->instSelf != NULL) &&
+			NativeGltf_IsModel(d->instSelf->model);
+		const b32 legacyExternalOwnWheels =
 			(d->instSelf != NULL) &&
 			(NativeObj_GetMesh(d->instSelf->model) != NULL) &&
+			!CharacterRegistry_IsModularBody(characterID) &&
 			!CharacterRegistry_HasWheels(characterID);
-		if (externalOwnWheels ||
-			((fallbackID == NITROS_OXIDE) && (gGT->levelID != MAIN_MENU_LEVEL)))
+
+		/*
+		 * Retail Oxide has no tire sprites, but a skeletal PC override may sit
+		 * in a normal modular kart and therefore needs the standard wheel radius
+		 * for external wheel packs / DrawTires positioning.
+		 */
+		if (legacyExternalOwnWheels ||
+			((fallbackID == NITROS_OXIDE) &&
+			 !skeletalBody &&
+			 (gGT->levelID != MAIN_MENU_LEVEL)))
 		{
 			d->wheelSize = 0;
 		}
@@ -720,12 +791,15 @@ void VehBirth_NonGhost(struct Thread *t, int index)
 		id = data.characterIDs[index];
 	}
 
-	struct Model *m = VehBirth_GetModelByName((char *)CharacterRegistry_GetAssetName(id));
-	if (m == NULL)
-	{
-		int fallbackID = CharacterRegistry_GetDriverPackID(id);
-		m = VehBirth_GetModelByName(data.MetaDataCharacters[fallbackID].name_Debug);
-	}
+#if defined(CTR_NATIVE)
+	/* Keep gameplay/bot slots synchronized when they did not pass through
+	   Character Select. Main-menu filler drivers intentionally all preview P1;
+	   do not copy P1's ID back into data.characterIDs[1..3]. */
+	if ((gGT->gameMode1 & MAIN_MENU) == 0)
+		RacerLoadout_SetCharacter(index, id);
+#endif
+
+	struct Model *m = NativeRacerVisual_ResolveModel(id);
 	if (m == NULL)
 		return;
 

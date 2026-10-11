@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <platform/native_obj.h>
+#endif
 
 enum
 {
@@ -329,9 +332,25 @@ void VehStuckProc_MaskGrab_Update(struct Thread *t, struct Driver *d)
 	gGT->cameraDC[d->driverID].flags |= CAMERA_FLAG_DIRECTION_CHANGED;
 
 
-	VehStuckProc_MaskGrab_FindDestPos(d, d->lastValid);
-
-	VehBirth_TeleportSelf(d, 0, VEH_STUCK_RESPAWN_Y_OFFSET);
+#if defined(CTR_NATIVE)
+	if (NativeObj_CustomTrack_GetSpawn(NULL, NULL, NULL, NULL))
+	{
+		/*
+		 * Assembly Lane does not use Crash Cove's restart-point graph.
+		 * Query the custom spawn directly instead of IsActive(): mask-grab can
+		 * transiently change mode bits while still belonging to this TT shell.
+		 */
+		VehBirth_TeleportSelf(
+		    d,
+		    VEH_BIRTH_SPAWN_USE_LEVEL_POSITION,
+		    VEH_STUCK_RESPAWN_Y_OFFSET);
+	}
+	else
+#endif
+	{
+		VehStuckProc_MaskGrab_FindDestPos(d, d->lastValid);
+		VehBirth_TeleportSelf(d, 0, VEH_STUCK_RESPAWN_Y_OFFSET);
+	}
 
 	VehStuckProc_RevEngine_Init(t, d);
 }
@@ -576,7 +595,7 @@ void VehStuckProc_MaskGrab_Init(struct Thread *t, struct Driver *d)
 
 	d->turbo_MeterRoomLeft = 0;
 	d->turbo_outsideTimer = 0;
-	d->reserves = 0;
+	NativeReserves_Set(d, 0);
 
 	d->NoInputTimer = VEH_STUCK_MASK_GRAB_INITIAL_TIMER;
 
@@ -788,7 +807,7 @@ void VehStuckProc_PlantEaten_Init(struct Thread *t, struct Driver *d)
 
 	d->turbo_MeterRoomLeft = 0;
 	d->turbo_outsideTimer = 0;
-	d->reserves = 0;
+	NativeReserves_Set(d, 0);
 
 	// drop bits for airborne and high-jump state
 	d->actionsFlagSet &= ~(ACTION_AIRBORNE | ACTION_HIGH_JUMP);

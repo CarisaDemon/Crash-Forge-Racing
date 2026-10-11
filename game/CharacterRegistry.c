@@ -1,6 +1,7 @@
-﻿#include <common.h>
+#include <common.h>
 #include <CharacterRegistry.h>
 #include <platform/native_assets.h>
+#include <platform/native_mod_packages.h>
 
 #if defined(CTR_NATIVE)
 #include <SDL3/SDL.h>
@@ -82,6 +83,49 @@ static int Registry_ParseEngine(const char *value, int fallback)
     return fallback;
 }
 
+static int Registry_ParseModelFormat(const char *value, int fallback)
+{
+    if (!value || !*value) return fallback;
+    if (!SDL_strcasecmp(value, "auto")) return CHARACTER_MODEL_AUTO;
+    if (!SDL_strcasecmp(value, "obj")) return CHARACTER_MODEL_OBJ;
+    if (!SDL_strcasecmp(value, "glb") || !SDL_strcasecmp(value, "gltf")) return CHARACTER_MODEL_GLB;
+    return fallback;
+}
+
+static int Registry_IsSafeAssetLeaf(const char *value)
+{
+    size_t length;
+
+    if (value == NULL || !*value)
+        return 0;
+
+    length = strlen(value);
+    if (length >= sizeof(((struct CharacterDef *)0)->modelFile))
+        return 0;
+
+    if (!strcmp(value, ".") || !strcmp(value, ".."))
+        return 0;
+
+    for (const unsigned char *p = (const unsigned char *)value; *p; ++p)
+        if (!isalnum(*p) && *p != '_' && *p != '-' && *p != '.')
+            return 0;
+
+    return 1;
+}
+
+static int Registry_IsSafeSlug(const char *value)
+{
+    if (value == NULL || !*value ||
+        strlen(value) >= sizeof(((struct CharacterDef *)0)->kartSlug))
+        return 0;
+
+    for (const unsigned char *p = (const unsigned char *)value; *p; ++p)
+        if (!isalnum(*p) && *p != '_' && *p != '-')
+            return 0;
+
+    return 1;
+}
+
 static void Registry_AddRetail(void)
 {
     for (int i = 0; i < 16; i++)
@@ -96,6 +140,11 @@ static void Registry_AddRetail(void)
         snprintf(c->displayName, sizeof(c->displayName), "%s", s_retailNames[i]);
         c->iconReuseCharacterID = i;
         c->engineClass = data.MetaDataCharacters[i].engineID;
+        c->modelScale = 1.0f;
+        c->modelFormat = CHARACTER_MODEL_AUTO;
+        c->idleMinDelay = 4.0f;
+        c->idleMaxDelay = 10.0f;
+        c->animationCrossfade = 0.20f;
         c->flags = CHARACTER_REGISTRY_FLAG_RETAIL;
         if (i != NITROS_OXIDE)
             c->flags |= CHARACTER_REGISTRY_FLAG_HAS_WHEELS;
@@ -132,6 +181,10 @@ static void Registry_LoadOneMod(const char *folderName)
     temp.modelOffset[0] = 0.0f;
     temp.modelOffset[1] = 0.0f;
     temp.modelOffset[2] = 0.0f;
+    temp.idleMinDelay = 4.0f;
+    temp.idleMaxDelay = 10.0f;
+    temp.animationCrossfade = 0.20f;
+    temp.modelFormat = CHARACTER_MODEL_AUTO;
     temp.engineClass = BALANCED;
     temp.flags = CHARACTER_REGISTRY_FLAG_HAS_WHEELS;
     snprintf(temp.slug, sizeof(temp.slug), "%s", folderName);
@@ -140,6 +193,8 @@ static void Registry_LoadOneMod(const char *folderName)
 
     int enabled = 1;
     int valid = 1;
+    u8 refMinComponents = 0;
+    u8 refExtentComponents = 0;
     char section[64] = "";
     char line[1024];
 
@@ -168,22 +223,119 @@ static void Registry_LoadOneMod(const char *folderName)
             else if (!SDL_strcasecmp(key, "enabled")) enabled = Registry_ParseBool(value, enabled);
             else if (!SDL_strcasecmp(key, "fallback_retail")) temp.fallbackRetailID = (s16)Registry_ParseRetailID(value, temp.fallbackRetailID);
             else if (!SDL_strcasecmp(key, "engine")) temp.engineClass = (u8)Registry_ParseEngine(value, temp.engineClass);
+            else if (!SDL_strcasecmp(key, "kart"))
+            {
+                if (Registry_IsSafeSlug(value))
+                {
+                    snprintf(temp.kartSlug, sizeof(temp.kartSlug), "%s", value);
+                    /* A fixed/default kart implies that the racer body is
+                       intended to be rendered separately from its vehicle. */
+                    temp.flags |= CHARACTER_REGISTRY_FLAG_MODULAR_BODY;
+                }
+                else
+                {
+                    SDL_Log("CharacterRegistry: invalid kart slug for %s; skipping mod", folderName);
+                    valid = 0;
+                }
+            }
             else if (!SDL_strcasecmp(key, "has_wheels"))
             {
                 if (Registry_ParseBool(value, 1)) temp.flags |= CHARACTER_REGISTRY_FLAG_HAS_WHEELS;
                 else temp.flags &= (u8)~CHARACTER_REGISTRY_FLAG_HAS_WHEELS;
             }
+            else if (!SDL_strcasecmp(key, "modular_body") ||
+                     !SDL_strcasecmp(key, "separate_vehicle"))
+            {
+                if (Registry_ParseBool(value, 0))
+                    temp.flags |= CHARACTER_REGISTRY_FLAG_MODULAR_BODY;
+                else
+                    temp.flags &= (u8)~CHARACTER_REGISTRY_FLAG_MODULAR_BODY;
+            }
         }
         else if (!SDL_strcasecmp(section, "model"))
+        {
+            if (!SDL_strcasecmp(key, "format"))
+            {
+                temp.modelFormat =
+                    (u8)Registry_ParseModelFormat(value, temp.modelFormat);
+
+                /* Skeletal GLB racers are body presentation assets in the
+                   native modular pipeline, so they require a separate kart. */
+                if (temp.modelFormat == CHARACTER_MODEL_GLB)
+                    temp.flags |= CHARACTER_REGISTRY_FLAG_MODULAR_BODY;
+            }
+            else if (!SDL_strcasecmp(key, "file") ||
+                     !SDL_strcasecmp(key, "model") ||
+                     !SDL_strcasecmp(key, "model_file"))
+            {
+                if (!Registry_IsSafeAssetLeaf(value))
+                {
+                    SDL_Log("CharacterRegistry: invalid model file for %s; skipping mod", folderName);
+                    valid = 0;
+                }
+                else
+                {
+                    snprintf(temp.modelFile, sizeof(temp.modelFile), "%s", value);
+                }
+            }
+            else
+            {
+                float parsed = 0.0f;
+                if (sscanf(value, "%f", &parsed) == 1 && isfinite(parsed))
+                {
+                    if (!SDL_strcasecmp(key, "scale") && parsed > 0.001f && parsed < 100.0f)
+                        temp.modelScale = parsed;
+                    else if (!SDL_strcasecmp(key, "offset_x")) temp.modelOffset[0] = parsed;
+                    else if (!SDL_strcasecmp(key, "offset_y")) temp.modelOffset[1] = parsed;
+                    else if (!SDL_strcasecmp(key, "offset_z")) temp.modelOffset[2] = parsed;
+                    else if (!SDL_strcasecmp(key, "reference_min_x"))
+                    {
+                        temp.referenceMin[0] = parsed;
+                        refMinComponents |= 1;
+                    }
+                    else if (!SDL_strcasecmp(key, "reference_min_y"))
+                    {
+                        temp.referenceMin[1] = parsed;
+                        refMinComponents |= 2;
+                    }
+                    else if (!SDL_strcasecmp(key, "reference_min_z"))
+                    {
+                        temp.referenceMin[2] = parsed;
+                        refMinComponents |= 4;
+                    }
+                    else if (!SDL_strcasecmp(key, "reference_extent_x") && parsed > 0.001f)
+                    {
+                        temp.referenceExtent[0] = parsed;
+                        refExtentComponents |= 1;
+                    }
+                    else if (!SDL_strcasecmp(key, "reference_extent_y") && parsed > 0.001f)
+                    {
+                        temp.referenceExtent[1] = parsed;
+                        refExtentComponents |= 2;
+                    }
+                    else if (!SDL_strcasecmp(key, "reference_extent_z") && parsed > 0.001f)
+                    {
+                        temp.referenceExtent[2] = parsed;
+                        refExtentComponents |= 4;
+                    }
+                }
+            }
+        }
+        else if (!SDL_strcasecmp(section, "animation"))
         {
             float parsed = 0.0f;
             if (sscanf(value, "%f", &parsed) == 1 && isfinite(parsed))
             {
-                if (!SDL_strcasecmp(key, "scale") && parsed > 0.001f && parsed < 100.0f)
-                    temp.modelScale = parsed;
-                else if (!SDL_strcasecmp(key, "offset_x")) temp.modelOffset[0] = parsed;
-                else if (!SDL_strcasecmp(key, "offset_y")) temp.modelOffset[1] = parsed;
-                else if (!SDL_strcasecmp(key, "offset_z")) temp.modelOffset[2] = parsed;
+                if (!SDL_strcasecmp(key, "idle_min_delay") &&
+                    parsed >= 0.0f && parsed <= 120.0f)
+                    temp.idleMinDelay = parsed;
+                else if (!SDL_strcasecmp(key, "idle_max_delay") &&
+                         parsed >= 0.0f && parsed <= 120.0f)
+                    temp.idleMaxDelay = parsed;
+                else if ((!SDL_strcasecmp(key, "crossfade") ||
+                          !SDL_strcasecmp(key, "animation_crossfade")) &&
+                         parsed >= 0.0f && parsed <= 5.0f)
+                    temp.animationCrossfade = parsed;
             }
         }
         else if (!SDL_strcasecmp(section, "assets"))
@@ -200,6 +352,19 @@ static void Registry_LoadOneMod(const char *folderName)
                     snprintf(temp.assetName, sizeof(temp.assetName), "%s", value);
                 }
             }
+            else if (!SDL_strcasecmp(key, "model") ||
+                     !SDL_strcasecmp(key, "model_file"))
+            {
+                if (!Registry_IsSafeAssetLeaf(value))
+                {
+                    SDL_Log("CharacterRegistry: invalid model file for %s; skipping mod", folderName);
+                    valid = 0;
+                }
+                else
+                {
+                    snprintf(temp.modelFile, sizeof(temp.modelFile), "%s", value);
+                }
+            }
             else if (!SDL_strcasecmp(key, "icon"))
             {
                 if (!SDL_strncasecmp(value, "retail:", 7))
@@ -214,10 +379,71 @@ static void Registry_LoadOneMod(const char *folderName)
     }
     fclose(f);
 
+    temp.hasReferenceBounds =
+        (refMinComponents == 7 && refExtentComponents == 7);
+
+    if (temp.idleMaxDelay < temp.idleMinDelay)
+    {
+        float swap = temp.idleMinDelay;
+        temp.idleMinDelay = temp.idleMaxDelay;
+        temp.idleMaxDelay = swap;
+    }
+
     if (!enabled || !valid) return;
 
+    /*
+     * A folder matching one of the 16 retail slugs is a visual override for
+     * that existing identity, not a seventeenth duplicate character. This is
+     * the PC/skeletal path for assets such as mods/racers/crash/character.glb.
+     * Keep retail gameplay identity/engine/fallback data, but merge presentation
+     * settings that are safe to change outside Adventure.
+     */
     for (int i = 0; i < s_registryCount; i++)
-        if (!SDL_strcasecmp(s_registry[i].slug, temp.slug)) return;
+    {
+        if (SDL_strcasecmp(s_registry[i].slug, temp.slug) != 0)
+            continue;
+
+        if ((s_registry[i].flags & CHARACTER_REGISTRY_FLAG_RETAIL) != 0)
+        {
+            struct CharacterDef *retail = &s_registry[i];
+
+            retail->modelFormat = temp.modelFormat;
+            retail->modelScale = temp.modelScale;
+            retail->modelOffset[0] = temp.modelOffset[0];
+            retail->modelOffset[1] = temp.modelOffset[1];
+            retail->modelOffset[2] = temp.modelOffset[2];
+            retail->idleMinDelay = temp.idleMinDelay;
+            retail->idleMaxDelay = temp.idleMaxDelay;
+            retail->animationCrossfade = temp.animationCrossfade;
+
+            if (temp.modelFile[0])
+                snprintf(retail->modelFile, sizeof(retail->modelFile), "%s", temp.modelFile);
+
+            if (temp.kartSlug[0])
+            {
+                snprintf(retail->kartSlug, sizeof(retail->kartSlug), "%s", temp.kartSlug);
+                retail->flags |= CHARACTER_REGISTRY_FLAG_MODULAR_BODY;
+            }
+            else if ((temp.flags & CHARACTER_REGISTRY_FLAG_MODULAR_BODY) != 0)
+            {
+                retail->flags |= CHARACTER_REGISTRY_FLAG_MODULAR_BODY;
+            }
+
+            if (temp.hasReferenceBounds)
+            {
+                memcpy(retail->referenceMin, temp.referenceMin, sizeof(retail->referenceMin));
+                memcpy(retail->referenceExtent, temp.referenceExtent, sizeof(retail->referenceExtent));
+                retail->hasReferenceBounds = 1;
+            }
+
+            SDL_Log("CharacterRegistry: retail visual override slug=%s format=%d model=%s",
+                    retail->slug,
+                    retail->modelFormat,
+                    retail->modelFile[0] ? retail->modelFile : "character.glb");
+        }
+
+        return;
+    }
 
     if (!Registry_Reserve(s_registryCount + 1)) return;
     temp.id = (s16)s_registryCount;
@@ -235,18 +461,38 @@ static int Registry_CompareMods(const void *a, const void *b)
 static void Registry_DiscoverMods(void)
 {
     char modsDir[1024];
-    if (!NativeAssets_BuildPath("mods/racers", modsDir, sizeof(modsDir))) return;
-    if (!Registry_IsDirectory(modsDir)) return;
-
-    DIR *dir = opendir(modsDir);
-    if (!dir) return;
+    DIR *dir;
     struct dirent *entry;
+    if (NativeAssets_BuildPath("mods/racers", modsDir, sizeof(modsDir)) &&
+        Registry_IsDirectory(modsDir) &&
+        (dir = opendir(modsDir)) != NULL)
+    {
+        while ((entry = readdir(dir)) != NULL)
+        {
+            if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+            char child[1200];
+            snprintf(child, sizeof(child), "%s/%s", modsDir, entry->d_name);
+            if (Registry_IsDirectory(child)) Registry_LoadOneMod(entry->d_name);
+        }
+        closedir(dir);
+    }
+
+    /* New SM64CoopDX-style packages: assets/mods/<web-id>/character.ini
+       [forge_mod] identifies the package type before native parsing.
+       Existing mods/racers/<slug> paths remain fully supported. */
+    if (!NativeAssets_BuildPath("mods", modsDir, sizeof(modsDir)) ||
+        !Registry_IsDirectory(modsDir))
+        return;
+    dir = opendir(modsDir);
+    if (!dir) return;
     while ((entry = readdir(dir)) != NULL)
     {
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         char child[1200];
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         snprintf(child, sizeof(child), "%s/%s", modsDir, entry->d_name);
-        if (Registry_IsDirectory(child)) Registry_LoadOneMod(entry->d_name);
+        if (Registry_IsDirectory(child) &&
+            NativeModPackage_IsValid(entry->d_name, "Character"))
+            Registry_LoadOneMod(entry->d_name);
     }
     closedir(dir);
 }
@@ -312,6 +558,12 @@ const char *CharacterRegistry_GetAssetName(int characterID)
     return c ? c->assetName : "crash";
 }
 
+const char *CharacterRegistry_GetKartSlug(int characterID)
+{
+    const struct CharacterDef *c = CharacterRegistry_GetByID(characterID);
+    return (c && c->kartSlug[0]) ? c->kartSlug : NULL;
+}
+
 const char *CharacterRegistry_GetDisplayName(int characterID)
 {
     const struct CharacterDef *c = CharacterRegistry_GetByID(characterID);
@@ -344,6 +596,14 @@ b32 CharacterRegistry_HasWheels(int characterID)
     return c ? ((c->flags & CHARACTER_REGISTRY_FLAG_HAS_WHEELS) != 0) : true;
 }
 
+b32 CharacterRegistry_IsModularBody(int characterID)
+{
+    const struct CharacterDef *c = CharacterRegistry_GetByID(characterID);
+    return c ?
+        ((c->flags & CHARACTER_REGISTRY_FLAG_MODULAR_BODY) != 0) :
+        false;
+}
+
 int CharacterRegistry_GetIconReuseCharacterID(int characterID)
 {
     const struct CharacterDef *c = CharacterRegistry_GetByID(characterID);
@@ -368,4 +628,34 @@ const char *CharacterRegistry_GetIconPath(int characterID)
 {
     const struct CharacterDef *c = CharacterRegistry_GetByID(characterID);
     return (c && c->iconPath[0]) ? c->iconPath : NULL;
+}
+
+const char *CharacterRegistry_GetModelFile(int characterID)
+{
+    const struct CharacterDef *c = CharacterRegistry_GetByID(characterID);
+    return (c && c->modelFile[0]) ? c->modelFile : NULL;
+}
+
+int CharacterRegistry_GetModelFormat(int characterID)
+{
+    const struct CharacterDef *c = CharacterRegistry_GetByID(characterID);
+    return c ? c->modelFormat : CHARACTER_MODEL_AUTO;
+}
+
+float CharacterRegistry_GetIdleMinDelay(int characterID)
+{
+    const struct CharacterDef *c = CharacterRegistry_GetByID(characterID);
+    return c ? c->idleMinDelay : 4.0f;
+}
+
+float CharacterRegistry_GetIdleMaxDelay(int characterID)
+{
+    const struct CharacterDef *c = CharacterRegistry_GetByID(characterID);
+    return c ? c->idleMaxDelay : 10.0f;
+}
+
+float CharacterRegistry_GetAnimationCrossfade(int characterID)
+{
+    const struct CharacterDef *c = CharacterRegistry_GetByID(characterID);
+    return c ? c->animationCrossfade : 0.20f;
 }

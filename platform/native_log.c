@@ -25,8 +25,10 @@ internal void Platform_LogWrite(FILE *consoleStream, const char *text)
 
 	if (s_logStream != NULL)
 	{
+		// Keep normal diagnostics buffered. Flushing every log write turns
+		// harmless debug output into synchronous disk I/O in the render loop,
+		// which becomes much more visible while OBS is recording.
 		fputs(text, s_logStream);
-		fflush(s_logStream);
 	}
 }
 
@@ -95,6 +97,12 @@ void Platform_LogInit(const char *appName)
 	{
 		fprintf(stderr, "[CTR Native] Error: cannot create log file '%s'\n", s_logPath);
 	}
+	else
+	{
+		// Use a larger full buffer so regular diagnostics do not force tiny
+		// writes to storage while the game is rendering.
+		setvbuf(s_logStream, NULL, _IOFBF, 64 * 1024);
+	}
 }
 
 void Platform_LogShutdown(void)
@@ -133,6 +141,7 @@ void Platform_LogWarn(const char *fmt, ...)
 	va_start(args, fmt);
 	Platform_LogV(stdout, fmt, args);
 	va_end(args);
+	Platform_LogFlush();
 }
 
 void Platform_LogError(const char *fmt, ...)
@@ -142,4 +151,5 @@ void Platform_LogError(const char *fmt, ...)
 	va_start(args, fmt);
 	Platform_LogV(stderr, fmt, args);
 	va_end(args);
+	Platform_LogFlush();
 }

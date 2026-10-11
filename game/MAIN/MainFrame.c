@@ -1,6 +1,8 @@
 #include <common.h>
 #if defined(CTR_NATIVE)
+#include <NativeHangout.h>
 #include <platform/native_obj.h>
+#include <platform/native_perf.h>
 #endif
 
 #if defined(CTR_NATIVE)
@@ -167,6 +169,7 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 	struct Thread *psVar12;
 #if defined(CTR_NATIVE)
 	static u32 s_fixedStepTappedLatch[4];
+	NativeObj_CustomTrack_Update(gGT);
 	int fixedStepRace = NativeWorld_Prepare(gGT);
 	int fixedStepHubDriver = Platform_GetHighRefreshMode() &&
 		((gGT->gameMode1 & ADVENTURE_ARENA) != 0) &&
@@ -588,6 +591,35 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 
 	if ((uVar3 & END_OF_RACE) == 0)
 	{
+#if defined(CTR_NATIVE)
+		if (NativeHangout_IsMenuOpen())
+		{
+			/* Live Hangout pause overlay: world/audio are still running, so use
+			 * only this small guard to avoid the same START tap opening and
+			 * instantly closing the menu. Menu rows themselves remain usable. */
+			if (gGT->cooldownfromPauseUntilUnpause != 0)
+			{
+				if (legacyTicks > 0)
+				{
+					int value = gGT->cooldownfromPauseUntilUnpause - legacyTicks;
+					gGT->cooldownfromPauseUntilUnpause = (value > 0) ? value : 0;
+				}
+			}
+			else if ((sdata->ptrActiveMenu != NULL) &&
+			         (sdata->ptrActiveMenu != &data.menuRacingWheelConfig) &&
+			         (sdata->ptrActiveMenu != &D232.menuHintMenu) &&
+			         ((sdata->AnyPlayerTap & BTN_START) != 0))
+			{
+				RECTMENU_ClearInput();
+				OtherFX_Play(1, 1);
+				MainFreeze_SafeAdvDestroy();
+				RECTMENU_Hide(sdata->ptrActiveMenu);
+				NativeHangout_SetMenuOpen(0);
+				gGT->cooldownFromUnpauseUntilPause = 5;
+			}
+		}
+		else
+#endif
 		if (wasPausedAtFrameStart || ((uVar3 & PAUSE_ALL) != 0))
 		{
 			if (gGT->cooldownfromPauseUntilUnpause == 0)
@@ -644,11 +676,22 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 								    (gGT->overlayIndex_Threads != OVERLAY_INDEX_NONE))
 								{
 									// NOTE(aalhendi): Retail writes this before freezing the game for pause.
-									gGT->gameModeEnd = (gGT->gameMode1 & GAME_MODE_END_RETAINED_MODE_MASK) | PAUSE_1;
+#if defined(CTR_NATIVE)
+									if (NativeHangout_IsActive())
+										gGT->gameModeEnd = gGT->gameMode1 & GAME_MODE_END_RETAINED_MODE_MASK;
+									else
+#endif
+										gGT->gameModeEnd = (gGT->gameMode1 & GAME_MODE_END_RETAINED_MODE_MASK) | PAUSE_1;
 
 									MainFreeze_IfPressStart();
 
+#if defined(CTR_NATIVE)
+									/* Hangout keeps the menu live, but still needs the retail-sized
+									 * START debounce so the opening tap cannot close it next frame. */
 									gGT->cooldownfromPauseUntilUnpause = 5;
+#else
+									gGT->cooldownfromPauseUntilUnpause = 5;
+#endif
 								}
 							}
 						}
@@ -843,13 +886,48 @@ static int MainFrame_VisMemHasQuad(const int *visFaceList, const struct QuadBloc
 	return (visFaceList[quadIndex >> 5] & (1 << (quadIndex & 0x1f))) != 0;
 }
 
+#if defined(CTR_NATIVE)
+static struct Driver *MainFrame_VisMemDriverForCamera(
+	struct GameTracker *gGT,
+	int playerIndex)
+{
+#if defined(CTR_INTERNAL)
+	/* TEST's spectator camera follows arbitrary bots. If the camera quad
+	 * search has no PVS for this frame, fall back to the actually observed
+	 * driver instead of Player 1. This affects visibility ownership only. */
+	if ((playerIndex == 0) &&
+	    NativePerf_IsStressTestMeasuring())
+	{
+		struct Driver *spectator = gGT->cameraDC[0].driverToFollow;
+		if ((spectator != NULL) &&
+		    (spectator->instSelf != NULL))
+		{
+			return spectator;
+		}
+	}
+#endif
+	return gGT->drivers[playerIndex];
+}
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80035684-0x800357b8, unnamed in syms926.
 static void MainFrame_VisMemAddDriverPVS(struct GameTracker *gGT, int playerIndex)
 {
+#if defined(CTR_NATIVE)
+	struct Driver *driver = MainFrame_VisMemDriverForCamera(gGT, playerIndex);
+#else
 	struct Driver *driver = gGT->drivers[playerIndex];
+#endif
 	struct mesh_info *mesh = gGT->level1->ptr_mesh_info;
-	struct QuadBlock *quad = driver->underDriver;
+	struct QuadBlock *quad;
 	struct PVS *pvs;
+
+	if (driver == NULL)
+	{
+		return;
+	}
+
+	quad = driver->underDriver;
 
 	if (quad == NULL)
 	{
@@ -901,8 +979,13 @@ void MainFrame_VisMemFullFrame(struct GameTracker *gGT, struct Level *level)
 	for (playerIndex = 0; playerIndex < gGT->numPlyrCurrGame; playerIndex++)
 	{
 		struct CameraDC *camDC = &gGT->cameraDC[playerIndex];
+#if defined(CTR_NATIVE)
+		struct Driver *driver = MainFrame_VisMemDriverForCamera(gGT, playerIndex);
+#else
 		struct Driver *driver = gGT->drivers[playerIndex];
-		struct QuadBlock *driverQuad = driver->underDriver;
+#endif
+		struct QuadBlock *driverQuad =
+			(driver != NULL) ? driver->underDriver : NULL;
 		struct PVS *driverPVS = NULL;
 
 		if (driverQuad != NULL)
@@ -912,6 +995,47 @@ void MainFrame_VisMemFullFrame(struct GameTracker *gGT, struct Level *level)
 
 		camDC->flags &= ~0x4000;
 
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+		/* Stress spectator can sit on a PVS boundary while following a bot.
+		   Rebuild the packed lists every frame from the camera PVS, then OR
+		   the followed driver's PVS. This is conservative without accumulating
+		   stale visibility from previously followed bots. */
+		const int stressSpectatorPVS =
+			(playerIndex == 0) && NativePerf_IsStressTestMeasuring();
+
+		if (stressSpectatorPVS)
+		{
+			camDC->flags &= ~0x2000;
+
+			if (camDC->visLeafSrc != NULL)
+			{
+				visMem->visLeafSrc[playerIndex] = camDC->visLeafSrc;
+				MainFrame_ReplacePackedVisList(
+					visMem->visLeafList[playerIndex],
+					camDC->visLeafSrc,
+					((mesh->numBspNodes + 0x1f) >> 5) << 2);
+			}
+			else if ((driverPVS != NULL) && (driverPVS->visLeafSrc != NULL))
+			{
+				visMem->visLeafSrc[playerIndex] = driverPVS->visLeafSrc;
+				MainFrame_ReplacePackedVisList(
+					visMem->visLeafList[playerIndex],
+					driverPVS->visLeafSrc,
+					((mesh->numBspNodes + 0x1f) >> 5) << 2);
+			}
+
+			if ((driverPVS != NULL) &&
+			    (driverPVS->visLeafSrc != NULL) &&
+			    (driverPVS->visLeafSrc != camDC->visLeafSrc))
+			{
+				MainFrame_OrPackedVisList(
+					visMem->visLeafList[playerIndex],
+					driverPVS->visLeafSrc,
+					((mesh->numBspNodes + 0x1f) >> 5) << 2);
+			}
+		}
+		else
+#endif
 		if (camDC->visLeafSrc == NULL)
 		{
 			if ((driverPVS != NULL) && (driverPVS->visLeafSrc != NULL))
@@ -926,6 +1050,38 @@ void MainFrame_VisMemFullFrame(struct GameTracker *gGT, struct Level *level)
 			MainFrame_ReplacePackedVisList(visMem->visLeafList[playerIndex], camDC->visLeafSrc, ((mesh->numBspNodes + 0x1f) >> 5) << 2);
 		}
 
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+		if (stressSpectatorPVS)
+		{
+			if (camDC->visFaceSrc != NULL)
+			{
+				visMem->visFaceSrc[playerIndex] = camDC->visFaceSrc;
+				MainFrame_ReplacePackedVisList(
+					visMem->visFaceList[playerIndex],
+					camDC->visFaceSrc,
+					((mesh->numQuadBlock + 0x1f) >> 5) << 2);
+			}
+			else if ((driverPVS != NULL) && (driverPVS->visFaceSrc != NULL))
+			{
+				visMem->visFaceSrc[playerIndex] = driverPVS->visFaceSrc;
+				MainFrame_ReplacePackedVisList(
+					visMem->visFaceList[playerIndex],
+					driverPVS->visFaceSrc,
+					((mesh->numQuadBlock + 0x1f) >> 5) << 2);
+			}
+
+			if ((driverPVS != NULL) &&
+			    (driverPVS->visFaceSrc != NULL) &&
+			    (driverPVS->visFaceSrc != camDC->visFaceSrc))
+			{
+				MainFrame_OrPackedVisList(
+					visMem->visFaceList[playerIndex],
+					driverPVS->visFaceSrc,
+					((mesh->numQuadBlock + 0x1f) >> 5) << 2);
+			}
+		}
+		else
+#endif
 		if (camDC->visFaceSrc == NULL)
 		{
 			if ((driverPVS != NULL) && (driverPVS->visFaceSrc != NULL))
@@ -1006,6 +1162,7 @@ void MainFrame_VisMemFullFrame(struct GameTracker *gGT, struct Level *level)
 				memcpy(visMem->visSCVertList[playerIndex], level->visSCVertSrc, ((level->numSCVert + 0x1f) >> 5) << 2);
 			}
 		}
+
 	}
 }
 
@@ -1032,6 +1189,19 @@ void MainFrame_VisMemFullFrame(struct GameTracker *gGT, struct Level *level)
 void MainFrame_RequestMaskHint(s16 hintId, s16 interruptWarpPad)
 {
 	struct GameTracker *gGT = sdata->gGT;
+
+#if defined(CTR_NATIVE)
+	if (NativeHangout_IsActive())
+	{
+		/* Hangout is a social sandbox: Adventure tutorial masks must never
+		 * freeze the kart, move the camera, play XA hints or alter progress. */
+		sdata->AkuHint_RequestedHint = -1;
+		sdata->AkuHint_boolInterruptWarppad = 0;
+		sdata->AkuAkuHintState = 0;
+		sdata->boolDraw3D_AdvMask = 0;
+		return;
+	}
+#endif
 
 	if (((gGT->gameMode1 & PAUSE_ALL) == 0) && (sdata->AkuHint_RequestedHint == -1))
 	{

@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <platform/native_custom_tracks.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8003aee8-0x8003af84.
 void MainGameStart_Initialize(struct GameTracker *gGT, b32 boolStopAudio)
@@ -29,6 +32,32 @@ void MainGameStart_Initialize(struct GameTracker *gGT, b32 boolStopAudio)
 		// no fly-in camera
 		gameModeFlag = gGT->gameMode1 & ~(START_OF_RACE);
 	}
+
+#if defined(CTR_NATIVE)
+	/*
+	 * Community LEV/VRM packs may omit retail fly-in camera paths.
+	 * The same tested practice fast-start timer below starts normal
+	 * gameplay without ever entering the missing camera animation.
+	 * Keep this limited to an explicitly selected custom track.
+	 */
+	if (NativeCustomTracks_IsSelected())
+	{
+		gGT->trafficLightsTimer = (s32)0xfffffc40;
+		gameModeFlag &= ~(START_OF_RACE);
+		gGT->hudFlags |= HUD_FLAG_RACE_HUD | HUD_FLAG_RENDER_LESS;
+		Platform_Log("[CustomTracks] Fast start: skipping optional fly-in and traffic lights\n");
+	}
+#endif
+
+#if defined(CTR_PRACTICE_FASTSTART)
+	/*
+	 * Special practice fast-start: keep normal gameplay/HUD, but begin the
+	 * loaded track already in racing state. No fly-in camera, title bars or
+	 * traffic-light countdown.
+	 */
+	gGT->trafficLightsTimer = (s32)0xfffffc40;
+	gameModeFlag &= ~(START_OF_RACE);
+#endif
 
 	// save new game mode
 #ifdef CTR_NATIVE

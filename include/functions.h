@@ -682,6 +682,9 @@ void UI_DrawNumTrophy(s16 posX, s16 posY);
 void UI_DrawNumCrystal(s16 posX, s16 posY, struct Driver *d);
 void UI_DrawNumTimebox(s16 posX, s16 posY, struct Driver *d);
 void UI_DrawSpeedBG(void);
+#if defined(CTR_NATIVE)
+void UI_DrawSpeedBGOffsetY(int offsetY);
+#endif
 void UI_DrawSpeedNeedle(s16 posX, s16 posY, struct Driver *driver);
 void UI_JumpMeter_Draw(s16 posX, s16 posY, struct Driver *driver);
 void UI_JumpMeter_Update(struct Driver *d);

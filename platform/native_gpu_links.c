@@ -20,6 +20,12 @@ global_variable struct NativeGpuLinkRange s_nativeGpuLinkRanges[NATIVE_GPU_LINK_
 global_variable int s_nativeGpuLinkRangeCount;
 global_variable uint32_t s_nativeGpuLinkNextToken = NATIVE_GPU_LINK_FIRST_DYNAMIC_TOKEN;
 
+/* OT construction/parsing repeatedly touches pointers in the same primMem/OT
+ * range. Cache the last successful range so the common path avoids scanning
+ * the full registered-range table for every link. */
+global_variable const struct NativeGpuLinkRange *s_nativeGpuLinkLastHostRange;
+global_variable const struct NativeGpuLinkRange *s_nativeGpuLinkLastTokenRange;
+
 static int NativeGpuLinks_AlignTokenSize(size_t size, uint32_t *tokenSizeOut)
 {
 	size_t alignedSize;
@@ -43,6 +49,8 @@ void NativeGpuLinks_Reset(void)
 {
 	s_nativeGpuLinkRangeCount = 0;
 	s_nativeGpuLinkNextToken = NATIVE_GPU_LINK_FIRST_DYNAMIC_TOKEN;
+	s_nativeGpuLinkLastHostRange = NULL;
+	s_nativeGpuLinkLastTokenRange = NULL;
 }
 
 int NativeGpuLinks_IsTerminator(uint32_t token)
@@ -86,6 +94,11 @@ int NativeGpuLinks_RegisterRange(const void *hostStart, size_t size, uint32_t *t
 	range->tokenStart = s_nativeGpuLinkNextToken;
 	range->tokenEnd = s_nativeGpuLinkNextToken + tokenSize;
 
+	/* Registration is rare; invalidate caches so overlapping/adjacent new
+	 * ranges can never reuse a stale fast-path decision. */
+	s_nativeGpuLinkLastHostRange = NULL;
+	s_nativeGpuLinkLastTokenRange = NULL;
+
 	if (tokenStartOut != NULL)
 	{
 		*tokenStartOut = range->tokenStart;
@@ -107,11 +120,21 @@ void NativeGpuLinks_RegisterRangeChecked(const char *label, const void *hostStar
 
 static const struct NativeGpuLinkRange *NativeGpuLinks_FindHostRange(uintptr_t hostPtr)
 {
+	const struct NativeGpuLinkRange *cached = s_nativeGpuLinkLastHostRange;
+
+	if (cached != NULL &&
+		hostPtr >= cached->hostStart &&
+		hostPtr < cached->hostEnd)
+	{
+		return cached;
+	}
+
 	for (int i = 0; i < s_nativeGpuLinkRangeCount; i++)
 	{
 		const struct NativeGpuLinkRange *range = &s_nativeGpuLinkRanges[i];
 		if ((hostPtr >= range->hostStart) && (hostPtr < range->hostEnd))
 		{
+			s_nativeGpuLinkLastHostRange = range;
 			return range;
 		}
 	}
@@ -121,13 +144,24 @@ static const struct NativeGpuLinkRange *NativeGpuLinks_FindHostRange(uintptr_t h
 
 static const struct NativeGpuLinkRange *NativeGpuLinks_FindTokenRange(uint32_t token)
 {
+	const struct NativeGpuLinkRange *cached;
+
 	token &= 0x00ffffffu;
+	cached = s_nativeGpuLinkLastTokenRange;
+
+	if (cached != NULL &&
+		token >= cached->tokenStart &&
+		token < cached->tokenEnd)
+	{
+		return cached;
+	}
 
 	for (int i = 0; i < s_nativeGpuLinkRangeCount; i++)
 	{
 		const struct NativeGpuLinkRange *range = &s_nativeGpuLinkRanges[i];
 		if ((token >= range->tokenStart) && (token < range->tokenEnd))
 		{
+			s_nativeGpuLinkLastTokenRange = range;
 			return range;
 		}
 	}

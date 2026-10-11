@@ -1,4 +1,9 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <RacerLoadout.h>
+#include <VehiclePartRegistry.h>
+#include <math.h>
+#endif
 
 enum
 {
@@ -16,6 +21,7 @@ enum
 	VEH_EMITTER_EXHAUST_POS_Z_SHIFT = 4,
 	VEH_EMITTER_EXHAUST_POS_SECOND_X_NUM = -0x12,
 	VEH_EMITTER_EXHAUST_POS_SECOND_X_SHIFT = 4,
+	VEH_EMITTER_EXHAUST_LOCAL_TO_PARTICLE = 0x40,
 	VEH_EMITTER_TURBO_METER_COLOR_MIN = 129,
 	VEH_EMITTER_TURBO_ROOM_WARNING_PAD = 2,
 	VEH_EMITTER_TURBO_ROOM_WARNING_SCALE = 32,
@@ -922,6 +928,128 @@ static int VehEmitter_ShouldSkipExhaust(struct Thread *thread, struct Driver *d)
 	return 0;
 }
 
+#if defined(CTR_NATIVE)
+static s16 VehEmitter_ClampS16(float value)
+{
+	if (value < -32768.0f)
+		return -32768;
+	if (value > 32767.0f)
+		return 32767;
+	return (s16)lroundf(value);
+}
+
+static void VehEmitter_RotateLocalExhaustVector(
+	const float rotation[3],
+	float x,
+	float y,
+	float z,
+	SVECTOR *out)
+{
+	const float degToRad = 0.01745329251994329577f;
+	float rx = rotation[0] * degToRad;
+	float ry = rotation[1] * degToRad;
+	float rz = rotation[2] * degToRad;
+	float sx = sinf(rx), cx = cosf(rx);
+	float sy = sinf(ry), cy = cosf(ry);
+	float sz = sinf(rz), cz = cosf(rz);
+	float nx;
+	float ny;
+	float nz;
+
+	/* X, then Y, then Z in kart-local space. */
+	ny = y * cx - z * sx;
+	nz = y * sx + z * cx;
+	y = ny;
+	z = nz;
+
+	nx = x * cy + z * sy;
+	nz = -x * sy + z * cy;
+	x = nx;
+	z = nz;
+
+	nx = x * cz - y * sz;
+	ny = x * sz + y * cz;
+	x = nx;
+	y = ny;
+
+	out->vx = VehEmitter_ClampS16(x);
+	out->vy = VehEmitter_ClampS16(y);
+	out->vz = VehEmitter_ClampS16(z);
+	out->pad = 0;
+}
+
+static int VehEmitter_ExhaustCustom(struct Thread *thread, struct Driver *d)
+{
+	struct Instance *inst = thread->inst;
+	MATRIX *m = &inst->matrix;
+	int kartID;
+	int exhaustCount;
+
+	if (d == NULL || inst == NULL)
+		return 0;
+
+	kartID = RacerLoadout_GetEffectiveKart((int)d->driverID);
+	if (kartID < 0)
+		return 0;
+
+	exhaustCount = VehiclePartRegistry_GetExhaustCount(kartID);
+	if (exhaustCount < 0)
+		return 0;
+
+	/* An explicit count of zero intentionally disables kart exhaust FX. */
+	if (exhaustCount == 0)
+		return 1;
+
+	gte_SetRotMatrix(m);
+
+	for (int exhaust = 0; exhaust < exhaustCount; exhaust++)
+	{
+		float mount[3];
+		float rotation[3];
+		SVECTOR localVel;
+		VECTOR exhaustPos;
+		VECTOR exhaustVel;
+
+		if (!VehiclePartRegistry_GetExhaustMount(
+				kartID, exhaust, mount, rotation))
+			continue;
+
+		/*
+		 * Attachment mounts are plain kart-local model units. Particle start values render with a >>6 fixed-point conversion, so one local unit is 0x40 here.
+		 * Rotate the mount in 32-bit space: tall custom pipes can exceed the
+		 * +/-127 model-unit range of a PS1 SVECTOR.
+		 */
+		{
+			float x = mount[0] * (float)inst->scale.x / 4096.0f;
+			float y = mount[1] * (float)inst->scale.y / 4096.0f;
+			float z = mount[2] * (float)inst->scale.z / 4096.0f;
+
+			exhaustPos.vx = (s32)lroundf(
+				((float)m->m[0][0] * x + (float)m->m[0][1] * y +
+				 (float)m->m[0][2] * z) / 4096.0f * VEH_EMITTER_EXHAUST_LOCAL_TO_PARTICLE);
+			exhaustPos.vy = (s32)lroundf(
+				((float)m->m[1][0] * x + (float)m->m[1][1] * y +
+				 (float)m->m[1][2] * z) / 4096.0f * VEH_EMITTER_EXHAUST_LOCAL_TO_PARTICLE);
+			exhaustPos.vz = (s32)lroundf(
+				((float)m->m[2][0] * x + (float)m->m[2][1] * y +
+				 (float)m->m[2][2] * z) / 4096.0f * VEH_EMITTER_EXHAUST_LOCAL_TO_PARTICLE);
+		}
+
+		VehEmitter_RotateLocalExhaustVector(
+			rotation,
+			0.0f,
+			(float)VEH_EMITTER_EXHAUST_VEL_Y,
+			(float)VEH_EMITTER_EXHAUST_VEL_Z,
+			&localVel);
+
+		VehEmitter_RotVec(&localVel, &exhaustVel);
+		VehEmitter_Exhaust(d, &exhaustPos, &exhaustVel);
+	}
+
+	return 1;
+}
+#endif
+
 static void VehEmitter_ExhaustPair(struct Thread *thread, struct Driver *d)
 {
 	struct Instance *inst = thread->inst;
@@ -929,6 +1057,11 @@ static void VehEmitter_ExhaustPair(struct Thread *thread, struct Driver *d)
 	SVECTOR local;
 	VECTOR exhaustPos;
 	VECTOR exhaustVel;
+
+#if defined(CTR_NATIVE)
+	if (VehEmitter_ExhaustCustom(thread, d))
+		return;
+#endif
 
 	gte_SetRotMatrix(m);
 

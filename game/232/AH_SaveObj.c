@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800af3a4-0x800af3e4.
 void AH_SaveObj_ThDestroy(struct Thread *t)
@@ -7,6 +10,9 @@ void AH_SaveObj_ThDestroy(struct Thread *t)
 
 	if (save->inst != NULL)
 	{
+#if defined(CTR_NATIVE)
+		NativeHangout_BindSaveScreen(NULL);
+#endif
 		INSTANCE_Death(save->inst);
 		save->inst = NULL;
 	}
@@ -35,8 +41,20 @@ void AH_SaveObj_ThTick(struct Thread *t)
 
 	struct SaveObj *save = t->object;
 
-	// get distance from player instance and thread object instance
+	// Keep distance valid even in Hangout because the scan-screen SFX below
+	// still uses it while the camera/menu interaction is bypassed.
 	int dist = distX * distX + distY * distY + distZ * distZ;
+
+#if defined(CTR_NATIVE)
+	if (NativeHangout_IsActive())
+	{
+		/* In Hangout this physical terminal belongs to the same chat feed as
+		 * the HUD. Never steal control or move the camera to the save screen. */
+		save->flags = AH_SAVEOBJ_FLAG_NONE;
+		save->scanlineFrame = AH_SAVEOBJ_SCANLINE_START_FRAME;
+		goto LAB_800af72c;
+	}
+#endif
 
 	if ((save->flags & AH_SAVEOBJ_FLAG_INTERACTION_ACTIVE) == 0)
 	{
@@ -308,6 +326,9 @@ void AH_SaveObj_LInB(struct Instance *savInst)
 				struct SpawnPosRot *saveSpawn = spawn->posRot;
 				struct Instance *inst = INSTANCE_Birth3D(gGT->modelPtr[STATIC_SCAN], R232.s_scan, 0);
 				save->inst = inst;
+#if defined(CTR_NATIVE)
+				NativeHangout_BindSaveScreen(inst);
+#endif
 
 				// NOTE(aalhendi): Native low-RAM audit candidate only. Retail
 				// uses this scan instance allocation before any null fallback;

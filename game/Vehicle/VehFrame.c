@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <platform/native_gltf.h>
+#endif
 
 enum
 {
@@ -75,6 +78,13 @@ int VehFrameInst_GetStartFrame(int animIndex, int numFrames)
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8005b0f4-0x8005b178.
 u32 VehFrameInst_GetNumAnimFrames(struct Instance *inst, int animIndex)
 {
+#if defined(CTR_NATIVE)
+	if (inst != NULL && NativeGltf_IsModel(inst->model))
+	{
+		return (u32)NativeGltf_GetCompatFrameCount(inst, animIndex);
+	}
+#endif
+
 	if (inst->model == NULL)
 	{
 		return 0;

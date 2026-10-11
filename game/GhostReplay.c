@@ -1,5 +1,8 @@
 #include <common.h>
 #if defined(CTR_NATIVE)
+#include <NativeRacerVisual.h>
+#include <RacerLoadout.h>
+#include <platform/native_gltf.h>
 #include <platform/native_obj.h>
 #endif
 
@@ -402,7 +405,14 @@ void GhostReplay_Init1(void)
 		ghostDriver->ghostTape = sdata->ptrGhostTape[i];
 
 		s32 charID = data.characterIDs[i + 1];
+#if defined(CTR_NATIVE)
+		RacerLoadout_ResetSlot(ghostDriver->driverID, charID);
+		struct Model *model = NativeRacerVisual_ResolveModel(charID);
+#else
 		struct Model *model = VehBirth_GetModelByName((char *)CharacterRegistry_GetAssetName(charID));
+#endif
+		if (model == NULL)
+			continue;
 		struct Instance *inst = INSTANCE_Birth3D(model, model->name, t);
 		t->inst = inst;
 
@@ -495,9 +505,22 @@ void GhostReplay_Init2(void)
 		}
 
 		s32 characterID = data.characterIDs[characterIndex];
+#if defined(CTR_NATIVE)
+		RacerLoadout_ResetSlot(driver->driverID, characterID);
+		struct Model *model = NativeRacerVisual_ResolveModel(characterID);
+#else
 		struct Model *model = VehBirth_GetModelByName((char *)CharacterRegistry_GetAssetName(characterID));
+#endif
+		if (model == NULL)
+			continue;
 
+#if defined(CTR_NATIVE)
+		driver->wheelSize =
+			(characterID != NITROS_OXIDE || NativeGltf_IsModel(model)) ?
+			0xccc : 0;
+#else
 		driver->wheelSize = (characterID != NITROS_OXIDE) ? 0xccc : 0;
+#endif
 
 		struct Instance *inst = driver->instSelf;
 		char *name = (ghostID != 0) ? sdata->s_ghost1 : sdata->s_ghost0;

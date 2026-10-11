@@ -1,5 +1,6 @@
 #include <platform/native_custom_music.h>
 #include <platform/native_assets.h>
+#include <platform/native_custom_tracks.h>
 
 #ifdef internal
 #undef internal
@@ -12,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <SDL3/SDL.h>
 
 #define CUSTOM_MUSIC_OUTPUT_RATE 44100
 #define CUSTOM_MUSIC_FP_SHIFT 16
@@ -61,12 +63,12 @@ struct NativeCustomMusicCacheEntry
 	int sampleRate;
 	s16 *finalPcm;
 	int finalFrameCount;
-	int loaded;
+	SDL_AtomicInt loaded;
 };
 
 global_variable struct NativeCustomMusicCacheEntry s_customMusicCache[CUSTOM_MUSIC_CACHE_LEVELS];
-global_variable int s_customMusicCacheReady;
-global_variable int s_customMusicCacheLoading;
+global_variable SDL_AtomicInt s_customMusicCacheReady;
+global_variable SDL_AtomicInt s_customMusicCacheLoading;
 
 global_variable struct NativeCustomMusicState s_customMusic = {0};
 global_variable u64 s_hubClockFrames = 0;
@@ -215,6 +217,37 @@ internal int NativeCustomMusic_FileExists(const char *path)
 	return 1;
 }
 
+int NativeCustomMusic_HasLevelTrack(int levelID)
+{
+	char relativePath[128];
+	char path[1024];
+
+	/* A community track never inherits the host retail level_03.ogg. */
+	if (NativeCustomTracks_IsActiveRace())
+		return NativeCustomTracks_SelectedMusicKind() ==
+		       NATIVE_CUSTOM_TRACK_MUSIC_OGG;
+
+	/* The public resolver is intentionally separate from TryStartLevel:
+	 * callers such as Adventure Garage can preserve the currently playing
+	 * retail/menu music when no override exists. Today this checks OGG;
+	 * future native CSEQ overrides can be added here without changing
+	 * the gameplay trigger sites. */
+	if (levelID >= 0 && levelID < CUSTOM_MUSIC_CACHE_LEVELS &&
+		SDL_GetAtomicInt(&s_customMusicCache[levelID].loaded) &&
+		s_customMusicCache[levelID].pcm != NULL)
+	{
+		return 1;
+	}
+
+	snprintf(relativePath, sizeof(relativePath),
+		"MUSIC_CUSTOM/level_%02d.ogg", levelID);
+
+	if (!NativeAssets_BuildPath(relativePath, path, sizeof(path)))
+		return 0;
+
+	return NativeCustomMusic_FileExists(path);
+}
+
 internal int NativeCustomMusic_GetCachedLevel(
 	int levelID,
 	s16 **pcmOut,
@@ -230,7 +263,7 @@ internal int NativeCustomMusic_GetCachedLevel(
 		return 0;
 
 	entry = &s_customMusicCache[levelID];
-	if (!entry->loaded || entry->pcm == NULL || entry->frameCount <= 0)
+	if (!SDL_GetAtomicInt(&entry->loaded) || entry->pcm == NULL || entry->frameCount <= 0)
 		return 0;
 
 	*pcmOut = entry->pcm;
@@ -247,12 +280,10 @@ int NativeCustomMusic_PreloadAll(void)
 	int loadedCount = 0;
 	size_t totalBytes = 0;
 
-	if (s_customMusicCacheReady)
+	if (SDL_GetAtomicInt(&s_customMusicCacheReady))
 		return 1;
-	if (s_customMusicCacheLoading)
+	if (!SDL_CompareAndSwapAtomicInt(&s_customMusicCacheLoading, 0, 1))
 		return 0;
-
-	s_customMusicCacheLoading = 1;
 	printf("[CustomMusic] Precache: decodificando todos los OGG residentes...\n");
 	fflush(stdout);
 
@@ -272,7 +303,7 @@ int NativeCustomMusic_PreloadAll(void)
 		int finalChannels = 0;
 		int finalSampleRate = 0;
 
-		if (entry->loaded)
+		if (SDL_GetAtomicInt(&entry->loaded))
 		{
 			loadedCount++;
 			totalBytes += (size_t)entry->frameCount * (size_t)entry->channels * sizeof(s16);
@@ -310,7 +341,8 @@ int NativeCustomMusic_PreloadAll(void)
 		entry->sampleRate = sampleRate;
 		entry->finalPcm = finalPcm;
 		entry->finalFrameCount = finalFrameCount;
-		entry->loaded = 1;
+		/* Publish the completed entry only after every pointer/count is valid. */
+		SDL_SetAtomicInt(&entry->loaded, 1);
 
 		loadedCount++;
 		totalBytes += (size_t)frameCount * (size_t)channels * sizeof(s16);
@@ -325,12 +357,47 @@ int NativeCustomMusic_PreloadAll(void)
 		fflush(stdout);
 	}
 
-	s_customMusicCacheReady = 1;
-	s_customMusicCacheLoading = 0;
+	SDL_SetAtomicInt(&s_customMusicCacheReady, 1);
+	SDL_SetAtomicInt(&s_customMusicCacheLoading, 0);
 	printf("[CustomMusic] Precache listo: %d niveles, %.2f MiB PCM residentes.\n",
 		loadedCount, (double)totalBytes / (1024.0 * 1024.0));
 	fflush(stdout);
 	return 1;
+}
+
+internal int SDLCALL NativeCustomMusic_PreloadThread(void *unused)
+{
+	(void)unused;
+	SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_LOW);
+	NativeCustomMusic_PreloadAll();
+	return 0;
+}
+
+int NativeCustomMusic_PreloadAllAsync(void)
+{
+	SDL_Thread *thread;
+
+	if (SDL_GetAtomicInt(&s_customMusicCacheReady) ||
+	    SDL_GetAtomicInt(&s_customMusicCacheLoading))
+		return 1;
+
+	thread = SDL_CreateThread(
+		NativeCustomMusic_PreloadThread,
+		"CTR OGG precache",
+		NULL);
+	if (thread == NULL)
+	{
+		fprintf(stderr, "[CustomMusic] No pude iniciar precache async: %s\n", SDL_GetError());
+		return 0;
+	}
+
+	SDL_DetachThread(thread);
+	return 1;
+}
+
+int NativeCustomMusic_IsPreloadComplete(void)
+{
+	return SDL_GetAtomicInt(&s_customMusicCacheReady) != 0;
 }
 
 /*
@@ -346,10 +413,13 @@ int NativeCustomMusic_PreloadAll(void)
 
 internal int NativeCustomMusic_TryStartLevelEx(int levelID, int preservePosition)
 {
-	char relativePath[128];
-	char finalRelativePath[128];
+	char relativePath[256];
+	char finalRelativePath[256];
 	char path[1024];
 	char finalPath[1024];
+	int customTrack = NativeCustomTracks_IsActiveRace();
+	int musicKey = customTrack ?
+		NativeCustomTracks_SelectedMusicKey() : levelID;
 
 	s16 *newPcm = NULL;
 	s16 *newFinalPcm = NULL;
@@ -368,6 +438,10 @@ internal int NativeCustomMusic_TryStartLevelEx(int levelID, int preservePosition
 
 	static int bannerPrinted = 0;
 
+	if (customTrack &&
+	    NativeCustomTracks_SelectedMusicKind() != NATIVE_CUSTOM_TRACK_MUSIC_OGG)
+		return 0;
+
 	if (!bannerPrinted)
 	{
 		printf("[CustomMusic] CTR Music Core v0.4.9.3 - LOCK NORMAL TRACK\n");
@@ -378,7 +452,7 @@ internal int NativeCustomMusic_TryStartLevelEx(int levelID, int preservePosition
 	/* CSEQ 1/2 masks leave the OGG playing silently. Restore its audible
 	 * output without decoding or seeking when CSEQ 0 starts again. */
 	NativeAudio_LockOutput();
-	if (s_customMusic.active && (s_customMusic.levelID == levelID))
+	if (s_customMusic.active && (s_customMusic.levelID == musicKey))
 	{
 		if (!preservePosition) s_customMusic.maskMuted = 0;
 		if (preservePosition) s_customMusic.hubFallback = 0;
@@ -387,7 +461,7 @@ internal int NativeCustomMusic_TryStartLevelEx(int levelID, int preservePosition
 	}
 	NativeAudio_UnlockOutput();
 
-	if (NativeCustomMusic_GetCachedLevel(
+	if (!customTrack && NativeCustomMusic_GetCachedLevel(
 		levelID,
 		&newPcm,
 		&newFrameCount,
@@ -401,11 +475,20 @@ internal int NativeCustomMusic_TryStartLevelEx(int levelID, int preservePosition
 		goto track_ready;
 	}
 
-	snprintf(relativePath, sizeof(relativePath),
-		"MUSIC_CUSTOM/level_%02d.ogg", levelID);
-
-	snprintf(finalRelativePath, sizeof(finalRelativePath),
-		"MUSIC_CUSTOM/level_%02d_final.ogg", levelID);
+	if (customTrack)
+	{
+		const char *normal=NativeCustomTracks_SelectedMusicPath();
+		const char *final=NativeCustomTracks_SelectedFinalMusicPath();
+		snprintf(relativePath,sizeof(relativePath),"%s",normal?normal:"");
+		snprintf(finalRelativePath,sizeof(finalRelativePath),"%s",final?final:"");
+	}
+	else
+	{
+		snprintf(relativePath, sizeof(relativePath),
+			"MUSIC_CUSTOM/level_%02d.ogg", levelID);
+		snprintf(finalRelativePath, sizeof(finalRelativePath),
+			"MUSIC_CUSTOM/level_%02d_final.ogg", levelID);
+	}
 
 	if (!NativeAssets_BuildPath(relativePath, path, sizeof(path)))
 	{
@@ -448,7 +531,8 @@ internal int NativeCustomMusic_TryStartLevelEx(int levelID, int preservePosition
 	newPcmOwned = 1;
 
 	/* Optional pre-rendered Final Lap OGG. */
-	if (NativeAssets_BuildPath(
+	if (finalRelativePath[0] &&
+	    NativeAssets_BuildPath(
 		finalRelativePath,
 		finalPath,
 		sizeof(finalPath)) &&
@@ -536,7 +620,7 @@ track_ready:
 	 * ChangeVolume will scale this from CTR's music volume.
 	 */
 	s_customMusic.volume = (sdata->vol_Music * 128) / 255;
-	s_customMusic.levelID = levelID;
+	s_customMusic.levelID = musicKey;
 
 	NativeAudio_UnlockOutput();
 
@@ -557,7 +641,8 @@ int NativeCustomMusic_TrySwapHub(int levelID)
 	char relativePath[128];
 	char path[1024];
 
-	if (levelID >= 0 && levelID < CUSTOM_MUSIC_CACHE_LEVELS && s_customMusicCache[levelID].loaded)
+	if (levelID >= 0 && levelID < CUSTOM_MUSIC_CACHE_LEVELS &&
+	    SDL_GetAtomicInt(&s_customMusicCache[levelID].loaded))
 		return NativeCustomMusic_TryStartLevelEx(levelID, 1);
 
 	snprintf(relativePath, sizeof(relativePath),

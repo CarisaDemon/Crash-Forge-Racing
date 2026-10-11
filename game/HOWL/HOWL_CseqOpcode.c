@@ -1,4 +1,62 @@
 #include <common.h>
+#include <NativeHowlSampleCatalog.h>
+#include <NativeCustomSampleRegistry.h>
+#if defined(CTR_CSEQ_LIBERATION)
+#include <NativeMusicRegistry.h>
+#endif
+#include <stdint.h>
+
+#if defined(CTR_CSEQ_TEST_BUILD)
+static int s_cseqTestPitchLogCount;
+#endif
+
+/*
+ * Native PC music can reference any retail HOWL sample without requiring its
+ * original level bank to be resident. The tagged address is consumed only by
+ * native_audio.c; PS1/retail builds keep using the original SPU address table.
+ */
+static void *howl_GetMusicSampleStartAddr(int spuIndex)
+{
+#if defined(CTR_NATIVE) && defined(CTR_CSEQ_LIBERATION)
+	const unsigned char *blob = NULL;
+	int blobSize = 0;
+	unsigned int handle;
+
+	/* Negative spuIndex values are reserved by Crash Forge for package-local
+	 * native PCM samples: -1 = sample_000.wav, -2 = sample_001.wav, etc. */
+	if (spuIndex < 0)
+	{
+		struct NativeCustomSampleView view;
+		int slot = -1 - spuIndex;
+
+		if (NativeCustomSampleRegistry_GetView(slot, &view))
+		{
+			handle = NativeCustomSampleRegistry_EncodeHandle(slot);
+			if (handle != 0)
+				return (void *)(uintptr_t)handle;
+		}
+
+		return NULL;
+	}
+
+	if (NativeHowlSampleCatalog_GetBlob(spuIndex, &blob, &blobSize) &&
+	    blob != NULL &&
+	    blobSize > 0)
+	{
+		handle = NativeHowlSampleCatalog_EncodeRetailHandle(spuIndex);
+		if (handle != 0)
+		{
+			return (void *)(uintptr_t)handle;
+		}
+	}
+#endif
+
+	if (spuIndex < 0)
+		return NULL;
+
+	return (void *)(uintptr_t)
+		((u32)sdata->howl_spuAddrs[spuIndex].spuAddr << 3);
+}
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80029e18-0x80029f1c
 void cseq_opcode01_noteoff(struct SongSeq *seq)
@@ -45,8 +103,26 @@ void cseq_opcode01_noteoff(struct SongSeq *seq)
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80029f1c-0x80029f24
 void cseq_opcode02_empty(struct SongSeq *seq)
 {
+#if defined(CTR_NATIVE) && defined(CTR_CSEQ_LIBERATION)
+	/*
+	 * Crash Forge external CSEQ extension:
+	 * opcode 02 + 0xCF marks the beginning of the repeating section.
+	 * Everything before it is a one-shot race intro. Retail CSEQ keeps the
+	 * original no-op behavior because the extension is only honored while an
+	 * external package is active.
+	 */
+	if (seq != NULL &&
+	    seq->currNote != NULL &&
+	    seq->currNote[1] == 0xCF &&
+	    NativeMusicRegistry_IsExternalCseqActive())
+	{
+		seq->firstNote = seq->currNote + 2;
+		return;
+	}
+#else
 	(void)seq;
-	// left empty by ND
+#endif
+	// left empty by ND for retail CSEQ
 }
 
 // "end of song" opcode
@@ -90,7 +166,24 @@ void howl_InitChannelAttr_Music(struct SongSeq *seq, struct ChannelAttr *attr, i
 
 		pitch = howl_InstrumentPitch(longSample->basePitch, index, seq->distort);
 
-		attr->spuStartAddr = (void *)(sdata->howl_spuAddrs[longSample->spuIndex].spuAddr << 3);
+#if defined(CTR_CSEQ_TEST_BUILD)
+		if (NativeMusicRegistry_IsExternalCseqActive() &&
+		    s_cseqTestPitchLogCount < 64)
+		{
+			Platform_Log(
+				"[CSEQ PITCH] note=%d inst=%d spu=%d base=%d distort=0x%02x pitch=0x%04x vol=%d\n",
+				index,
+				seq->instrumentID,
+				longSample->spuIndex,
+				longSample->basePitch,
+				seq->distort,
+				pitch & 0xffff,
+				longSample->volume);
+			s_cseqTestPitchLogCount++;
+		}
+#endif
+
+		attr->spuStartAddr = howl_GetMusicSampleStartAddr(longSample->spuIndex);
 
 		// audio ADSR
 		attr->ad = longSample->ad;
@@ -114,7 +207,7 @@ void howl_InitChannelAttr_Music(struct SongSeq *seq, struct ChannelAttr *attr, i
 			pitch = CTR_MipsSrl(CTR_MipsMulLo((u16)shortSample->pitch, data.distortConst_OtherFX[seq->distort]), 16);
 		}
 
-		attr->spuStartAddr = (void *)(sdata->howl_spuAddrs[shortSample->spuIndex].spuAddr << 3);
+		attr->spuStartAddr = howl_GetMusicSampleStartAddr(shortSample->spuIndex);
 
 		// audio ADSR
 		attr->ad = 0x80ff;

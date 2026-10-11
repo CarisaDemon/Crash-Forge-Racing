@@ -39,6 +39,18 @@ typedef struct
 	u16 depth;
 	u16 _depthPad;
 } GrVertex;
+
+/* Static 3D level geometry for the native-PC path. Positions stay in CTR
+ * world units; the GPU performs the view transform and perspective. UV/page/
+ * CLUT remain PS1-native so the existing VRAM fragment shader can be reused. */
+typedef struct
+{
+	/* Standard renderer attribute slots keep this path isolated from the
+	   legacy GrVertex layout without adding new attribute enums. */
+	float x, y, z, page;       /* a_position */
+	float u, v, clut, dither;  /* a_texcoord */
+	u8 r, g, b, a;             /* a_color, normalized */
+} NativeLevelPCVertex;
 #pragma pack(pop)
 
 typedef enum

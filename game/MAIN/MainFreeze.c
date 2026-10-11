@@ -1,7 +1,12 @@
 #include <common.h>
 
 #ifdef CTR_NATIVE
+#include <NativeHangout.h>
+#include <NativeHUD.h>
 #include "platform/native_log.h"
+#include "platform/native_input.h"
+#include "platform/native_input_glyphs.h"
+#include <SDL3/SDL.h>
 static int s_titleOptionsOpen;
 static s16 s_titleOptionsReturnRow;
 static u32 s_titleOptionsSavedState;
@@ -10,20 +15,95 @@ static int s_titleOptionsNeedsCursorReset;
 static int s_titleVoicePreviewSound;
 static int s_titleVoicePreviewDelay;
 
+/* Hangout has no Adventure progression/hints in its pause hierarchy.
+ * Keep a dedicated three-row menu so retail Adventure can remain untouched. */
+static struct MenuRow s_hangoutPauseRows[] =
+{
+	{0x2, 2, 1, 0, 0},   /* RESUME  */
+	{0x3, 0, 2, 1, 1},   /* QUIT    */
+	{0xE, 1, 0, 2, 2},   /* OPTIONS */
+	{-1, 0, 0, 0, 0}
+};
+
+static struct RectMenu s_hangoutPauseMenu =
+{
+	.stringIndexTitle = RECTMENU_STRING_NONE,
+	.posX_curr = 0x100,
+	.posY_curr = 0xAF,
+	.unk1 = 0,
+	.state = ALL_PLAYERS_USE_MENU | RECTMENU_STATE_SMALL_EXEC_CENTERED,
+	.rows = &s_hangoutPauseRows[0],
+	.funcPtr = MainFreeze_MenuPtrDefault,
+	.drawStyle = 4,
+};
+
 enum NativeOptionsPage
 {
 	NATIVE_OPTIONS_PAGE_ROOT = 0,
 	NATIVE_OPTIONS_PAGE_AUDIO = 1,
 	NATIVE_OPTIONS_PAGE_GRAPHICS = 2,
-	NATIVE_OPTIONS_PAGE_CONTROLS = 3,
+	NATIVE_OPTIONS_PAGE_GAMEPLAY = 3,
+	NATIVE_OPTIONS_PAGE_CONTROLS = 4,
+	NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS = 5,
 };
 
 enum
 {
 	NATIVE_OPTIONS_TRANSITION_FRAMES = 12,
-	NATIVE_OPTIONS_ROOT_ROW_COUNT = 4,
+	NATIVE_OPTIONS_ROOT_ROW_COUNT = 5,
 	NATIVE_OPTIONS_AUDIO_ROW_COUNT = 5,
 	NATIVE_OPTIONS_GRAPHICS_ROW_COUNT = 7,
+	NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT = 13,
+	NATIVE_OPTIONS_GAMEPLAY_ROW_COUNT = 4,
+	NATIVE_CONTROLS_PLAYER_LIST_ROW_COUNT = 5,
+	NATIVE_CONTROLS_PLAYER_CONFIG_ROW_COUNT = 7,
+	NATIVE_CONTROLS_REMAP_VISIBLE_ROWS = 10,
+};
+
+enum NativeControlsView
+{
+	NATIVE_CONTROLS_VIEW_PLAYERS = 0,
+	NATIVE_CONTROLS_VIEW_PLAYER,
+	NATIVE_CONTROLS_VIEW_REMAP,
+};
+
+enum
+{
+	NATIVE_CONTROLS_REMAP_POWER_SLIDE = -2,
+};
+
+static const int s_nativeControlsRemapRows[] = {
+	/* Face buttons first: these use the supplied PS/Xbox/Generic glyph atlas. */
+	PLATFORM_INPUT_ACTION_CROSS,
+	PLATFORM_INPUT_ACTION_SQUARE,
+	PLATFORM_INPUT_ACTION_CIRCLE,
+	PLATFORM_INPUT_ACTION_TRIANGLE,
+
+	/* Keep every D-pad direction together. */
+	PLATFORM_INPUT_ACTION_DPAD_UP,
+	PLATFORM_INPUT_ACTION_DPAD_DOWN,
+	PLATFORM_INPUT_ACTION_DPAD_LEFT,
+	PLATFORM_INPUT_ACTION_DPAD_RIGHT,
+
+	/* Shoulders/stick clicks stay grouped by side/type. */
+	PLATFORM_INPUT_ACTION_L1,
+	PLATFORM_INPUT_ACTION_R1,
+	PLATFORM_INPUT_ACTION_L2,
+	PLATFORM_INPUT_ACTION_R2,
+	PLATFORM_INPUT_ACTION_L3,
+	PLATFORM_INPUT_ACTION_R3,
+	PLATFORM_INPUT_ACTION_START,
+	PLATFORM_INPUT_ACTION_SELECT,
+
+	/* Split both sticks into four independently remappable directions. */
+	PLATFORM_INPUT_ACTION_LEFT_STICK_LEFT,
+	PLATFORM_INPUT_ACTION_LEFT_STICK_RIGHT,
+	PLATFORM_INPUT_ACTION_LEFT_STICK_UP,
+	PLATFORM_INPUT_ACTION_LEFT_STICK_DOWN,
+	PLATFORM_INPUT_ACTION_RIGHT_STICK_LEFT,
+	PLATFORM_INPUT_ACTION_RIGHT_STICK_RIGHT,
+	PLATFORM_INPUT_ACTION_RIGHT_STICK_UP,
+	PLATFORM_INPUT_ACTION_RIGHT_STICK_DOWN,
 };
 
 static int s_nativeOptionsSessionOpen;
@@ -36,7 +116,21 @@ static int s_nativeOptionsEntryActive;
 static int s_nativeOptionsEntryFrame;
 static int s_nativeOptionsExitActive;
 static int s_nativeOptionsExitFrame;
-static s16 s_nativeOptionsRows[4];
+static s16 s_nativeOptionsRows[6];
+
+static int s_nativeControlsView;
+static int s_nativeControlsPlayer;
+static int s_nativeControlsRow;
+static int s_nativeControlsScroll;
+static int s_nativeControlsPowerSlideSide;
+static int s_nativeControlsCaptureAction = -1;
+static int s_nativeControlsCaptureDeviceIndex = -1;
+static int s_nativeControlsWaitForNeutral;
+static int s_nativeControlsNameEditing;
+static int s_nativeControlsNamePlayer = -1;
+static int s_nativeControlsNameLen;
+static char s_nativeControlsNameBuffer[32];
+
 static struct TransitionMeta s_nativeOptionsSlideMeta[2] = {
 	{-512, 0, 0, 0, 0},
 	{0, 0, -1, 0, 0},
@@ -511,6 +605,14 @@ force_inline void IDENTIFYGAMEPADS_MainFreeze_MenuPtrOptions(struct RectMenu *me
 #ifdef CTR_NATIVE
 static void MainFreeze_NativeOptionsReset(void)
 {
+	if (s_nativeControlsNameEditing)
+		Platform_StopTextInput();
+
+	s_nativeControlsNameEditing = 0;
+	s_nativeControlsNamePlayer = -1;
+	s_nativeControlsNameLen = 0;
+	s_nativeControlsNameBuffer[0] = 0;
+
 	s_nativeOptionsSessionOpen = 1;
 	s_nativeOptionsPage = NATIVE_OPTIONS_PAGE_ROOT;
 	s_nativeOptionsTargetPage = NATIVE_OPTIONS_PAGE_ROOT;
@@ -522,6 +624,17 @@ static void MainFreeze_NativeOptionsReset(void)
 	s_nativeOptionsExitActive = 0;
 	s_nativeOptionsExitFrame = 0;
 	memset(s_nativeOptionsRows, 0, sizeof(s_nativeOptionsRows));
+
+	s_nativeControlsView = NATIVE_CONTROLS_VIEW_PLAYERS;
+	s_nativeControlsPlayer = 0;
+	s_nativeControlsRow = 0;
+	s_nativeControlsScroll = 0;
+	s_nativeControlsPowerSlideSide = 0;
+	s_nativeControlsCaptureAction = -1;
+	s_nativeControlsCaptureDeviceIndex = -1;
+	s_nativeControlsWaitForNeutral = 0;
+	Platform_InputCancelRebindCapture();
+
 	s_nativeOptionsSlideMeta[0].distX = -512;
 	s_nativeOptionsSlideMeta[0].distY = 0;
 	s_nativeOptionsSlideMeta[0].headStart = 0;
@@ -596,11 +709,35 @@ static void MainFreeze_NativeOptionsDrawCursor(int offsetX, int y, int height)
 	CTR_Box_DrawClearBox(&cursor, &sdata->menuRowHighlight_Normal, TRANS_50_DECAL, sdata->gGT->backBuffer->otMem.uiOT);
 }
 
+static void MainFreeze_NativeControlsDrawFrame(char *title, int offsetX, int height)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	u32 *ot = gGT->backBuffer->otMem.uiOT;
+	Color color;
+	RECT separator = {.x = 112 + offsetX, .y = 48, .w = 326, .h = 2};
+	RECT panel = {.x = 100 + offsetX, .y = 20, .w = 350, .h = height};
+
+	/* Controls submenus use the compact font so the title never collides
+	   with page counters or the top-left mouse BACK button. */
+	DecalFont_DrawLine(title, 275 + offsetX, 32, FONT_SMALL, JUSTIFY_CENTER | ORANGE);
+	color.self = sdata->battleSetup_Color_UI_1;
+	RECTMENU_DrawOuterRect_Edge(&separator, color, 0x20, ot);
+	RECTMENU_DrawInnerRect(&panel, 4, ot);
+}
+
+static void MainFreeze_NativeControlsDrawCursor(int offsetX, int y, int height)
+{
+	RECT cursor = {.x = 108 + offsetX, .y = y, .w = 332, .h = height};
+	CTR_Box_DrawClearBox(&cursor, &sdata->menuRowHighlight_Normal,
+		TRANS_50_DECAL, sdata->gGT->backBuffer->otMem.uiOT);
+}
+
 static void MainFreeze_NativeOptionsDrawRoot(int offsetX)
 {
 	static char *labels[NATIVE_OPTIONS_ROOT_ROW_COUNT] = {
 		"AUDIO",
 		"GRAPHICS",
+		"GAMEPLAY",
 		"CONTROLS",
 		"EXIT",
 	};
@@ -612,7 +749,55 @@ static void MainFreeze_NativeOptionsDrawRoot(int offsetX)
 	}
 
 	MainFreeze_NativeOptionsDrawCursor(offsetX, 65 + (s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_ROOT] * 22), 19);
-	MainFreeze_NativeOptionsDrawFrame("OPTIONS", offsetX, 145);
+	MainFreeze_NativeOptionsDrawFrame("OPTIONS", offsetX, 170);
+}
+
+static void MainFreeze_NativeOptionsDrawActionBinding(
+	int playerIndex,
+	int action,
+	int offsetX,
+	int y)
+{
+	char binding[64];
+	const int kind = Platform_InputGetPlayerDeviceKind(playerIndex);
+	int drewGlyph = 0;
+
+	/* In mouse mode, navigation rows stay text-only so controller/keyboard
+	   prompts do not compete with the pointer. Remap-content glyphs use a
+	   different path and intentionally remain visible. */
+	if (RECTMENU_NativeTouchGet(NULL, NULL))
+		return;
+
+	if (kind != PLATFORM_INPUT_DEVICE_NONE &&
+	    Platform_InputResolvePlayerGlyphStyle(playerIndex) !=
+		    PLATFORM_INPUT_GLYPH_KEYBOARD)
+	{
+		/* Prompt visuals are independent from the physical device. This lets
+		   a keyboard player force PlayStation/Xbox/Generic presentation while
+		   keeping the actual keyboard bindings untouched. */
+		const int rawBinding =
+			Platform_InputGetGamepadBindingForPlayer(playerIndex, action);
+
+		drewGlyph = Platform_InputGlyphsDrawBinding(
+			playerIndex,
+			rawBinding,
+			401 + offsetX, y - 3, 30, 14,
+			&sdata->gGT->backBuffer->primMem,
+			sdata->gGT->backBuffer->otMem.uiOT);
+	}
+
+	if (drewGlyph)
+		return;
+
+	Platform_InputFormatPlayerBindingName(
+		playerIndex, action, binding, sizeof(binding));
+
+	DecalFont_DrawLine(
+		binding,
+		434 + offsetX, y,
+		FONT_SMALL,
+		JUSTIFY_RIGHT |
+			(kind == PLATFORM_INPUT_DEVICE_NONE ? GRAY : ORANGE));
 }
 
 static void MainFreeze_NativeOptionsDrawSlider(int offsetX, int y, int volume)
@@ -658,9 +843,26 @@ static void MainFreeze_NativeOptionsDrawAudio(int offsetX)
 	DecalFont_DrawLine(sdata->lngStrings[LNG_MODE], 78 + offsetX, 116, FONT_SMALL, ORANGE);
 	DecalFont_DrawLine(sdata->lngStrings[333 + howl_ModeGet()], 434 + offsetX, 116, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
 	DecalFont_DrawLine("BACK", 78 + offsetX, 134, FONT_SMALL, ORANGE);
+	MainFreeze_NativeOptionsDrawActionBinding(
+		0, PLATFORM_INPUT_ACTION_TRIANGLE, offsetX, 134);
 
 	MainFreeze_NativeOptionsDrawCursor(offsetX, 59 + (row * 18), 14);
 	MainFreeze_NativeOptionsDrawFrame("AUDIO", offsetX, 145);
+}
+
+static void MainFreeze_NativeFormatFPSLimit(char *text, int textSize)
+{
+	const int mode = Platform_GetFPSLimitMode();
+
+	if ((text == NULL) || (textSize <= 0))
+		return;
+
+	if (mode == PLATFORM_FPS_LIMIT_UNLIMITED)
+		snprintf(text, (size_t)textSize, "Unlimited");
+	else if (mode == PLATFORM_FPS_LIMIT_DISPLAY_HZ)
+		snprintf(text, (size_t)textSize, "%d HZ", Platform_GetDisplayRefreshFPS());
+	else
+		snprintf(text, (size_t)textSize, "%d FPS", Platform_GetHighRefreshTargetFPS());
 }
 
 static void MainFreeze_NativeOptionsDrawGraphics(int offsetX)
@@ -689,71 +891,881 @@ static void MainFreeze_NativeOptionsDrawGraphics(int offsetX)
 	DecalFont_DrawLine("ASPECT", 78 + offsetX, 90, FONT_SMALL, ORANGE);
 	DecalFont_DrawLine(Platform_GetWideMode() ? "16:9" : "4:3", 434 + offsetX, 90, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
 
-	DecalFont_DrawLine("HIGH REFRESH", 78 + offsetX, 108, FONT_SMALL, ORANGE);
-	if (Platform_GetHighRefreshMode())
-		snprintf(refreshText, sizeof(refreshText), "%d FPS", Platform_GetHighRefreshTargetFPS());
-	else
-		snprintf(refreshText, sizeof(refreshText), "OFF");
+	DecalFont_DrawLine("FPS LIMIT", 78 + offsetX, 108, FONT_SMALL, ORANGE);
+	MainFreeze_NativeFormatFPSLimit(refreshText, (int)sizeof(refreshText));
 	DecalFont_DrawLine(refreshText, 434 + offsetX, 108, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
 
-	DecalFont_DrawLine("SUBPIXEL", 78 + offsetX, 126, FONT_SMALL, ORANGE);
-	DecalFont_DrawLine(Platform_GetSubpixelMode() ? "ON" : "OFF", 434 + offsetX, 126, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
-
-	DecalFont_DrawLine("CHARACTER DETAIL", 78 + offsetX, 144, FONT_SMALL, ORANGE);
+	DecalFont_DrawLine("CHARACTER DETAIL", 78 + offsetX, 126, FONT_SMALL, ORANGE);
 	{
 		const int detailMode = Platform_GetCharacterDetailMode();
 		detailText = detailMode == 0 ? "LOW" : (detailMode == 1 ? "SMART" : (detailMode == 2 ? "HIGH" : "ULTRA"));
 	}
-	DecalFont_DrawLine(detailText, 434 + offsetX, 144, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+	DecalFont_DrawLine(detailText, 434 + offsetX, 126, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+
+	DecalFont_DrawLine("ADVANCED GRAPHICS", 78 + offsetX, 144, FONT_SMALL, ORANGE);
+	DecalFont_DrawLine(">", 434 + offsetX, 144, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
 
 	DecalFont_DrawLine("BACK", 78 + offsetX, 162, FONT_SMALL, ORANGE);
+	MainFreeze_NativeOptionsDrawActionBinding(
+		0, PLATFORM_INPUT_ACTION_TRIANGLE, offsetX, 162);
 
 	MainFreeze_NativeOptionsDrawCursor(offsetX, 51 + (row * 18), 14);
 	MainFreeze_NativeOptionsDrawFrame("GRAPHICS", offsetX, 177);
 }
 
-static int MainFreeze_NativeOptionsControlsRowCount(const GAMEPAD_MainFreeze_MenuPtrOptions *gamepad)
+static void MainFreeze_NativeOptionsDrawAdvancedGraphics(int offsetX)
 {
-	return gamepad->numGamepads + gamepad->numAnalogs + 1;
+	const int row = s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS];
+	const int y0 = 46;
+	const int step = 13;
+
+	static const char *labels[NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT] = {
+		"INTERNAL RESOLUTION",
+		"SUBPIXEL",
+		"TEXTURE FILTER",
+		"ANTI-ALIASING",
+		"WORLD DETAIL",
+		"PRESENT FILTER",
+		"DITHER",
+		"CRT FILTER",
+		"PERF OVERLAY",
+		"GPU TIMING [EXP]",
+		"VRAM STORAGE [EXP]",
+		"Z-BUFFER [EXP]",
+		"BACK",
+	};
+
+	for (int i = 0; i < NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT; i++)
+		DecalFont_DrawLine(
+			(char *)labels[i], 78 + offsetX, y0 + i * step,
+			FONT_SMALL, ORANGE);
+
+	/* Static rows describe the backend that really exists today. They are not
+	   fake toggles: adjustable rows below have a live renderer path. */
+	DecalFont_DrawLine("NATIVE", 434 + offsetX, y0 + 0 * step, FONT_SMALL, JUSTIFY_RIGHT | GRAY);
+	DecalFont_DrawLine(Platform_GetSubpixelMode() ? "ON" : "OFF",
+		434 + offsetX, y0 + 1 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+	DecalFont_DrawLine(Platform_GetTextureFilteringMode() ? "BILINEAR" : "NEAREST",
+		434 + offsetX, y0 + 2 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+	DecalFont_DrawLine("OFF", 434 + offsetX, y0 + 3 * step, FONT_SMALL, JUSTIFY_RIGHT | GRAY);
+	DecalFont_DrawLine("RETAIL", 434 + offsetX, y0 + 4 * step, FONT_SMALL, JUSTIFY_RIGHT | GRAY);
+	DecalFont_DrawLine("DIRECT", 434 + offsetX, y0 + 5 * step, FONT_SMALL, JUSTIFY_RIGHT | GRAY);
+	DecalFont_DrawLine(Platform_GetDitheringMode() ? "PS1" : "OFF",
+		434 + offsetX, y0 + 6 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+	DecalFont_DrawLine("OFF", 434 + offsetX, y0 + 7 * step, FONT_SMALL, JUSTIFY_RIGHT | GRAY);
+	DecalFont_DrawLine(Platform_GetPerfOverlayMode() ? "ON" : "OFF",
+		434 + offsetX, y0 + 8 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+	DecalFont_DrawLine(Platform_GetGpuTimingMode() ? "ON EXP" : "OFF",
+		434 + offsetX, y0 + 9 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+	DecalFont_DrawLine(Platform_GetExperimentalCompactVRAMMode() ? "RG8 EXP" : "RG32F",
+		434 + offsetX, y0 + 10 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+	DecalFont_DrawLine(Platform_GetExperimentalZBufferMode() ? "CUSTOM EXP" : "OFF",
+		434 + offsetX, y0 + 11 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+	MainFreeze_NativeOptionsDrawActionBinding(
+		0, PLATFORM_INPUT_ACTION_TRIANGLE,
+		offsetX, y0 + 12 * step);
+
+	MainFreeze_NativeOptionsDrawCursor(
+		offsetX, 43 + (row * step), 11);
+	MainFreeze_NativeOptionsDrawFrame(
+		"ADVANCED GRAPHICS", offsetX, 220);
 }
 
-static void MainFreeze_NativeOptionsDrawControls(int offsetX, const GAMEPAD_MainFreeze_MenuPtrOptions *gamepad)
+static void MainFreeze_NativeOptionsDrawGameplay(int offsetX)
+{
+	const int row = s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_GAMEPLAY];
+	const int driftMode = NativeHUD_GetDriftMeterMode();
+	const char *driftText =
+		driftMode == NATIVE_HUD_DRIFT_CTR_CENTERED ? "CTR CENTERED" :
+		(driftMode == NATIVE_HUD_DRIFT_CNK_CENTERED ? "CNK CENTERED" : "OFF");
+
+	DecalFont_DrawLine("SAFFI HUD", 78 + offsetX, 62, FONT_SMALL, ORANGE);
+	DecalFont_DrawLine(
+		NativeHUD_GetSaffiEnabled() ? "ON" : "OFF",
+		434 + offsetX, 62, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+
+	DecalFont_DrawLine("RESERVES BAR", 78 + offsetX, 84, FONT_SMALL, ORANGE);
+	DecalFont_DrawLine(
+		NativeHUD_GetReservesBarEnabled() ? "ON" : "OFF",
+		434 + offsetX, 84, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+
+	DecalFont_DrawLine("DRIFT METER", 78 + offsetX, 106, FONT_SMALL, ORANGE);
+	DecalFont_DrawLine(
+		driftText,
+		434 + offsetX, 106, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+
+	DecalFont_DrawLine("BACK", 78 + offsetX, 132, FONT_SMALL, ORANGE);
+	MainFreeze_NativeOptionsDrawActionBinding(
+		0, PLATFORM_INPUT_ACTION_TRIANGLE, offsetX, 132);
+
+	MainFreeze_NativeOptionsDrawCursor(
+		offsetX,
+		59 + (row * 22),
+		16);
+	MainFreeze_NativeOptionsDrawFrame("GAMEPLAY", offsetX, 150);
+}
+
+static int MainFreeze_NativeControlsRemapActionCount(void)
+{
+	const int kind = Platform_InputGetPlayerDeviceKind(s_nativeControlsPlayer);
+
+	/* Keyboard exposes every digital action separately, including L1 and R1. */
+	if (kind == PLATFORM_INPUT_DEVICE_KEYBOARD)
+		return 16;
+	if (kind == PLATFORM_INPUT_DEVICE_GAMEPAD)
+		return (int)(sizeof(s_nativeControlsRemapRows) /
+		             sizeof(s_nativeControlsRemapRows[0]));
+
+	return 0;
+}
+
+static int MainFreeze_NativeControlsRemapRowIsPowerSlide(int row)
+{
+	(void)row;
+	return 0;
+}
+
+static int MainFreeze_NativeControlsRemapRowAction(int row)
+{
+	const int actionCount = MainFreeze_NativeControlsRemapActionCount();
+	int action;
+
+	if (row < 0 || row >= actionCount)
+		return -1;
+
+	action = s_nativeControlsRemapRows[row];
+	return action;
+}
+
+static const char *MainFreeze_NativeControlsRemapLabel(int row, int action)
+{
+	/* Gamepad-only stick rows begin after the 16 digital rows. */
+	if (row >= 16)
+	{
+		switch (row)
+		{
+		case 16: return "LEFT STICK - LEFT";
+		case 17: return "LEFT STICK - RIGHT";
+		case 18: return "LEFT STICK - UP";
+		case 19: return "LEFT STICK - DOWN";
+		case 20: return "RIGHT STICK - LEFT";
+		case 21: return "RIGHT STICK - RIGHT";
+		case 22: return "RIGHT STICK - UP";
+		case 23: return "RIGHT STICK - DOWN";
+		default: break;
+		}
+	}
+
+	switch (action)
+	{
+	case PLATFORM_INPUT_ACTION_CROSS: return "ACCELERATE";
+	case PLATFORM_INPUT_ACTION_SQUARE: return "BRAKE / REVERSE";
+	case PLATFORM_INPUT_ACTION_CIRCLE: return "ITEM";
+	/* Keep the visible label as requested even though the retail logical
+	   action behind this slot is the Triangle/HUD-lookback channel. */
+	case PLATFORM_INPUT_ACTION_TRIANGLE: return "TRIANGLE";
+
+	case PLATFORM_INPUT_ACTION_DPAD_UP: return "D-PAD UP";
+	case PLATFORM_INPUT_ACTION_DPAD_DOWN: return "D-PAD DOWN";
+	case PLATFORM_INPUT_ACTION_DPAD_LEFT: return "D-PAD LEFT";
+	case PLATFORM_INPUT_ACTION_DPAD_RIGHT: return "D-PAD RIGHT";
+
+	case PLATFORM_INPUT_ACTION_L1: return "L1 - POWERSLIDE";
+	case PLATFORM_INPUT_ACTION_R1: return "R1 - POWERSLIDE";
+	case PLATFORM_INPUT_ACTION_L2: return "L2";
+	case PLATFORM_INPUT_ACTION_R2: return "R2";
+	case PLATFORM_INPUT_ACTION_L3: return "L3";
+	case PLATFORM_INPUT_ACTION_R3: return "R3";
+	case PLATFORM_INPUT_ACTION_START: return "START / PAUSE";
+	case PLATFORM_INPUT_ACTION_SELECT: return "SELECT";
+
+	case PLATFORM_INPUT_ACTION_LEFT_X: return "LEFT STICK - LEFT / RIGHT";
+	case PLATFORM_INPUT_ACTION_LEFT_Y: return "LEFT STICK - UP / DOWN";
+	case PLATFORM_INPUT_ACTION_RIGHT_X: return "RIGHT STICK - LEFT / RIGHT";
+	case PLATFORM_INPUT_ACTION_RIGHT_Y: return "RIGHT STICK - UP / DOWN";
+	default: return Platform_InputGetActionDisplayName(action);
+	}
+}
+
+static int MainFreeze_NativeOptionsControlsRowCount(void)
+{
+	switch (s_nativeControlsView)
+	{
+	case NATIVE_CONTROLS_VIEW_PLAYER:
+		return NATIVE_CONTROLS_PLAYER_CONFIG_ROW_COUNT;
+
+	case NATIVE_CONTROLS_VIEW_REMAP:
+		return MainFreeze_NativeControlsRemapActionCount() + 1;
+
+	default:
+		return NATIVE_CONTROLS_PLAYER_LIST_ROW_COUNT;
+	}
+}
+
+static void MainFreeze_NativeControlsFitText(char *text, int maxWidth)
+{
+	int len;
+
+	if (text == NULL || maxWidth < 16)
+		return;
+
+	if (DecalFont_GetLineWidth(text, FONT_SMALL) <= maxWidth)
+		return;
+
+	len = (int)strlen(text);
+	while (len > 3)
+	{
+		text[len - 3] = '.';
+		text[len - 2] = '.';
+		text[len - 1] = '.';
+		text[len] = 0;
+		if (DecalFont_GetLineWidth(text, FONT_SMALL) <= maxWidth)
+			return;
+		len--;
+		text[len] = 0;
+	}
+
+	snprintf(text, 4, "...");
+}
+
+static void MainFreeze_NativeControlsGetDeviceText(
+	int playerIndex,
+	char *out,
+	int outSize)
+{
+	int kind;
+	int deviceIndex;
+	struct PlatformInputDeviceInfo info;
+
+	if (out == NULL || outSize <= 0)
+		return;
+
+	out[0] = 0;
+	kind = Platform_InputGetPlayerDeviceKind(playerIndex);
+
+	if (kind == PLATFORM_INPUT_DEVICE_NONE)
+	{
+		snprintf(out, (size_t)outSize, "UNASSIGNED");
+		return;
+	}
+
+	if (kind == PLATFORM_INPUT_DEVICE_KEYBOARD)
+	{
+		snprintf(out, (size_t)outSize, "KEYBOARD");
+		return;
+	}
+
+	deviceIndex = Platform_InputGetPlayerDeviceIndex(playerIndex);
+	if (deviceIndex >= 1 &&
+	    Platform_InputGetDeviceInfo(deviceIndex, &info))
+	{
+		snprintf(out, (size_t)outSize, "%s", info.name);
+		MainFreeze_NativeControlsFitText(out, 150);
+		return;
+	}
+
+	snprintf(out, (size_t)outSize, "GAMEPAD (DISCONNECTED)");
+}
+
+static void MainFreeze_NativeControlsGetGlyphText(
+	int playerIndex,
+	char *out,
+	int outSize)
+{
+	int requested;
+	int resolved;
+
+	if (out == NULL || outSize <= 0)
+		return;
+
+	requested = Platform_InputGetPlayerGlyphStyle(playerIndex);
+	resolved = Platform_InputResolvePlayerGlyphStyle(playerIndex);
+
+	if (requested == PLATFORM_INPUT_GLYPH_AUTO)
+	{
+		snprintf(out, (size_t)outSize, "AUTO (%s)",
+		         Platform_InputGetGlyphStyleName(resolved));
+	}
+	else
+	{
+		snprintf(out, (size_t)outSize, "%s",
+		         Platform_InputGetGlyphStyleName(requested));
+	}
+}
+
+static void MainFreeze_NativeControlsDrawStateSlotAt(
+	int offsetX,
+	int x,
+	int y,
+	int waiting)
 {
 	struct GameTracker *gGT = sdata->gGT;
-	int rowY = 62;
-	int visibleRow = 0;
-	int multitapStringOffset = (sdata->gGamepads->slotBuffer[0].controllerData == (PAD_ID_MULTITAP << 4)) ? 2 : 0;
+	RECT slot = {
+		.x = (s16)(x + offsetX),
+		.y = (s16)(y - 2),
+		.w = 24,
+		.h = 11,
+	};
+	Color color;
 
-	for (int i = 0; i < gamepad->numGamepads; i++, visibleRow++)
+	if (Platform_InputGlyphsDrawState(
+			waiting,
+			slot.x, slot.y, slot.w, slot.h,
+			&gGT->backBuffer->primMem,
+			gGT->backBuffer->otMem.uiOT))
 	{
-		const int currPad = gamepad->gamepadId[i];
-		int color = ORANGE;
-		struct ControllerPacket *packet = sdata->gGamepads->gamepad[currPad].ptrControllerPacket;
-		if ((packet == NULL) || (packet->plugged != PLUGGED))
-			color = GRAY;
-
-		DecalFont_DrawLine(sdata->lngStrings[data.Options_StringIDs_Gamepads[currPad + multitapStringOffset]],
-		                   78 + offsetX, rowY + visibleRow * 18, FONT_SMALL, color);
-
-		const b32 vibrationOff = (gGT->gameMode1 & data.gGT_gameMode1_VibPerPlayer[currPad]) != 0;
-		DecalFont_DrawLine(sdata->lngStrings[325 + vibrationOff], 434 + offsetX,
-		                   rowY + visibleRow * 18, FONT_SMALL, JUSTIFY_RIGHT | (color == GRAY ? GRAY : WHITE));
+		return;
 	}
 
-	for (int i = 0; i < gamepad->numAnalogs; i++, visibleRow++)
+	/* Asset missing/renderer unavailable: retain a safe retail-style fallback. */
+	color.self = waiting ?
+		sdata->menuRowHighlight_Normal.self :
+		sdata->battleSetup_Color_UI_1;
+
+	if (waiting)
+		CTR_Box_DrawClearBox(&slot, &color, TRANS_50_DECAL,
+		                     gGT->backBuffer->otMem.uiOT);
+	else
+		RECTMENU_DrawOuterRect_Edge(
+			&slot, color, 0x20, gGT->backBuffer->otMem.uiOT);
+
+	if (waiting)
+		DecalFont_DrawLine("...", x + 12 + offsetX, y - 1,
+		                   FONT_SMALL, JUSTIFY_CENTER | WHITE);
+}
+
+static void MainFreeze_NativeControlsDrawEmptySlot(
+	int offsetX,
+	int y,
+	int waiting)
+{
+	MainFreeze_NativeControlsDrawStateSlotAt(
+		offsetX, 405, y, waiting);
+}
+
+static void MainFreeze_NativeControlsDrawPlayers(int offsetX)
+{
+	char label[24];
+	char device[PLATFORM_INPUT_DEVICE_NAME_MAX];
+	int playerIndex;
+
+	for (playerIndex = 0; playerIndex < PLATFORM_INPUT_PAD_COUNT; playerIndex++)
 	{
-		const int currPad = gamepad->analogId[i];
-		DecalFont_DrawLine(sdata->lngStrings[data.Options_StringIDs_Gamepads[currPad + multitapStringOffset]],
-		                   78 + offsetX, rowY + visibleRow * 18, FONT_SMALL, ORANGE);
-		DecalFont_DrawLine("CONFIGURE", 434 + offsetX, rowY + visibleRow * 18,
-		                   FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+		const int y = 57 + playerIndex * 22;
+		const int hasDevice =
+			Platform_InputGetPlayerDeviceKind(playerIndex) !=
+			PLATFORM_INPUT_DEVICE_NONE;
+		const int textColor = hasDevice ? ORANGE : GRAY;
+
+		snprintf(label, sizeof(label), "PLAYER %d", playerIndex + 1);
+		MainFreeze_NativeControlsGetDeviceText(
+			playerIndex, device, sizeof(device));
+
+		DecalFont_DrawLine(label, 112 + offsetX, y,
+		                   FONT_SMALL, textColor);
+		DecalFont_DrawLine(device, 432 + offsetX, y,
+		                   FONT_SMALL, JUSTIFY_RIGHT | textColor);
 	}
 
-	DecalFont_DrawLine("BACK", 78 + offsetX, rowY + visibleRow * 18, FONT_SMALL, ORANGE);
+	DecalFont_DrawLine("BACK", 112 + offsetX, 145,
+	                   FONT_SMALL, ORANGE);
+	MainFreeze_NativeOptionsDrawActionBinding(
+		0, PLATFORM_INPUT_ACTION_TRIANGLE, offsetX, 145);
 
-	const int row = s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_CONTROLS];
-	MainFreeze_NativeOptionsDrawCursor(offsetX, 59 + row * 18, 14);
-	MainFreeze_NativeOptionsDrawFrame("CONTROLS", offsetX, 145);
+	MainFreeze_NativeControlsDrawCursor(
+		offsetX, 54 + s_nativeControlsRow * 22, 15);
+	MainFreeze_NativeControlsDrawFrame("CONTROLS", offsetX, 170);
+}
+
+static void MainFreeze_NativeControlsBeginNameEdit(void)
+{
+	const char *current;
+
+	if (s_nativeControlsPlayer < 0 ||
+	    s_nativeControlsPlayer >= PLATFORM_INPUT_PAD_COUNT)
+		return;
+
+	current = Platform_GetPlayerName(s_nativeControlsPlayer);
+	snprintf(
+		s_nativeControlsNameBuffer,
+		sizeof(s_nativeControlsNameBuffer),
+		"%s",
+		current != NULL ? current : "");
+
+	s_nativeControlsNameLen =
+		(int)strlen(s_nativeControlsNameBuffer);
+	s_nativeControlsNamePlayer = s_nativeControlsPlayer;
+	s_nativeControlsNameEditing = 1;
+	Platform_StartTextInput();
+	OtherFX_Play(1, 1);
+}
+
+static void MainFreeze_NativeControlsEndNameEdit(int commit)
+{
+	if (!s_nativeControlsNameEditing)
+		return;
+
+	if (commit)
+	{
+		Platform_SetPlayerName(
+			s_nativeControlsNamePlayer,
+			s_nativeControlsNameBuffer);
+		OtherFX_Play(1, 1);
+	}
+	else
+	{
+		OtherFX_Play(0, 1);
+	}
+
+	s_nativeControlsNameEditing = 0;
+	s_nativeControlsNamePlayer = -1;
+	s_nativeControlsNameLen = 0;
+	s_nativeControlsNameBuffer[0] = 0;
+	Platform_StopTextInput();
+}
+
+int MainFreeze_NativeControlsHandleTextInput(const char *text)
+{
+	int i;
+
+	if (!s_nativeControlsNameEditing)
+		return 0;
+
+	if (text == NULL)
+		return 1;
+
+	for (i = 0;
+	     text[i] != 0 &&
+	     s_nativeControlsNameLen <
+		     (int)sizeof(s_nativeControlsNameBuffer) - 1;
+	     i++)
+	{
+		unsigned char c = (unsigned char)text[i];
+
+		if (c < 0x20 || c == 0x7f)
+			continue;
+
+		s_nativeControlsNameBuffer[s_nativeControlsNameLen++] =
+			(char)c;
+		s_nativeControlsNameBuffer[s_nativeControlsNameLen] = 0;
+	}
+
+	return 1;
+}
+
+int MainFreeze_NativeControlsHandleHostKey(
+	int key,
+	int down,
+	int repeat)
+{
+	if (!s_nativeControlsNameEditing)
+		return 0;
+
+	if (!down)
+		return 1;
+
+	if (key == SDL_SCANCODE_RETURN ||
+	    key == SDL_SCANCODE_KP_ENTER)
+	{
+		if (!repeat)
+			MainFreeze_NativeControlsEndNameEdit(1);
+		return 1;
+	}
+
+	if (key == SDL_SCANCODE_ESCAPE)
+	{
+		if (!repeat)
+			MainFreeze_NativeControlsEndNameEdit(0);
+		return 1;
+	}
+
+	if (key == SDL_SCANCODE_BACKSPACE)
+	{
+		if (s_nativeControlsNameLen > 0)
+		{
+			s_nativeControlsNameLen--;
+			s_nativeControlsNameBuffer[
+				s_nativeControlsNameLen] = 0;
+		}
+		return 1;
+	}
+
+	/* While editing, keyboard input belongs exclusively to the name field. */
+	return 1;
+}
+
+static void MainFreeze_NativeControlsDrawPlayer(int offsetX)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	char title[32];
+	char device[PLATFORM_INPUT_DEVICE_NAME_MAX];
+	char glyph[48];
+	const int playerIndex = s_nativeControlsPlayer;
+	const int kind = Platform_InputGetPlayerDeviceKind(playerIndex);
+	const int deviceTextColor =
+		kind == PLATFORM_INPUT_DEVICE_NONE ? GRAY : ORANGE;
+	const b32 vibrationOff =
+		(gGT->gameMode1 &
+		 data.gGT_gameMode1_VibPerPlayer[playerIndex]) != 0;
+
+	snprintf(title, sizeof(title), "PLAYER %d CONTROLS", playerIndex + 1);
+	MainFreeze_NativeControlsGetDeviceText(playerIndex, device, sizeof(device));
+	MainFreeze_NativeControlsGetGlyphText(playerIndex, glyph, sizeof(glyph));
+
+	DecalFont_DrawLine("DEVICE", 112 + offsetX, 52,
+	                   FONT_SMALL, deviceTextColor);
+	DecalFont_DrawLine(device, 432 + offsetX, 52,
+	                   FONT_SMALL, JUSTIFY_RIGHT | deviceTextColor);
+
+	DecalFont_DrawLine("PLAYER NAME", 112 + offsetX, 70,
+	                   FONT_SMALL, ORANGE);
+	{
+		char playerName[40];
+		const char *storedName =
+			Platform_GetPlayerName(playerIndex);
+
+		if (s_nativeControlsNameEditing &&
+		    s_nativeControlsNamePlayer == playerIndex)
+		{
+			snprintf(
+				playerName,
+				sizeof(playerName),
+				"%s_",
+				s_nativeControlsNameBuffer);
+		}
+		else
+		{
+			snprintf(
+				playerName,
+				sizeof(playerName),
+				"%s",
+				storedName != NULL ? storedName : "PLAYER");
+		}
+
+		MainFreeze_NativeControlsFitText(playerName, 150);
+		DecalFont_DrawLine(
+			playerName,
+			432 + offsetX,
+			70,
+			FONT_SMALL,
+			JUSTIFY_RIGHT |
+			(s_nativeControlsNameEditing &&
+			 s_nativeControlsNamePlayer == playerIndex ?
+				PERIWINKLE : ORANGE));
+	}
+
+	DecalFont_DrawLine("BUTTON ICONS", 112 + offsetX, 88,
+	                   FONT_SMALL, deviceTextColor);
+	MainFreeze_NativeControlsFitText(glyph, 150);
+	DecalFont_DrawLine(glyph, 432 + offsetX, 88,
+	                   FONT_SMALL, JUSTIFY_RIGHT | deviceTextColor);
+
+	DecalFont_DrawLine("VIBRATION", 112 + offsetX, 106,
+	                   FONT_SMALL,
+	                   kind == PLATFORM_INPUT_DEVICE_GAMEPAD ? ORANGE : GRAY);
+	DecalFont_DrawLine(
+		kind == PLATFORM_INPUT_DEVICE_GAMEPAD ?
+			(vibrationOff ? "OFF" : "ON") : "N/A",
+		432 + offsetX, 106, FONT_SMALL,
+		JUSTIFY_RIGHT |
+		(kind == PLATFORM_INPUT_DEVICE_GAMEPAD ? ORANGE : GRAY));
+
+	DecalFont_DrawLine("REMAP CONTROLS", 112 + offsetX, 124,
+	                   FONT_SMALL,
+	                   kind == PLATFORM_INPUT_DEVICE_NONE ? GRAY : ORANGE);
+	DecalFont_DrawLine("RESET DEFAULTS", 112 + offsetX, 142,
+	                   FONT_SMALL,
+	                   kind == PLATFORM_INPUT_DEVICE_NONE ? GRAY : ORANGE);
+	DecalFont_DrawLine("BACK", 112 + offsetX, 160,
+	                   FONT_SMALL, ORANGE);
+	MainFreeze_NativeOptionsDrawActionBinding(
+		0, PLATFORM_INPUT_ACTION_TRIANGLE, offsetX, 160);
+
+	MainFreeze_NativeControlsDrawCursor(
+		offsetX, 49 + s_nativeControlsRow * 18, 15);
+	MainFreeze_NativeControlsDrawFrame(title, offsetX, 184);
+}
+
+static void MainFreeze_NativeControlsClampScroll(void)
+{
+	const int rowCount = MainFreeze_NativeOptionsControlsRowCount();
+	const int maxScroll =
+		rowCount > NATIVE_CONTROLS_REMAP_VISIBLE_ROWS ?
+		rowCount - NATIVE_CONTROLS_REMAP_VISIBLE_ROWS : 0;
+
+	if (s_nativeControlsRow < s_nativeControlsScroll)
+		s_nativeControlsScroll = s_nativeControlsRow;
+	if (s_nativeControlsRow >=
+	    s_nativeControlsScroll + NATIVE_CONTROLS_REMAP_VISIBLE_ROWS)
+	{
+		s_nativeControlsScroll =
+			s_nativeControlsRow -
+			NATIVE_CONTROLS_REMAP_VISIBLE_ROWS + 1;
+	}
+
+	if (s_nativeControlsScroll < 0)
+		s_nativeControlsScroll = 0;
+	if (s_nativeControlsScroll > maxScroll)
+		s_nativeControlsScroll = maxScroll;
+}
+
+static void MainFreeze_NativeControlsFormatRemapBinding(
+	int action,
+	char *out,
+	int outSize)
+{
+	const int kind =
+		Platform_InputGetPlayerDeviceKind(s_nativeControlsPlayer);
+
+	if (out == NULL || outSize <= 0)
+		return;
+
+	if (kind == PLATFORM_INPUT_DEVICE_KEYBOARD)
+	{
+		const int binding =
+			Platform_InputGetKeyboardBindingForPlayer(
+				s_nativeControlsPlayer, action);
+
+		if (binding < 0)
+		{
+			snprintf(out, (size_t)outSize, "--");
+			return;
+		}
+
+		/* Remapping always shows the physical keyboard key, even when the
+		   player forced PlayStation/Xbox/Generic prompt visuals. */
+		if (!Platform_InputFormatBindingName(
+				PLATFORM_INPUT_DEVICE_KEYBOARD,
+				binding,
+				out,
+				outSize))
+		{
+			snprintf(out, (size_t)outSize, "--");
+		}
+		return;
+	}
+
+	Platform_InputFormatPlayerBindingName(
+		s_nativeControlsPlayer, action, out, outSize);
+}
+
+static void MainFreeze_NativeControlsDrawRemap(int offsetX)
+{
+	char title[32];
+	char pageText[24];
+	char binding[128];
+	const int actionCount = MainFreeze_NativeControlsRemapActionCount();
+	const int rowCount = actionCount + 1;
+	int visibleIndex;
+
+	snprintf(title, sizeof(title), "PLAYER %d - REMAP",
+	         s_nativeControlsPlayer + 1);
+
+	MainFreeze_NativeControlsClampScroll();
+
+	snprintf(pageText, sizeof(pageText), "%d/%d",
+	         s_nativeControlsRow + 1, rowCount);
+	DecalFont_DrawLine(pageText, 432 + offsetX, 34,
+	                   FONT_SMALL, JUSTIFY_RIGHT | ORANGE);
+
+	for (visibleIndex = 0;
+	     visibleIndex < NATIVE_CONTROLS_REMAP_VISIBLE_ROWS;
+	     visibleIndex++)
+	{
+		const int row = s_nativeControlsScroll + visibleIndex;
+		const int y = 54 + visibleIndex * 14;
+
+		if (row >= rowCount)
+			break;
+
+		if (row == actionCount)
+		{
+			DecalFont_DrawLine("BACK", 112 + offsetX, y,
+			                   FONT_SMALL, ORANGE);
+			continue;
+		}
+
+		{
+			const int action = MainFreeze_NativeControlsRemapRowAction(row);
+
+			if (MainFreeze_NativeControlsRemapRowIsPowerSlide(row))
+			{
+				char leftBinding[48];
+				char rightBinding[48];
+
+				DecalFont_DrawLine(
+					"POWER SLIDE / HOP",
+					78 + offsetX, y, FONT_SMALL, ORANGE);
+
+				const int leftCenter = 330;
+				const int rightCenter = 410;
+				const int leftSelected =
+					(s_nativeControlsRow == row) &&
+					(s_nativeControlsPowerSlideSide == 0);
+				const int rightSelected =
+					(s_nativeControlsRow == row) &&
+					(s_nativeControlsPowerSlideSide != 0);
+				char leftDisplay[56];
+				char rightDisplay[56];
+
+				MainFreeze_NativeControlsFormatRemapBinding(
+					PLATFORM_INPUT_ACTION_L1,
+					leftBinding,
+					sizeof(leftBinding));
+				MainFreeze_NativeControlsFormatRemapBinding(
+					PLATFORM_INPUT_ACTION_R1,
+					rightBinding,
+					sizeof(rightBinding));
+
+				DecalFont_DrawLine(
+					"|",
+					370 + offsetX, y,
+					FONT_SMALL,
+					JUSTIFY_CENTER | ORANGE);
+
+				if (s_nativeControlsCaptureAction ==
+				    PLATFORM_INPUT_ACTION_L1)
+				{
+					MainFreeze_NativeControlsDrawStateSlotAt(
+						offsetX, leftCenter - 15, y, 1);
+				}
+				else if (strcmp(leftBinding, "--") == 0)
+				{
+					MainFreeze_NativeControlsDrawStateSlotAt(
+						offsetX, leftCenter - 15, y, 0);
+				}
+				else
+				{
+					snprintf(
+						leftDisplay,
+						sizeof(leftDisplay),
+						leftSelected ? "[%s]" : "%s",
+						leftBinding);
+					DecalFont_DrawLine(
+						leftDisplay,
+						leftCenter + offsetX, y,
+						FONT_SMALL,
+						JUSTIFY_CENTER | ORANGE);
+				}
+
+				if (s_nativeControlsCaptureAction ==
+				    PLATFORM_INPUT_ACTION_R1)
+				{
+					MainFreeze_NativeControlsDrawStateSlotAt(
+						offsetX, rightCenter - 15, y, 1);
+				}
+				else if (strcmp(rightBinding, "--") == 0)
+				{
+					MainFreeze_NativeControlsDrawStateSlotAt(
+						offsetX, rightCenter - 15, y, 0);
+				}
+				else
+				{
+					snprintf(
+						rightDisplay,
+						sizeof(rightDisplay),
+						rightSelected ? "[%s]" : "%s",
+						rightBinding);
+					DecalFont_DrawLine(
+						rightDisplay,
+						rightCenter + offsetX, y,
+						FONT_SMALL,
+						JUSTIFY_CENTER | ORANGE);
+				}
+			}
+			else
+			{
+				char actionLabel[64];
+				snprintf(actionLabel, sizeof(actionLabel), "%s",
+				         MainFreeze_NativeControlsRemapLabel(row, action));
+				MainFreeze_NativeControlsFitText(actionLabel, 198);
+				DecalFont_DrawLine(
+					actionLabel,
+					112 + offsetX, y, FONT_SMALL, ORANGE);
+
+				if (s_nativeControlsCaptureAction == action)
+				{
+					MainFreeze_NativeControlsDrawEmptySlot(
+						offsetX, y, 1);
+				}
+				else
+				{
+					MainFreeze_NativeControlsFormatRemapBinding(
+						action,
+						binding,
+						sizeof(binding));
+					MainFreeze_NativeControlsFitText(binding, 92);
+
+					if (strcmp(binding, "--") == 0)
+					{
+						MainFreeze_NativeControlsDrawEmptySlot(
+							offsetX, y, 0);
+					}
+					else
+					{
+						int drewGlyph = 0;
+
+						if (Platform_InputGetPlayerDeviceKind(
+								s_nativeControlsPlayer) ==
+						    PLATFORM_INPUT_DEVICE_GAMEPAD)
+						{
+							const int rawBinding =
+								Platform_InputGetGamepadBindingForPlayer(
+									s_nativeControlsPlayer,
+									action);
+
+							drewGlyph = Platform_InputGlyphsDrawBinding(
+								s_nativeControlsPlayer,
+								rawBinding,
+								405 + offsetX, y - 2, 24, 11,
+								&sdata->gGT->backBuffer->primMem,
+								sdata->gGT->backBuffer->otMem.uiOT);
+						}
+
+						if (!drewGlyph)
+						{
+							DecalFont_DrawLine(
+								binding,
+								432 + offsetX, y,
+								FONT_SMALL,
+								JUSTIFY_RIGHT | ORANGE);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	{
+		const int cursorVisible =
+			s_nativeControlsRow - s_nativeControlsScroll;
+		MainFreeze_NativeControlsDrawCursor(
+			offsetX, 51 + cursorVisible * 14, 12);
+	}
+
+	MainFreeze_NativeControlsDrawFrame(title, offsetX, 190);
+}
+
+static void MainFreeze_NativeOptionsDrawControls(
+	int offsetX,
+	const GAMEPAD_MainFreeze_MenuPtrOptions *gamepad)
+{
+	(void)gamepad;
+
+	switch (s_nativeControlsView)
+	{
+	case NATIVE_CONTROLS_VIEW_PLAYER:
+		MainFreeze_NativeControlsDrawPlayer(offsetX);
+		break;
+
+	case NATIVE_CONTROLS_VIEW_REMAP:
+		MainFreeze_NativeControlsDrawRemap(offsetX);
+		break;
+
+	default:
+		MainFreeze_NativeControlsDrawPlayers(offsetX);
+		break;
+	}
 }
 
 static void MainFreeze_NativeOptionsDrawPage(int page, int offsetX, const GAMEPAD_MainFreeze_MenuPtrOptions *gamepad)
@@ -765,6 +1777,12 @@ static void MainFreeze_NativeOptionsDrawPage(int page, int offsetX, const GAMEPA
 		break;
 	case NATIVE_OPTIONS_PAGE_GRAPHICS:
 		MainFreeze_NativeOptionsDrawGraphics(offsetX);
+		break;
+	case NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS:
+		MainFreeze_NativeOptionsDrawAdvancedGraphics(offsetX);
+		break;
+	case NATIVE_OPTIONS_PAGE_GAMEPLAY:
+		MainFreeze_NativeOptionsDrawGameplay(offsetX);
 		break;
 	case NATIVE_OPTIONS_PAGE_CONTROLS:
 		MainFreeze_NativeOptionsDrawControls(offsetX, gamepad);
@@ -956,6 +1974,14 @@ static void MainFreeze_NativeOptionsInputGraphics(void)
 		return;
 	}
 
+	if ((row == 5) && (sdata->AnyPlayerTap & (BTN_CIRCLE | BTN_CROSS_one)))
+	{
+		OtherFX_Play(1, 1);
+		MainFreeze_NativeOptionsBeginTransition(
+			NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS, 1);
+		return;
+	}
+
 	if (!adjust)
 		return;
 
@@ -972,12 +1998,16 @@ static void MainFreeze_NativeOptionsInputGraphics(void)
 		Platform_SetWideMode(!Platform_GetWideMode());
 		break;
 	case 3:
-		Platform_SetHighRefreshMode(!Platform_GetHighRefreshMode());
+	{
+		int mode = Platform_GetFPSLimitMode();
+		if (sdata->AnyPlayerTap & BTN_LEFT)
+			mode = (mode + PLATFORM_FPS_LIMIT_COUNT - 1) % PLATFORM_FPS_LIMIT_COUNT;
+		else
+			mode = (mode + 1) % PLATFORM_FPS_LIMIT_COUNT;
+		Platform_SetFPSLimitMode(mode);
 		break;
+	}
 	case 4:
-		Platform_SetSubpixelMode(!Platform_GetSubpixelMode());
-		break;
-	case 5:
 	{
 		int mode = Platform_GetCharacterDetailMode();
 		if (sdata->AnyPlayerTap & BTN_LEFT)
@@ -990,57 +2020,584 @@ static void MainFreeze_NativeOptionsInputGraphics(void)
 	}
 }
 
-static void MainFreeze_NativeOptionsInputControls(const GAMEPAD_MainFreeze_MenuPtrOptions *gamepad)
+static void MainFreeze_NativeOptionsInputAdvancedGraphics(void)
 {
-	struct GameTracker *gGT = sdata->gGT;
-	const int rowCount = MainFreeze_NativeOptionsControlsRowCount(gamepad);
-	int row = s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_CONTROLS];
-
-	if (row >= rowCount)
-	{
-		row = rowCount - 1;
-		s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_CONTROLS] = (s16)row;
-	}
+	const int row =
+		s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS];
+	const u32 adjust =
+		sdata->AnyPlayerTap &
+		(BTN_LEFT | BTN_RIGHT | BTN_CIRCLE | BTN_CROSS_one);
 
 	if (sdata->AnyPlayerTap & BTN_UP)
 	{
-		MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_CONTROLS, rowCount, -1);
+		MainFreeze_NativeOptionsMoveRow(
+			NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS,
+			NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT,
+			-1);
 		return;
 	}
+
 	if (sdata->AnyPlayerTap & BTN_DOWN)
 	{
-		MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_CONTROLS, rowCount, 1);
+		MainFreeze_NativeOptionsMoveRow(
+			NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS,
+			NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT,
+			1);
 		return;
 	}
 
-	if ((sdata->AnyPlayerTap & (BTN_CIRCLE | BTN_CROSS_one)) == 0)
+	if ((row == 12) &&
+	    (sdata->AnyPlayerTap & (BTN_CIRCLE | BTN_CROSS_one)))
+	{
+		OtherFX_Play(1, 1);
+		MainFreeze_NativeOptionsBeginTransition(
+			NATIVE_OPTIONS_PAGE_GRAPHICS, -1);
+		return;
+	}
+
+	if (!adjust)
 		return;
 
-	if (row < gamepad->numGamepads)
+	switch (row)
 	{
-		const int currPad = gamepad->gamepadId[row];
-		struct ControllerPacket *packet = sdata->gGamepads->gamepad[currPad].ptrControllerPacket;
-		if ((packet != NULL) && (packet->plugged == PLUGGED))
+	case 1:
+		OtherFX_Play(1, 1);
+		Platform_SetSubpixelMode(!Platform_GetSubpixelMode());
+		break;
+
+	case 2:
+		OtherFX_Play(1, 1);
+		Platform_SetTextureFilteringMode(
+			!Platform_GetTextureFilteringMode());
+		break;
+
+	case 6:
+		OtherFX_Play(1, 1);
+		Platform_SetDitheringMode(!Platform_GetDitheringMode());
+		break;
+
+	case 8:
+		OtherFX_Play(1, 1);
+		Platform_SetPerfOverlayMode(!Platform_GetPerfOverlayMode());
+		break;
+
+	case 9:
+		OtherFX_Play(1, 1);
+		Platform_SetGpuTimingMode(!Platform_GetGpuTimingMode());
+		break;
+
+	case 10:
+		OtherFX_Play(1, 1);
+		Platform_SetExperimentalCompactVRAMMode(
+			!Platform_GetExperimentalCompactVRAMMode());
+		break;
+
+	case 11:
+		OtherFX_Play(1, 1);
+		Platform_SetExperimentalZBufferMode(
+			!Platform_GetExperimentalZBufferMode());
+		break;
+
+	default:
+		/* These rows describe real current backend state but are not yet
+		   adjustable. Do not save fake settings for unimplemented effects. */
+		OtherFX_Play(0, 1);
+		break;
+	}
+}
+
+static void MainFreeze_NativeOptionsInputGameplay(void)
+{
+	const int row = s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_GAMEPLAY];
+	const u32 adjust =
+		sdata->AnyPlayerTap &
+		(BTN_LEFT | BTN_RIGHT | BTN_CIRCLE | BTN_CROSS_one);
+
+	if (sdata->AnyPlayerTap & BTN_UP)
+	{
+		MainFreeze_NativeOptionsMoveRow(
+			NATIVE_OPTIONS_PAGE_GAMEPLAY,
+			NATIVE_OPTIONS_GAMEPLAY_ROW_COUNT,
+			-1);
+		return;
+	}
+
+	if (sdata->AnyPlayerTap & BTN_DOWN)
+	{
+		MainFreeze_NativeOptionsMoveRow(
+			NATIVE_OPTIONS_PAGE_GAMEPLAY,
+			NATIVE_OPTIONS_GAMEPLAY_ROW_COUNT,
+			1);
+		return;
+	}
+
+	if (row == 3)
+	{
+		if (sdata->AnyPlayerTap & (BTN_CIRCLE | BTN_CROSS_one))
 		{
 			OtherFX_Play(1, 1);
-			gGT->gameMode1 ^= data.gGT_gameMode1_VibPerPlayer[currPad];
-			Platform_SaveVibrationMask(gGT->gameMode1 & GAME_MODE_VIBRATION_MASK);
+			MainFreeze_NativeOptionsBeginTransition(
+				NATIVE_OPTIONS_PAGE_ROOT, -1);
 		}
 		return;
 	}
 
-	if (row < gamepad->numGamepads + gamepad->numAnalogs)
+	if (!adjust)
+		return;
+
+	OtherFX_Play(1, 1);
+
+	if (row == 0)
 	{
-		const int analogIndex = row - gamepad->numGamepads;
+		NativeHUD_SetSaffiEnabled(
+			!NativeHUD_GetSaffiEnabled());
+		return;
+	}
+
+	if (row == 1)
+	{
+		NativeHUD_SetReservesBarEnabled(
+			!NativeHUD_GetReservesBarEnabled());
+		return;
+	}
+
+	if (row == 2)
+	{
+		int mode = NativeHUD_GetDriftMeterMode();
+
+		if (sdata->AnyPlayerTap & BTN_LEFT)
+		{
+			mode--;
+			if (mode < NATIVE_HUD_DRIFT_OFF)
+				mode = NATIVE_HUD_DRIFT_CNK_CENTERED;
+		}
+		else
+		{
+			mode++;
+			if (mode > NATIVE_HUD_DRIFT_CNK_CENTERED)
+				mode = NATIVE_HUD_DRIFT_OFF;
+		}
+
+		NativeHUD_SetDriftMeterMode(mode);
+	}
+}
+
+static void MainFreeze_NativeControlsMoveRow(int direction)
+{
+	const int rowCount = MainFreeze_NativeOptionsControlsRowCount();
+
+	if (rowCount <= 0)
+		return;
+
+	s_nativeControlsRow += direction;
+	if (s_nativeControlsRow < 0)
+		s_nativeControlsRow = rowCount - 1;
+	if (s_nativeControlsRow >= rowCount)
+		s_nativeControlsRow = 0;
+
+	if (s_nativeControlsView == NATIVE_CONTROLS_VIEW_REMAP)
+		MainFreeze_NativeControlsClampScroll();
+
+	MainFreeze_TitleOptionsStopVoicePreview();
+	OptionsMenu_TestSound(0, 0);
+	OtherFX_Play(0, 1);
+}
+
+static void MainFreeze_NativeControlsCycleDevice(
+	int playerIndex,
+	int direction)
+{
+	enum { DEVICE_NONE = -2 };
+	int candidates[PLATFORM_INPUT_PAD_COUNT + 2];
+	int candidateCount = 0;
+	int current;
+	int currentPos = -1;
+	int deviceCount;
+	int i;
+
+	candidates[candidateCount++] = DEVICE_NONE;
+	candidates[candidateCount++] = 0; /* keyboard */
+
+	deviceCount = Platform_InputGetDeviceCount();
+	for (i = 1;
+	     i < deviceCount &&
+	     candidateCount < (int)(sizeof(candidates) / sizeof(candidates[0]));
+	     i++)
+	{
+		candidates[candidateCount++] = i;
+	}
+
+	if (candidateCount <= 0)
+		return;
+
+	switch (Platform_InputGetPlayerDeviceKind(playerIndex))
+	{
+	case PLATFORM_INPUT_DEVICE_NONE:
+		current = DEVICE_NONE;
+		break;
+	case PLATFORM_INPUT_DEVICE_KEYBOARD:
+		current = 0;
+		break;
+	default:
+		current = Platform_InputGetPlayerDeviceIndex(playerIndex);
+		break;
+	}
+
+	for (i = 0; i < candidateCount; i++)
+	{
+		if (candidates[i] == current)
+		{
+			currentPos = i;
+			break;
+		}
+	}
+
+	if (currentPos < 0)
+		currentPos = direction > 0 ? -1 : 0;
+
+	currentPos += direction;
+	if (currentPos < 0)
+		currentPos = candidateCount - 1;
+	if (currentPos >= candidateCount)
+		currentPos = 0;
+
+	if (candidates[currentPos] == DEVICE_NONE)
+	{
+		Platform_InputSetPlayerDeviceKind(
+			playerIndex, PLATFORM_INPUT_DEVICE_NONE);
+	}
+	else
+	{
+		Platform_InputAssignDeviceToPlayer(
+			candidates[currentPos], playerIndex);
+	}
+
+	OtherFX_Play(1, 1);
+}
+
+static void MainFreeze_NativeControlsCycleGlyph(
+	int playerIndex,
+	int direction)
+{
+	static const int keyboardStyles[] = {
+		PLATFORM_INPUT_GLYPH_AUTO,
+		PLATFORM_INPUT_GLYPH_KEYBOARD,
+		PLATFORM_INPUT_GLYPH_PLAYSTATION,
+		PLATFORM_INPUT_GLYPH_XBOX,
+		PLATFORM_INPUT_GLYPH_NINTENDO,
+		PLATFORM_INPUT_GLYPH_GENERIC,
+	};
+	static const int gamepadStyles[] = {
+		PLATFORM_INPUT_GLYPH_AUTO,
+		PLATFORM_INPUT_GLYPH_PLAYSTATION,
+		PLATFORM_INPUT_GLYPH_XBOX,
+		PLATFORM_INPUT_GLYPH_NINTENDO,
+		PLATFORM_INPUT_GLYPH_GENERIC,
+	};
+	const int kind = Platform_InputGetPlayerDeviceKind(playerIndex);
+	const int *styles =
+		kind == PLATFORM_INPUT_DEVICE_KEYBOARD ?
+		keyboardStyles : gamepadStyles;
+	const int styleCount =
+		kind == PLATFORM_INPUT_DEVICE_KEYBOARD ?
+		(int)(sizeof(keyboardStyles) / sizeof(keyboardStyles[0])) :
+		(int)(sizeof(gamepadStyles) / sizeof(gamepadStyles[0]));
+	const int current = Platform_InputGetPlayerGlyphStyle(playerIndex);
+	int position = 0;
+
+	for (int i = 0; i < styleCount; i++)
+	{
+		if (styles[i] == current)
+		{
+			position = i;
+			break;
+		}
+	}
+
+	position += direction;
+	if (position < 0)
+		position = styleCount - 1;
+	if (position >= styleCount)
+		position = 0;
+
+	Platform_InputSetPlayerGlyphStyle(playerIndex, styles[position]);
+	OtherFX_Play(1, 1);
+}
+
+static int MainFreeze_NativeControlsBeginCapture(int action)
+{
+	const int deviceIndex =
+		Platform_InputGetPlayerDeviceIndex(s_nativeControlsPlayer);
+
+	if (deviceIndex < 0 ||
+	    !Platform_InputBeginRebindCapture(deviceIndex))
+	{
+		OtherFX_Play(0, 1);
+		return 0;
+	}
+
+	s_nativeControlsCaptureAction = action;
+	s_nativeControlsCaptureDeviceIndex = deviceIndex;
+	RECTMENU_ClearInput();
+	OtherFX_Play(1, 1);
+	return 1;
+}
+
+static int MainFreeze_NativeControlsPollCapture(void)
+{
+	int binding = -1;
+	const int result = Platform_InputPollRebindCapture(&binding);
+
+	if (result == 0)
+		return 1;
+
+	if (result > 0 && s_nativeControlsCaptureAction >= 0)
+	{
+		const int kind =
+			Platform_InputGetPlayerDeviceKind(s_nativeControlsPlayer);
+
+		if (kind == PLATFORM_INPUT_DEVICE_KEYBOARD)
+		{
+			Platform_InputSetKeyboardBindingForPlayer(
+				s_nativeControlsPlayer,
+				s_nativeControlsCaptureAction,
+				binding);
+		}
+		else if (kind == PLATFORM_INPUT_DEVICE_GAMEPAD)
+		{
+			Platform_InputSetGamepadBindingForPlayer(
+				s_nativeControlsPlayer,
+				s_nativeControlsCaptureAction,
+				binding);
+		}
+
 		OtherFX_Play(1, 1);
-		sdata->gamepadID_OwnerRaceWheelConfig = gamepad->analogId[analogIndex];
-		sdata->boolOpenWheelConfig = true;
-		sdata->raceWheelConfigPageIndex = 0;
+	}
+
+	Platform_InputCancelRebindCapture();
+	s_nativeControlsCaptureAction = -1;
+	s_nativeControlsCaptureDeviceIndex = -1;
+	/* A freshly rebound Accelerate/Brake key can immediately become a menu
+	   Cross/Square input on the next host frame while the key is still held.
+	   Hold menu ownership until every mapped control returns to neutral. */
+	s_nativeControlsWaitForNeutral = 1;
+	RECTMENU_ClearInput();
+	return 1;
+}
+
+static void MainFreeze_NativeControlsClearCurrentBinding(void)
+{
+	const int actionCount = MainFreeze_NativeControlsRemapActionCount();
+	int action;
+	int kind;
+
+	if (s_nativeControlsView != NATIVE_CONTROLS_VIEW_REMAP ||
+	    s_nativeControlsRow < 0 ||
+	    s_nativeControlsRow >= actionCount)
+	{
+		return;
+	}
+
+	action = MainFreeze_NativeControlsRemapRowAction(
+		s_nativeControlsRow);
+	kind = Platform_InputGetPlayerDeviceKind(s_nativeControlsPlayer);
+
+	if (kind == PLATFORM_INPUT_DEVICE_KEYBOARD)
+	{
+		Platform_InputSetKeyboardBindingForPlayer(
+			s_nativeControlsPlayer, action, -1);
+	}
+	else if (kind == PLATFORM_INPUT_DEVICE_GAMEPAD)
+	{
+		Platform_InputSetGamepadBindingForPlayer(
+			s_nativeControlsPlayer, action, -1);
+	}
+	else
+	{
 		return;
 	}
 
 	OtherFX_Play(1, 1);
-	MainFreeze_NativeOptionsBeginTransition(NATIVE_OPTIONS_PAGE_ROOT, -1);
+}
+
+static void MainFreeze_NativeOptionsInputControls(
+	const GAMEPAD_MainFreeze_MenuPtrOptions *gamepad)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	const u32 confirm = BTN_CIRCLE | BTN_CROSS_one;
+	int rowCount;
+
+	(void)gamepad;
+
+	if (s_nativeControlsNameEditing)
+	{
+		RECTMENU_ClearInput();
+		return;
+	}
+
+	if (s_nativeControlsCaptureAction >= 0)
+	{
+		MainFreeze_NativeControlsPollCapture();
+		return;
+	}
+
+	if (s_nativeControlsWaitForNeutral)
+	{
+		if (sdata->AnyPlayerHold == 0)
+			s_nativeControlsWaitForNeutral = 0;
+		RECTMENU_ClearInput();
+		return;
+	}
+
+	rowCount = MainFreeze_NativeOptionsControlsRowCount();
+	if (rowCount <= 0)
+		return;
+
+	if (s_nativeControlsRow >= rowCount)
+		s_nativeControlsRow = rowCount - 1;
+
+	if (sdata->AnyPlayerTap & BTN_UP)
+	{
+		MainFreeze_NativeControlsMoveRow(-1);
+		return;
+	}
+
+	if (sdata->AnyPlayerTap & BTN_DOWN)
+	{
+		MainFreeze_NativeControlsMoveRow(1);
+		return;
+	}
+
+	if (s_nativeControlsView == NATIVE_CONTROLS_VIEW_REMAP)
+	{
+		const int actionCount = MainFreeze_NativeControlsRemapActionCount();
+
+		if (MainFreeze_NativeControlsRemapRowIsPowerSlide(
+		        s_nativeControlsRow) &&
+		    (sdata->AnyPlayerTap & (BTN_LEFT | BTN_RIGHT)))
+		{
+			s_nativeControlsPowerSlideSide =
+				(sdata->AnyPlayerTap & BTN_RIGHT) ? 1 : 0;
+			OtherFX_Play(1, 1);
+			return;
+		}
+
+		if ((sdata->AnyPlayerTap & BTN_SELECT) &&
+		    s_nativeControlsRow < actionCount)
+		{
+			MainFreeze_NativeControlsClearCurrentBinding();
+			return;
+		}
+
+		if ((sdata->AnyPlayerTap & confirm) == 0)
+			return;
+
+		if (s_nativeControlsRow == actionCount)
+		{
+			s_nativeControlsView = NATIVE_CONTROLS_VIEW_PLAYER;
+			s_nativeControlsRow = 4;
+			s_nativeControlsScroll = 0;
+			OtherFX_Play(1, 1);
+			return;
+		}
+
+		MainFreeze_NativeControlsBeginCapture(
+			MainFreeze_NativeControlsRemapRowAction(
+				s_nativeControlsRow));
+		return;
+	}
+
+	if (s_nativeControlsView == NATIVE_CONTROLS_VIEW_PLAYER)
+	{
+		const int kind =
+			Platform_InputGetPlayerDeviceKind(s_nativeControlsPlayer);
+
+		if (s_nativeControlsRow == 0 &&
+		    (sdata->AnyPlayerTap & (BTN_LEFT | BTN_RIGHT | confirm)))
+		{
+			MainFreeze_NativeControlsCycleDevice(
+				s_nativeControlsPlayer,
+				(sdata->AnyPlayerTap & BTN_LEFT) ? -1 : 1);
+			return;
+		}
+
+		if (s_nativeControlsRow == 2 &&
+		    (sdata->AnyPlayerTap & (BTN_LEFT | BTN_RIGHT | confirm)))
+		{
+			MainFreeze_NativeControlsCycleGlyph(
+				s_nativeControlsPlayer,
+				(sdata->AnyPlayerTap & BTN_LEFT) ? -1 : 1);
+			return;
+		}
+
+		if ((sdata->AnyPlayerTap & confirm) == 0)
+			return;
+
+		switch (s_nativeControlsRow)
+		{
+		case 1:
+			MainFreeze_NativeControlsBeginNameEdit();
+			break;
+
+		case 3:
+			if (kind == PLATFORM_INPUT_DEVICE_GAMEPAD)
+			{
+				gGT->gameMode1 ^=
+					data.gGT_gameMode1_VibPerPlayer[
+						s_nativeControlsPlayer];
+				Platform_SaveVibrationMask(
+					gGT->gameMode1 & GAME_MODE_VIBRATION_MASK);
+				OtherFX_Play(1, 1);
+			}
+			break;
+
+		case 4:
+			if (kind != PLATFORM_INPUT_DEVICE_NONE)
+			{
+				s_nativeControlsView = NATIVE_CONTROLS_VIEW_REMAP;
+				s_nativeControlsRow = 0;
+				s_nativeControlsScroll = 0;
+				s_nativeControlsPowerSlideSide = 0;
+				OtherFX_Play(1, 1);
+			}
+			break;
+
+		case 5:
+			if (kind != PLATFORM_INPUT_DEVICE_NONE)
+			{
+				Platform_InputResetBindingsForPlayer(
+					s_nativeControlsPlayer);
+				OtherFX_Play(1, 1);
+			}
+			break;
+
+		case 6:
+			s_nativeControlsView = NATIVE_CONTROLS_VIEW_PLAYERS;
+			s_nativeControlsRow = s_nativeControlsPlayer;
+			OtherFX_Play(1, 1);
+			break;
+		}
+
+		return;
+	}
+
+	/* Player list. */
+	if ((sdata->AnyPlayerTap & confirm) == 0)
+		return;
+
+	if (s_nativeControlsRow >= PLATFORM_INPUT_PAD_COUNT)
+	{
+		OtherFX_Play(1, 1);
+		MainFreeze_NativeOptionsBeginTransition(
+			NATIVE_OPTIONS_PAGE_ROOT, -1);
+		return;
+	}
+
+	s_nativeControlsPlayer = s_nativeControlsRow;
+	s_nativeControlsView = NATIVE_CONTROLS_VIEW_PLAYER;
+	s_nativeControlsRow = 0;
+	s_nativeControlsScroll = 0;
+	OtherFX_Play(1, 1);
 }
 
 static void MainFreeze_NativeOptionsApplyTouch(const GAMEPAD_MainFreeze_MenuPtrOptions *gamepad)
@@ -1051,10 +2608,34 @@ static void MainFreeze_NativeOptionsApplyTouch(const GAMEPAD_MainFreeze_MenuPtrO
 	int rowStartY;
 	int rowStep;
 	int rowHeight;
+	int rowX = 74;
+	int rowWidth = 364;
 	int row = -1;
 
 	if (!RECTMENU_NativeTouchGet(&mouseX, &mouseY))
 		return;
+
+	/* In the remap list, the only exits are the explicit BACK row below
+	   and the visible top-left BACK button when clicked with the mouse. */
+	if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_CONTROLS &&
+	    s_nativeControlsView == NATIVE_CONTROLS_VIEW_REMAP)
+	{
+		RECT topBackRect = {.x = 8, .y = 4, .w = 88, .h = 28};
+
+		if ((mouseX >= topBackRect.x) &&
+		    (mouseX < topBackRect.x + topBackRect.w) &&
+		    (mouseY >= topBackRect.y) &&
+		    (mouseY < topBackRect.y + topBackRect.h) &&
+		    RECTMENU_NativeTouchConsumeRect(&topBackRect))
+		{
+			s_nativeControlsView = NATIVE_CONTROLS_VIEW_PLAYER;
+			s_nativeControlsRow = 4;
+			s_nativeControlsScroll = 0;
+			RECTMENU_ClearInput();
+			OtherFX_Play(1, 1);
+			return;
+		}
+	}
 
 	switch (s_nativeOptionsPage)
 	{
@@ -1070,11 +2651,44 @@ static void MainFreeze_NativeOptionsApplyTouch(const GAMEPAD_MainFreeze_MenuPtrO
 		rowStep = 18;
 		rowHeight = 14;
 		break;
-	case NATIVE_OPTIONS_PAGE_CONTROLS:
-		rowCount = MainFreeze_NativeOptionsControlsRowCount(gamepad);
+	case NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS:
+		rowCount = NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT;
+		rowStartY = 51;
+		rowStep = 14;
+		rowHeight = 12;
+		break;
+	case NATIVE_OPTIONS_PAGE_GAMEPLAY:
+		rowCount = NATIVE_OPTIONS_GAMEPLAY_ROW_COUNT;
 		rowStartY = 59;
-		rowStep = 18;
-		rowHeight = 14;
+		rowStep = 22;
+		rowHeight = 16;
+		break;
+	case NATIVE_OPTIONS_PAGE_CONTROLS:
+		rowCount = MainFreeze_NativeOptionsControlsRowCount();
+		rowX = 108;
+		rowWidth = 332;
+		if (s_nativeControlsView == NATIVE_CONTROLS_VIEW_PLAYERS)
+		{
+			rowStartY = 54;
+			rowStep = 22;
+			rowHeight = 15;
+		}
+		else if (s_nativeControlsView == NATIVE_CONTROLS_VIEW_PLAYER)
+		{
+			rowStartY = 49;
+			rowStep = 18;
+			rowHeight = 15;
+		}
+		else
+		{
+			int remaining = rowCount - s_nativeControlsScroll;
+			if (remaining > NATIVE_CONTROLS_REMAP_VISIBLE_ROWS)
+				remaining = NATIVE_CONTROLS_REMAP_VISIBLE_ROWS;
+			rowCount = remaining;
+			rowStartY = 51;
+			rowStep = 14;
+			rowHeight = 12;
+		}
 		break;
 	default:
 		rowCount = NATIVE_OPTIONS_ROOT_ROW_COUNT;
@@ -1087,9 +2701,9 @@ static void MainFreeze_NativeOptionsApplyTouch(const GAMEPAD_MainFreeze_MenuPtrO
 	for (int i = 0; i < rowCount; i++)
 	{
 		RECT rowRect = {
-			.x = 74,
+			.x = (s16)rowX,
 			.y = (s16)(rowStartY + i * rowStep),
-			.w = 364,
+			.w = (s16)rowWidth,
 			.h = (s16)rowHeight,
 		};
 
@@ -1099,7 +2713,16 @@ static void MainFreeze_NativeOptionsApplyTouch(const GAMEPAD_MainFreeze_MenuPtrO
 		    (mouseY < rowRect.y + rowRect.h))
 		{
 			row = i;
-			s_nativeOptionsRows[s_nativeOptionsPage] = (s16)i;
+			if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_CONTROLS)
+			{
+				s_nativeControlsRow =
+					(s_nativeControlsView == NATIVE_CONTROLS_VIEW_REMAP) ?
+					(s_nativeControlsScroll + i) : i;
+			}
+			else
+			{
+				s_nativeOptionsRows[s_nativeOptionsPage] = (s16)i;
+			}
 			break;
 		}
 	}
@@ -1133,9 +2756,9 @@ static void MainFreeze_NativeOptionsApplyTouch(const GAMEPAD_MainFreeze_MenuPtrO
 
 	{
 		RECT rowRect = {
-			.x = 74,
+			.x = (s16)rowX,
 			.y = (s16)(rowStartY + row * rowStep),
-			.w = 364,
+			.w = (s16)rowWidth,
 			.h = (s16)rowHeight,
 		};
 
@@ -1228,6 +2851,37 @@ static b32 MainFreeze_NativeOptionsUpdate(struct RectMenu *menu, GAMEPAD_MainFre
 	/* Stable custom page: mouse hover selects the row; click activates it. */
 	MainFreeze_NativeOptionsApplyTouch(gamepad);
 
+	/* While waiting for a raw key/button, the rebind capture owns input.
+	   This must happen before START/BACK handling so those buttons can
+	   themselves be assigned without closing Options. */
+	if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_CONTROLS &&
+	    s_nativeControlsCaptureAction >= 0)
+	{
+		MainFreeze_NativeOptionsInputControls(gamepad);
+		MainFreeze_NativeOptionsDrawPage(s_nativeOptionsPage, 0, gamepad);
+		return false;
+	}
+
+	if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_CONTROLS &&
+	    s_nativeControlsWaitForNeutral)
+	{
+		MainFreeze_NativeOptionsInputControls(gamepad);
+		MainFreeze_NativeOptionsDrawPage(s_nativeOptionsPage, 0, gamepad);
+		return false;
+	}
+
+	/* Remap is intentionally modal: controller/keyboard shortcuts must not
+	   leave it. START, Triangle and Square are ignored here. The BACK row
+	   and the mouse-only top-left BACK hit target are the only exits. */
+	if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_CONTROLS &&
+	    s_nativeControlsView == NATIVE_CONTROLS_VIEW_REMAP &&
+	    (sdata->AnyPlayerTap & (BTN_START | BTN_TRIANGLE | BTN_SQUARE_one)))
+	{
+		RECTMENU_ClearInput();
+		MainFreeze_NativeOptionsDrawPage(s_nativeOptionsPage, 0, gamepad);
+		return false;
+	}
+
 	if (sdata->AnyPlayerTap & BTN_START)
 	{
 		OtherFX_Play(1, 1);
@@ -1246,8 +2900,37 @@ static b32 MainFreeze_NativeOptionsUpdate(struct RectMenu *menu, GAMEPAD_MainFre
 			return false;
 		}
 
+		if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_CONTROLS)
+		{
+			if (s_nativeControlsView == NATIVE_CONTROLS_VIEW_REMAP)
+			{
+				s_nativeControlsView = NATIVE_CONTROLS_VIEW_PLAYER;
+				s_nativeControlsRow = 4;
+				s_nativeControlsScroll = 0;
+				OtherFX_Play(1, 1);
+				MainFreeze_NativeOptionsDrawPage(
+					s_nativeOptionsPage, 0, gamepad);
+				return false;
+			}
+
+			if (s_nativeControlsView == NATIVE_CONTROLS_VIEW_PLAYER)
+			{
+				s_nativeControlsView = NATIVE_CONTROLS_VIEW_PLAYERS;
+				s_nativeControlsRow = s_nativeControlsPlayer;
+				OtherFX_Play(1, 1);
+				MainFreeze_NativeOptionsDrawPage(
+					s_nativeOptionsPage, 0, gamepad);
+				return false;
+			}
+		}
+
 		OtherFX_Play(1, 1);
-		MainFreeze_NativeOptionsBeginTransition(NATIVE_OPTIONS_PAGE_ROOT, -1);
+		if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS)
+			MainFreeze_NativeOptionsBeginTransition(
+				NATIVE_OPTIONS_PAGE_GRAPHICS, -1);
+		else
+			MainFreeze_NativeOptionsBeginTransition(
+				NATIVE_OPTIONS_PAGE_ROOT, -1);
 		MainFreeze_NativeOptionsDrawPage(s_nativeOptionsPage, 0, gamepad);
 		return false;
 	}
@@ -1260,6 +2943,12 @@ static b32 MainFreeze_NativeOptionsUpdate(struct RectMenu *menu, GAMEPAD_MainFre
 	case NATIVE_OPTIONS_PAGE_GRAPHICS:
 		MainFreeze_NativeOptionsInputGraphics();
 		break;
+	case NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS:
+		MainFreeze_NativeOptionsInputAdvancedGraphics();
+		break;
+	case NATIVE_OPTIONS_PAGE_GAMEPLAY:
+		MainFreeze_NativeOptionsInputGameplay();
+		break;
 	case NATIVE_OPTIONS_PAGE_CONTROLS:
 		MainFreeze_NativeOptionsInputControls(gamepad);
 		break;
@@ -1271,7 +2960,7 @@ static b32 MainFreeze_NativeOptionsUpdate(struct RectMenu *menu, GAMEPAD_MainFre
 		else if (sdata->AnyPlayerTap & (BTN_CIRCLE | BTN_CROSS_one))
 		{
 			const int row = s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_ROOT];
-			if (row == 3)
+			if (row == 4)
 			{
 				OtherFX_Play(1, 1);
 				MainFreeze_NativeOptionsBeginExit();
@@ -1504,12 +3193,13 @@ force_inline b32 PROCESSINPUTS_MainFreeze_MenuPtrOptions(struct RectMenu *menu, 
 			OptionsMenu_TestSound(0, 0);
 			if (sdata->AnyPlayerTap & (BTN_LEFT | BTN_RIGHT | BTN_CIRCLE | BTN_CROSS_one))
 			{
-				const int oldMode = Platform_GetHighRefreshMode();
-				const int newMode = !oldMode;
-				Platform_Log("[CTR Native] V70 MENU HIGH REFRESH row=%d tap=%08x old=%d new=%d\n",
-				             menu->rowSelected, (unsigned)sdata->AnyPlayerTap, oldMode, newMode);
+				int mode = Platform_GetFPSLimitMode();
+				if (sdata->AnyPlayerTap & BTN_LEFT)
+					mode = (mode + PLATFORM_FPS_LIMIT_COUNT - 1) % PLATFORM_FPS_LIMIT_COUNT;
+				else
+					mode = (mode + 1) % PLATFORM_FPS_LIMIT_COUNT;
 				OtherFX_Play(1, 1);
-				Platform_SetHighRefreshMode(newMode);
+				Platform_SetFPSLimitMode(mode);
 			}
 #endif
 			break;
@@ -1745,13 +3435,10 @@ force_inline void DISPLAYRECTMENU_MainFreeze_MenuPtrOptions(struct RectMenu *men
 	DecalFont_DrawLine("SCREEN", 76, nativeOptionsY, FONT_SMALL, ORANGE);
 	DecalFont_DrawLine(Platform_GetWideMode() ? "16:9" : "4:3", 436, nativeOptionsY, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
 
-	DecalFont_DrawLine("HIGH REFRESH", 76, nativeOptionsY + 10, FONT_SMALL, ORANGE);
+	DecalFont_DrawLine("FPS LIMIT", 76, nativeOptionsY + 10, FONT_SMALL, ORANGE);
 	{
 		char refreshText[24];
-		if (Platform_GetHighRefreshMode())
-			snprintf(refreshText, sizeof(refreshText), "%d FPS", Platform_GetHighRefreshTargetFPS());
-		else
-			snprintf(refreshText, sizeof(refreshText), "OFF");
+		MainFreeze_NativeFormatFPSLimit(refreshText, (int)sizeof(refreshText));
 		DecalFont_DrawLine(refreshText, 436, nativeOptionsY + 10, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
 	}
 
@@ -1840,6 +3527,12 @@ void MainFreeze_MenuPtrOptions(struct RectMenu *menu)
 		OptionsMenu_TestSound(0, 0);
 		MainFreeze_TitleOptionsStopVoicePreview();
 		RECTMENU_ClearInput();
+		if (s_nativeControlsNameEditing)
+			Platform_StopTextInput();
+		s_nativeControlsNameEditing = 0;
+		s_nativeControlsNamePlayer = -1;
+		s_nativeControlsNameLen = 0;
+		s_nativeControlsNameBuffer[0] = 0;
 		s_nativeOptionsSessionOpen = 0;
 		s_nativeOptionsTransitionActive = 0;
 
@@ -1882,6 +3575,14 @@ void MainFreeze_MenuPtrQuit(struct RectMenu *menu)
 		row = menu->rowSelected;
 		if (row == 0)
 		{
+#if defined(CTR_NATIVE)
+			if (NativeHangout_IsActive())
+			{
+				/* Restore the temporary Adventure snapshot before leaving the
+				 * social hub. The normal quit path below performs the actual load. */
+				NativeHangout_SetActive(0);
+			}
+#endif
 			// Erase ghost of previous race from RAM
 			GhostTape_Destroy();
 
@@ -1952,7 +3653,11 @@ void MainFreeze_MenuPtrDefault(struct RectMenu *menu)
 	gameMode = gGT->gameMode1;
 
 	// if you have not waited 5 frames since the game was paused then quit
+#if defined(CTR_NATIVE)
+	if ((gGT->cooldownfromPauseUntilUnpause != 0) && !NativeHangout_IsMenuOpen())
+#else
 	if (gGT->cooldownfromPauseUntilUnpause != 0)
+#endif
 	{
 		return;
 	}
@@ -1962,6 +3667,17 @@ void MainFreeze_MenuPtrDefault(struct RectMenu *menu)
 	if (menu->funcState != RECTMENU_FUNC_STATE_INPUT)
 	{
 		menu->drawStyle &= ~RECTMENU_DRAW_STYLE_3P4P_LAYOUT;
+
+#if defined(CTR_NATIVE)
+		/* The retail Adventure pause renderer draws hub name, story progress
+		 * and hint-related decoration. Hangout is a live social overlay, so
+		 * none of that belongs behind its three-row menu. */
+		if (NativeHangout_IsActive() &&
+		    menu == &s_hangoutPauseMenu)
+		{
+			return;
+		}
+#endif
 
 		// if more than 2 screens
 		if (2 < gGT->numPlyrCurrGame)
@@ -2068,6 +3784,16 @@ void MainFreeze_MenuPtrDefault(struct RectMenu *menu)
 
 	// stringID 2: "RESUME"
 	case 2:
+#if defined(CTR_NATIVE)
+		if (NativeHangout_IsMenuOpen())
+		{
+			/* Hangout uses the retail pause menu as a live overlay. Gameplay and
+			 * audio were never paused and ElimBG never captured a screenshot. */
+			NativeHangout_SetMenuOpen(0);
+			OtherFX_Play(1, 1);
+			return;
+		}
+#endif
 
 		// unpause game
 		ElimBG_Deactivate(gGT);
@@ -2200,6 +3926,13 @@ struct RectMenu *MainFreeze_GetMenuPtr(void)
 	struct GameTracker *gGT = sdata->gGT;
 	u32 gameMode = gGT->gameMode1;
 
+#if defined(CTR_NATIVE)
+	if (NativeHangout_IsActive())
+	{
+		return &s_hangoutPauseMenu;
+	}
+#endif
+
 	if ((gameMode & ADVENTURE_ARENA) != 0)
 	{
 		s32 hintString = LNG_UKA_UKA_HINTS;
@@ -2299,11 +4032,23 @@ void MainFreeze_IfPressStart(void)
 		return;
 	}
 
-	gGT->gameMode1 = gameMode1 | PAUSE_1;
-
 	menu = MainFreeze_GetMenuPtr();
 	menu->rowSelected = 0;
 
+#if defined(CTR_NATIVE)
+	if (NativeHangout_IsActive())
+	{
+		/* Hangout pause is a live menu overlay: keep world/audio ticking and
+		 * never enter the retail ElimBG screenshot/frozen-game path. Gameplay
+		 * controls are suppressed separately while this menu hierarchy is open. */
+		NativeHangout_SetMenuOpen(1);
+		RECTMENU_Show(menu);
+		OtherFX_Play(1, 1);
+		return;
+	}
+#endif
+
+	gGT->gameMode1 = gameMode1 | PAUSE_1;
 	RECTMENU_Show(menu);
 	MainFrame_TogglePauseAudio(1);
 	OtherFX_Play(1, 1);

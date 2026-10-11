@@ -656,14 +656,20 @@ int LOAD_TenStages(struct GameTracker *gGT, int loadingStage, struct BigHeader *
 		{
 #if defined(CTR_NATIVE)
 			/* First main-menu load happens immediately after the Naughty Dog crate.
-			   Warm the PC working set once: keep the active disc image resident and
-			   decode all custom music so later level transitions avoid disk I/O and
-			   OGG decode stalls. Both functions are idempotent on later menu loads. */
-			NativeDiscImage_PreloadAll();
-			NativeCustomMusic_PreloadAll();
-			/* First boot used to enter AUDIO_GARAGE_ENTRY before the custom song
-			   had ever become the active source. Bind the resident menu PCM now;
-			   CseqMusic_Start will then see the already-active native track. */
+			 * Decoding every OGG synchronously here used to freeze the checkered
+			 * loading animation and make Windows report the game as not responding.
+			 * Precache only the music on a low-priority worker and keep this loading
+			 * stage alive until it is ready. Do not preload the whole BIN here: normal
+			 * CD reads already have their own path and the giant synchronous warmup
+			 * only adds another avoidable hitch. */
+			if (NativeCustomMusic_PreloadAllAsync() &&
+			    !NativeCustomMusic_IsPreloadComplete())
+			{
+				return loadingStage;
+			}
+
+			/* The main menu currently has no OGG override, so this is normally a
+			 * cheap no-op. If one is added later, the cache is already complete. */
 			NativeCustomMusic_TryStartLevel(currentLevelID);
 #endif
 			audioState = AUDIO_GARAGE_ENTRY;

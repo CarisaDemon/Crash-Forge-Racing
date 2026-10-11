@@ -16,6 +16,7 @@ void LOAD_StringToUpper(char *path)
 
 #ifdef CTR_NATIVE
 #include <platform/native_cd.h>
+#include <platform/native_custom_tracks.h>
 #endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8007c118-0x8007c208.
@@ -342,6 +343,34 @@ void *LOAD_ReadFile_ex(struct BigHeader *bigfile, u32 loadType, int subfileIndex
 	}
 #endif
 
+#if defined(CTR_NATIVE)
+	/* Keep the original BIGFILE untouched. A custom selection substitutes
+	   only its VRM/LEV reads while still using the normal retail loader and
+	   pointer relocation callbacks. Custom maps use the regular Crash Cove
+	   race-mode ID, but never change Crash Cove without an explicit selection. */
+	{
+		int kind = NativeCustomTracks_OverrideKind((int)loadType, subfileIndex);
+		if (kind)
+		{
+			void *loaded = NativeCustomTracks_ReadOverride(kind, ptrDst, sizePtr);
+			if (loaded != NULL)
+			{
+				struct LoadQueueSlot *slot = &data.currSlot;
+				if (!ptrDst) slot->flags |= LT_MEMPACK;
+				else slot->flags &= ~LT_MEMPACK;
+				slot->ptrDestination = loaded;
+				slot->size_UNUSED = *sizePtr;
+				if (callback != NULL)
+					callback(slot);
+				return loaded;
+			}
+			/* Missing/changed mod: downgrade to genuine retail files before
+			   advancing the load queue, rather than using incomplete data. */
+			Platform_Log("[CustomTracks] external level read failed; retail fallback\n");
+			NativeCustomTracks_ClearSelection();
+		}
+	}
+#endif
 	// get size and offset of subfile
 	struct BigEntry *entry = BIG_GETENTRY(bigfile);
 	int eSize = entry[subfileIndex].size;

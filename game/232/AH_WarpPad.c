@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#endif
 
 // NOTE(aalhendi): WarpPad level IDs come from "warppad#NN" instance names
 // and use retail adventure numbering, not the native LevelID enum.
@@ -305,6 +308,31 @@ void AH_WarpPad_ThTick(struct Thread *t)
 	y = warppadMatrix->t[1] - driverInst->matrix.t[1];
 	z = warppadMatrix->t[2] - driverInst->matrix.t[2];
 	dist = x * x + y * y + z * z;
+
+#if defined(CTR_NATIVE)
+	if (NativeHangout_IsActive())
+	{
+		/* Hangout portals are spawn landmarks only. Make the retail state
+		 * genuinely inactive: no beam/rings/rewards/lock counters, no trigger,
+		 * and report LOCKED to the hub map instead of an open race portal. */
+		t->modelIndex = AH_WP_VISUAL_LOCKED;
+
+		for (i = 0; i < WPIS_NUM_INSTANCES; i++)
+		{
+			if (instArr[i] == NULL)
+				continue;
+
+			instArr[i]->animFrame = 0;
+			instArr[i]->flags |= HIDE_MODEL;
+		}
+
+		warppadInst->animFrame = 0;
+		warppadObj->boolEnteredWarppad = 0;
+		warppadObj->framesWarping = 0;
+		D232.levelID = -1;
+		return;
+	}
+#endif
 
 	// if near a portal
 	if (

@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#endif
 
 // budget: 4624
 // curr: 4380
@@ -250,6 +253,10 @@ void VehPhysProc_Driving_PhysLinear(struct Thread *thread, struct Driver *driver
 
 	int msPerFrame;
 	int legacyTicks = 1;
+#if defined(CTR_NATIVE)
+	int nativeReservesBeforeTimer = 0;
+	int nativeOutsideBeforeTimer = 0;
+#endif
 	RainCloudEffect rainCloudEffect;
 	u32 itemSound;
 	u32 actionsFlagSetNext;
@@ -291,8 +298,32 @@ void VehPhysProc_Driving_PhysLinear(struct Thread *thread, struct Driver *driver
 		    CTR_MipsAddLo(driver->distanceDriven, CTR_MipsSra(CTR_MipsMulLo(driver->speedApprox, msPerFrame), VEH_PHYS_PROC_DISTANCE_SPEED_SHIFT));
 	}
 
-	VehPhysProc_Driving_DecrementTimerCounter(&driver->reserves, msPerFrame, &driver->timeSpentUsingReserves);
+#if defined(CTR_NATIVE)
+	nativeReservesBeforeTimer = NativeReserves_Get(driver);
+	nativeOutsideBeforeTimer = driver->turbo_outsideTimer;
+#endif
+	NativeReserves_DecrementCounter(driver, msPerFrame, &driver->timeSpentUsingReserves);
 	VehPhysProc_Driving_DecrementTimer(&driver->turbo_outsideTimer, msPerFrame);
+#if defined(CTR_NATIVE)
+	if (driver->driverID == 0 && nativeReservesBeforeTimer > 0 && NativeReserves_Get(driver) == 0)
+	{
+		Platform_Log(
+			"[TURBODBG] reserves-expired id=%d dt=%d legacy=%d res=%d->0 outside=%d->%d fireCap=%d fireSpeed=%d speed=%d approx=%d step=0x%x actions=0x%x state=%d\n",
+			driver->driverID,
+			msPerFrame,
+			legacyTicks,
+			nativeReservesBeforeTimer,
+			nativeOutsideBeforeTimer,
+			driver->turbo_outsideTimer,
+			driver->fireSpeedCap,
+			driver->fireSpeed,
+			driver->speed,
+			driver->speedApprox,
+			(unsigned int)driver->stepFlagSet,
+			(unsigned int)driver->actionsFlagSet,
+			driver->kartState);
+	}
+#endif
 	VehPhysProc_Driving_DecrementTimer(&driver->VehFire_AudioCooldown, msPerFrame);
 	VehPhysProc_Driving_DecrementTimerCounter(&driver->wallRubTimer, msPerFrame, &driver->timeSpentAgainstWall);
 	VehPhysProc_Driving_DecrementTimer(&driver->jump_ForcedMS, msPerFrame);
@@ -636,7 +667,11 @@ void VehPhysProc_Driving_PhysLinear(struct Thread *thread, struct Driver *driver
 	buttonsTapped = 0;
 
 	// If you're not in End-Of-Race menu
-	if ((gGT->gameMode1 & END_OF_RACE) == 0)
+	if ((gGT->gameMode1 & END_OF_RACE) == 0
+#if defined(CTR_NATIVE)
+	    && !NativeHangout_ShouldBlockGameplayInput()
+#endif
+	   )
 	{
 		buttonsHeld = ptrgamepad->buttonsHeldCurrFrame;
 		buttonsTapped = ptrgamepad->buttonsTapped;
@@ -802,15 +837,37 @@ CheckJumpButtons:
 	    // if you're not on any turbo pad
 	    ((driver->stepFlagSet & COLL_STEP_TRIGGER_TURBO_PAD_MASK) == 0))
 	{
+#if defined(CTR_NATIVE)
+		if (driver->driverID == 0 && NativeReserves_Get(driver) != 0)
+		{
+			Platform_Log(
+				"[TURBODBG] reserves-cleared-by-brake id=%d dt=%d res=%d outside=%d fireCap=%d fireSpeed=%d speed=%d approx=%d buttons=0x%x actions=0x%x state=%d\n",
+				driver->driverID,
+				msPerFrame,
+				NativeReserves_Get(driver),
+				driver->turbo_outsideTimer,
+				driver->fireSpeedCap,
+				driver->fireSpeed,
+				driver->speed,
+				driver->speedApprox,
+				(unsigned int)buttonsHeld,
+				(unsigned int)actionsFlagSetCopy,
+				driver->kartState);
+		}
+#endif
 		// Set Reserves to zero
-		driver->reserves = 0;
+		NativeReserves_Set(driver, 0);
 	}
 
 	// assume normal gas pedal
 	stickRY = VEH_PHYS_PROC_STICK_CENTER;
 
 	// If you're not in End-Of-Race menu
-	if ((gGT->gameMode1 & END_OF_RACE) == 0)
+	if ((gGT->gameMode1 & END_OF_RACE) == 0
+#if defined(CTR_NATIVE)
+	    && !NativeHangout_ShouldBlockGameplayInput()
+#endif
+	   )
 	{
 		// gamepadBuffer -> stickRY (for gas or reverse)
 		stickRY = (int)ptrgamepad->stickRY;
@@ -859,7 +916,11 @@ CheckJumpButtons:
 	stickLY = VEH_PHYS_PROC_STICK_CENTER;
 
 	// If you're not in End-Of-Race menu
-	if ((gGT->gameMode1 & END_OF_RACE) == 0)
+	if ((gGT->gameMode1 & END_OF_RACE) == 0
+#if defined(CTR_NATIVE)
+	    && !NativeHangout_ShouldBlockGameplayInput()
+#endif
+	   )
 	{
 		stickLY = ptrgamepad->stickLY;
 	}
@@ -1139,7 +1200,11 @@ CheckJumpButtons:
 	scratchValue = VEH_PHYS_PROC_STICK_CENTER;
 
 	// If you're not in End-Of-Race menu
-	if ((gGT->gameMode1 & END_OF_RACE) == 0)
+	if ((gGT->gameMode1 & END_OF_RACE) == 0
+#if defined(CTR_NATIVE)
+	    && !NativeHangout_ShouldBlockGameplayInput()
+#endif
+	   )
 	{
 		// gamepadBuffer -> stickLX
 		scratchValue = (int)ptrgamepad->stickLX;
@@ -1330,6 +1395,9 @@ void VehPhysProc_Driving_Update(struct Thread *t, struct Driver *d)
 		if (((CTR_MipsSra(CTR_MipsAddLo(d->const_TurnRate,
 		                                CTR_MipsSll((s8)d->turnConst, VEH_PHYS_PROC_STEER_TURN_CONST_SHIFT) / VEH_PHYS_PROC_STEER_TURN_CONST_DIVISOR),
 		                  VEH_PHYS_PROC_HALF_SPEED_SHIFT) < simpTurnState) &&
+#if defined(CTR_NATIVE)
+		     !NativeHangout_ShouldBlockGameplayInput() &&
+#endif
 
 		     // player has jump buttons held
 		     ((sdata->gGamepads->gamepad[d->driverID].buttonsHeldCurrFrame) & d->buttonUsedToStartDrift) != 0) &&
@@ -2053,11 +2121,21 @@ void VehPhysProc_PowerSlide_Finalize(struct Driver *d)
 void VehPhysProc_PowerSlide_Update(struct Thread *t, struct Driver *d)
 {
 	struct GamepadBuffer *pad = &sdata->gGamepads->gamepad[d->driverID];
+	u16 padButtonsTapped = pad->buttonsTapped;
+	u16 padButtonsHeld = pad->buttonsHeldCurrFrame;
+
+#if defined(CTR_NATIVE)
+	if (NativeHangout_ShouldBlockGameplayInput())
+	{
+		padButtonsTapped = 0;
+		padButtonsHeld = 0;
+	}
+#endif
 
 	// This is the distance remaining that can be filled
 	int meterLeft = d->turbo_MeterRoomLeft;
 
-	if ((pad->buttonsTapped & VEH_PHYS_PROC_JUMP_BUTTON_MASK) == 0)
+	if ((padButtonsTapped & VEH_PHYS_PROC_JUMP_BUTTON_MASK) == 0)
 	{
 		// If there is no room in the turbo meter left to fill
 		if (meterLeft == 0)
@@ -2198,7 +2276,7 @@ void VehPhysProc_PowerSlide_Update(struct Thread *t, struct Driver *d)
 		       ((d->actionsFlagSet & (ACTION_DRIVING_AGAINST_WALL | ACTION_ACCEL_PREVENTION | ACTION_BRAKE_WITH_ACCEL)) != 0)) ||
 
 		      // If the gamepad input is...
-		      ((pad->buttonsHeldCurrFrame &
+		      ((padButtonsHeld &
 
 		        // does not include the jump button that you used to start drifting
 		        d->buttonUsedToStartDrift) == 0))))
@@ -2439,7 +2517,7 @@ void VehPhysProc_SlamWall_Init(struct Thread *t, struct Driver *d)
 	d->turbo_MeterRoomLeft = 0;
 	d->turbo_outsideTimer = 0;
 	d->VehFire_AudioCooldown = 0;
-	d->reserves = 0;
+	NativeReserves_Set(d, 0);
 	d->distanceFromGround = 0;
 	d->jumpSquishStretch = 0;
 	d->reserved_0x40e = 0;

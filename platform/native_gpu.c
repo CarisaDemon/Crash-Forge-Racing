@@ -14,6 +14,8 @@
 #include "platform/native_log.h"
 #include "platform/native_perf.h"
 #include "platform/native_renderer.h"
+#include <platform/native_gpu_model_qa.h>
+#include "platform/native_world.h"
 
 #include <assert.h>
 #include <stdbool.h>
@@ -24,10 +26,14 @@
 void Platform_PollHostEvents(void);
 extern int g_cfg_bilinearFiltering;
 extern int g_cfg_subpixelGeometry;
+extern int g_cfg_psxDithering;
 extern int g_dbg_emulatorPaused;
 extern int g_dbg_polygonSelected;
 int NativeGTE_GetStoredSubpixel(const void *address, u32 packedSxy, float *x, float *y);
+int NativeGTE_GetStoredSubpixelFixed(const void *address, u32 packedSxy, s32 *x16, s32 *y16);
+int NativeGTE_GetStoredSubpixelFixedLocal(const void *address, u32 packedSxy, s32 *x16, s32 *y16);
 int NativeGTE_GetStoredDepth(const void *address, u32 packedSxy, u16 *depth);
+int NativeGTE_GetStoredVertexMetadata(const void *address, u32 packedSxy, s32 *x16, s32 *y16, u16 *depth);
 
 #define NATIVE_GPU_LOG(fmt, ...)   Platform_Log("[CTR GPU] " fmt, ##__VA_ARGS__)
 #define NATIVE_GPU_ERROR(fmt, ...) Platform_LogError("[CTR GPU] [%s] - " fmt, __func__, ##__VA_ARGS__)
@@ -86,6 +92,9 @@ typedef struct
 	bool psxTexturedSemiTrans;
 	bool psxTextureOutputSTP;
 	bool psxDrawMaskSet;
+	/* Experimental native Z policy: only explicit custom opaque geometry
+	 * may participate. Retail world/effects remain OT-ordered. */
+	bool nativeDepthCandidate;
 
 	u32 startVertex;
 	u32 numVerts;
@@ -105,6 +114,16 @@ typedef struct
 	int drawPrimMode;
 	bool psxDrawMaskSet;
 	bool framebufferFeedbackRunActive;
+	bool nativeDepthCandidate;
+
+	/* Consecutive self-contained native OBJ triangles may share one external
+	 * texture. Keep that override alive only across adjacent B3 packets so
+	 * AddSplit can merge them; restore the previous retail/native state before
+	 * any other primitive. */
+	bool psyxScopedOverrideActive;
+	TextureID psyxScopedPrevTexture;
+	int psyxScopedPrevTextureWidth;
+	int psyxScopedPrevTextureHeight;
 
 	GrVertex vertexBuffer[MAX_VERTEX_BUFFER_SIZE];
 	GPUDrawSplit splits[MAX_DRAW_SPLITS];
@@ -127,6 +146,15 @@ void NativeGpu_ResetSubpixelStats(void)
 
 internal void NativeGpu_RecordSubpixelPrimitive(int complete)
 {
+	/* This is diagnostic sampling only. The old code kept 64-bit counters hot
+	   for every primitive for the entire session (hundreds of millions of
+	   updates in a long 200 Hz run). Stop after the initial sample so the
+	   renderer pays no ongoing bookkeeping cost. */
+	if (s_subpixelStatsLogged1000)
+	{
+		return;
+	}
+
 	if (complete)
 	{
 		s_subpixelPrimitiveAccepted++;
@@ -136,11 +164,10 @@ internal void NativeGpu_RecordSubpixelPrimitive(int complete)
 		s_subpixelPrimitiveFallback++;
 	}
 
-	if (!s_subpixelStatsLogged1000 &&
-	    (s_subpixelPrimitiveAccepted + s_subpixelPrimitiveFallback >= 1000))
+	if (s_subpixelPrimitiveAccepted + s_subpixelPrimitiveFallback >= 1000)
 	{
 		s_subpixelStatsLogged1000 = 1;
-		NATIVE_GPU_LOG("V70 subpixel first 1000+ primitives: complete=%llu fallback=%llu\n",
+		NATIVE_GPU_LOG("V70 subpixel first 1000 primitives: complete=%llu fallback=%llu\n",
 		               (unsigned long long)s_subpixelPrimitiveAccepted,
 		               (unsigned long long)s_subpixelPrimitiveFallback);
 	}
@@ -152,7 +179,7 @@ void NativeGpu_LogSubpixelStats(void)
 	{
 		return;
 	}
-	NATIVE_GPU_LOG("V70 subpixel final primitives: complete=%llu fallback=%llu\n",
+	NATIVE_GPU_LOG("V70 subpixel sample: complete=%llu fallback=%llu\n",
 	               (unsigned long long)s_subpixelPrimitiveAccepted,
 	               (unsigned long long)s_subpixelPrimitiveFallback);
 }
@@ -295,8 +322,20 @@ internal void NativeGpu_PresentationAppendCurrentBatch(void)
 	}
 }
 
+internal void NativeGpu_ClearScopedPsyxOverride(void)
+{
+	if (!s_gpu.psyxScopedOverrideActive)
+		return;
+
+	s_gpu.overrideTexture = s_gpu.psyxScopedPrevTexture;
+	s_gpu.overrideTextureWidth = s_gpu.psyxScopedPrevTextureWidth;
+	s_gpu.overrideTextureHeight = s_gpu.psyxScopedPrevTextureHeight;
+	s_gpu.psyxScopedOverrideActive = false;
+}
+
 void ClearSplits(void)
 {
+	NativeGpu_ClearScopedPsyxOverride();
 	s_gpu.currentSplitDebugText = NULL;
 	s_gpu.vertexIndex = 0;
 	s_gpu.splitIndex = 0;
@@ -388,16 +427,9 @@ void DrawEnvOffset(float *ofsX, float *ofsY)
 {
 	if (activeDrawEnv.dfe)
 	{
-		int w, h;
-		DrawEnvDimensionsInt(&w, &h);
-
-		if (w <= 0)
-		{
-			w = 1;
-		}
-
 		// NOTE(aalhendi): Convert PS1 VRAM-page draw offsets into display-relative host-screen offsets.
 		// CTR alternates draw pages at y=0 and y=0x128; using raw modulo VRAM offsets shifts every other native frame vertically.
+		// Width/height are irrelevant to this offset; do not recompute them for every primitive.
 		*ofsX = activeDrawEnv.ofs[0] - activeDispEnv.disp.x;
 		*ofsY = activeDrawEnv.ofs[1] - activeDispEnv.disp.y;
 	}
@@ -409,16 +441,19 @@ void DrawEnvOffset(float *ofsX, float *ofsY)
 }
 
 internal void NativeGpu_PresentationEncodeAxis(float value, s16 *baseOut, s8 *fracOut);
-internal int GetVertexSubpixelPosition(VERTTYPE *position, float *x, float *y)
+internal void NativeGpu_PresentationEncodeAxisFixed(s32 value16, s16 *baseOut, s8 *fracOut);
+internal int GetVertexPresentationMetadata(
+	VERTTYPE *position, s32 *x16, s32 *y16, u16 *depth)
 {
-	u32 packed=(u32)(u16)position[0]|((u32)(u16)position[1]<<16);
-	return g_cfg_subpixelGeometry && NativeGTE_GetStoredSubpixel(position,packed,x,y);
-}
+	const u32 packed =
+		(u32)(u16)position[0] | ((u32)(u16)position[1] << 16);
 
-internal int GetVertexPerspectiveDepth(VERTTYPE *position, u16 *depth)
-{
-	u32 packed=(u32)(u16)position[0]|((u32)(u16)position[1]<<16);
-	return NativeGTE_GetStoredDepth(position,packed,depth);
+	return NativeGTE_GetStoredVertexMetadata(
+		position,
+		packed,
+		g_cfg_subpixelGeometry ? x16 : NULL,
+		g_cfg_subpixelGeometry ? y16 : NULL,
+		depth);
 }
 
 internal void MakeVertexPosition(GrVertex *vertex, VERTTYPE *position, float ofsX, float ofsY)
@@ -427,6 +462,23 @@ internal void MakeVertexPosition(GrVertex *vertex, VERTTYPE *position, float ofs
 	vertex->y = position[1] + ofsY;
 	vertex->_p0 = 0;
 	vertex->_p1 = 0;
+}
+
+internal inline void NativeGpu_ClearVertexMetadata(GrVertex *vertex, int count)
+{
+	/* Position, UV and color are overwritten by the primitive builders below.
+	 * Only the native sideband fields need a known zero baseline. Clearing just
+	 * these 8 bytes avoids zeroing and immediately rewriting the full 24-byte
+	 * vertex for every PS1 primitive. */
+	for (int i = 0; i < count; ++i)
+	{
+		vertex[i].tcx = 0;
+		vertex[i].tcy = 0;
+		vertex[i]._p0 = 0;
+		vertex[i]._p1 = 0;
+		vertex[i].depth = 0;
+		vertex[i]._depthPad = 0;
+	}
 }
 
 void LineSwapSourceVerts(VERTTYPE **p0, VERTTYPE **p1, u8 **c0, u8 **c1)
@@ -452,7 +504,7 @@ void MakeLineArray(GrVertex *vertex, VERTTYPE *p0, VERTTYPE *p1)
 	float ofsX, ofsY;
 	DrawEnvOffset(&ofsX, &ofsY);
 
-	memset(vertex, 0, sizeof(GrVertex) * 4);
+	NativeGpu_ClearVertexMetadata(vertex, 4);
 
 	if (dx > abs((s16)dy))
 	{ // horizontal
@@ -493,38 +545,47 @@ void MakeVertexTriangle(GrVertex *vertex, VERTTYPE *p0, VERTTYPE *p1, VERTTYPE *
 	float ofsX, ofsY;
 	DrawEnvOffset(&ofsX, &ofsY);
 
-	memset(vertex, 0, sizeof(GrVertex) * 3);
+	NativeGpu_ClearVertexMetadata(vertex, 3);
 
 	MakeVertexPosition(&vertex[0], p0, ofsX, ofsY);
 	MakeVertexPosition(&vertex[1], p1, ofsX, ofsY);
 	MakeVertexPosition(&vertex[2], p2, ofsX, ofsY);
 
-	// Never mix PS1 integer vertices with native subpixel vertices inside one
-	// primitive. Partial metadata was visibly warping/jittering triangles.
-	if (g_cfg_subpixelGeometry)
+	/* Subpixel coordinates and perspective depth come from the same native GTE
+	 * metadata tables. Fetch both in one lookup per vertex instead of probing
+	 * the address/value hashes twice. */
 	{
-		float x[3], y[3];
-		if (GetVertexSubpixelPosition(p0, &x[0], &y[0]) &&
-		    GetVertexSubpixelPosition(p1, &x[1], &y[1]) &&
-		    GetVertexSubpixelPosition(p2, &x[2], &y[2]))
-		{
-			for (int i=0;i<3;i++)
-			{
-				NativeGpu_PresentationEncodeAxis(x[i]+ofsX,&vertex[i].x,&vertex[i]._p0);
-				NativeGpu_PresentationEncodeAxis(y[i]+ofsY,&vertex[i].y,&vertex[i]._p1);
-			}
-			NativeGpu_RecordSubpixelPrimitive(1);
-		}
-		else NativeGpu_RecordSubpixelPrimitive(0);
-	}
-
-	{
+		s32 x16[3], y16[3];
 		u16 depth[3];
-		if (GetVertexPerspectiveDepth(p0,&depth[0]) &&
-		    GetVertexPerspectiveDepth(p1,&depth[1]) &&
-		    GetVertexPerspectiveDepth(p2,&depth[2]))
+		const int meta0 = GetVertexPresentationMetadata(p0, &x16[0], &y16[0], &depth[0]);
+		const int meta1 = GetVertexPresentationMetadata(p1, &x16[1], &y16[1], &depth[1]);
+		const int meta2 = GetVertexPresentationMetadata(p2, &x16[2], &y16[2], &depth[2]);
+
+		// Never mix PS1 integer vertices with native subpixel vertices inside one
+		// primitive. Partial metadata was visibly warping/jittering triangles.
+		if (g_cfg_subpixelGeometry)
 		{
-			for (int i=0;i<3;i++) vertex[i].depth = depth[i];
+			if ((meta0 & 1) && (meta1 & 1) && (meta2 & 1))
+			{
+				const s32 ofsX16 = (s32)ofsX * 65536;
+				const s32 ofsY16 = (s32)ofsY * 65536;
+				for (int i = 0; i < 3; i++)
+				{
+					NativeGpu_PresentationEncodeAxisFixed(x16[i] + ofsX16, &vertex[i].x, &vertex[i]._p0);
+					NativeGpu_PresentationEncodeAxisFixed(y16[i] + ofsY16, &vertex[i].y, &vertex[i]._p1);
+				}
+				NativeGpu_RecordSubpixelPrimitive(1);
+			}
+			else
+			{
+				NativeGpu_RecordSubpixelPrimitive(0);
+			}
+		}
+
+		if ((meta0 & 2) && (meta1 & 2) && (meta2 & 2))
+		{
+			for (int i = 0; i < 3; i++)
+				vertex[i].depth = depth[i];
 		}
 	}
 }
@@ -539,39 +600,44 @@ void MakeVertexQuad(GrVertex *vertex, VERTTYPE *p0, VERTTYPE *p1, VERTTYPE *p2, 
 	float ofsX, ofsY;
 	DrawEnvOffset(&ofsX, &ofsY);
 
-	memset(vertex, 0, sizeof(GrVertex) * 4);
+	NativeGpu_ClearVertexMetadata(vertex, 4);
 
 	MakeVertexPosition(&vertex[0], p0, ofsX, ofsY);
 	MakeVertexPosition(&vertex[1], p1, ofsX, ofsY);
 	MakeVertexPosition(&vertex[2], p2, ofsX, ofsY);
 	MakeVertexPosition(&vertex[3], p3, ofsX, ofsY);
 
-	if (g_cfg_subpixelGeometry)
 	{
-		float x[4], y[4];
-		if (GetVertexSubpixelPosition(p0, &x[0], &y[0]) &&
-		    GetVertexSubpixelPosition(p1, &x[1], &y[1]) &&
-		    GetVertexSubpixelPosition(p2, &x[2], &y[2]) &&
-		    GetVertexSubpixelPosition(p3, &x[3], &y[3]))
-		{
-			for (int i=0;i<4;i++)
-			{
-				NativeGpu_PresentationEncodeAxis(x[i]+ofsX,&vertex[i].x,&vertex[i]._p0);
-				NativeGpu_PresentationEncodeAxis(y[i]+ofsY,&vertex[i].y,&vertex[i]._p1);
-			}
-			NativeGpu_RecordSubpixelPrimitive(1);
-		}
-		else NativeGpu_RecordSubpixelPrimitive(0);
-	}
-
-	{
+		s32 x16[4], y16[4];
 		u16 depth[4];
-		if (GetVertexPerspectiveDepth(p0,&depth[0]) &&
-		    GetVertexPerspectiveDepth(p1,&depth[1]) &&
-		    GetVertexPerspectiveDepth(p2,&depth[2]) &&
-		    GetVertexPerspectiveDepth(p3,&depth[3]))
+		const int meta0 = GetVertexPresentationMetadata(p0, &x16[0], &y16[0], &depth[0]);
+		const int meta1 = GetVertexPresentationMetadata(p1, &x16[1], &y16[1], &depth[1]);
+		const int meta2 = GetVertexPresentationMetadata(p2, &x16[2], &y16[2], &depth[2]);
+		const int meta3 = GetVertexPresentationMetadata(p3, &x16[3], &y16[3], &depth[3]);
+
+		if (g_cfg_subpixelGeometry)
 		{
-			for (int i=0;i<4;i++) vertex[i].depth = depth[i];
+			if ((meta0 & 1) && (meta1 & 1) && (meta2 & 1) && (meta3 & 1))
+			{
+				const s32 ofsX16 = (s32)ofsX * 65536;
+				const s32 ofsY16 = (s32)ofsY * 65536;
+				for (int i = 0; i < 4; i++)
+				{
+					NativeGpu_PresentationEncodeAxisFixed(x16[i] + ofsX16, &vertex[i].x, &vertex[i]._p0);
+					NativeGpu_PresentationEncodeAxisFixed(y16[i] + ofsY16, &vertex[i].y, &vertex[i]._p1);
+				}
+				NativeGpu_RecordSubpixelPrimitive(1);
+			}
+			else
+			{
+				NativeGpu_RecordSubpixelPrimitive(0);
+			}
+		}
+
+		if ((meta0 & 2) && (meta1 & 2) && (meta2 & 2) && (meta3 & 2))
+		{
+			for (int i = 0; i < 4; i++)
+				vertex[i].depth = depth[i];
 		}
 	}
 }
@@ -583,7 +649,7 @@ void MakeVertexRect(GrVertex *vertex, VERTTYPE *p0, s16 w, s16 h)
 	float ofsX, ofsY;
 	DrawEnvOffset(&ofsX, &ofsY);
 
-	memset(vertex, 0, sizeof(GrVertex) * 4);
+	NativeGpu_ClearVertexMetadata(vertex, 4);
 
 	vertex[0].x = p0[0] + ofsX;
 	vertex[0].y = p0[1] + ofsY;
@@ -600,6 +666,7 @@ void MakeVertexRect(GrVertex *vertex, VERTTYPE *p0, s16 w, s16 h)
 
 void MakeTexcoordQuad(GrVertex *vertex, u8 *uv0, u8 *uv1, u8 *uv2, u8 *uv3, s16 page, s16 clut, u8 dither)
 {
+	if (!g_cfg_psxDithering) dither = 0;
 	assert(uv0);
 	assert(uv1);
 	assert(uv2);
@@ -654,6 +721,7 @@ void MakeTexcoordQuad(GrVertex *vertex, u8 *uv0, u8 *uv1, u8 *uv2, u8 *uv3, s16 
 
 void MakeTexcoordTriangle(GrVertex *vertex, u8 *uv0, u8 *uv1, u8 *uv2, s16 page, s16 clut, u8 dither)
 {
+	if (!g_cfg_psxDithering) dither = 0;
 	assert(uv0);
 	assert(uv1);
 	assert(uv2);
@@ -762,6 +830,7 @@ void MakeTexcoordRect(GrVertex *vertex, u8 *uv, s16 page, s16 clut, s16 w, s16 h
 
 void MakeTexcoordLineZero(GrVertex *vertex, u8 dither)
 {
+	if (!g_cfg_psxDithering) dither = 0;
 	const u8 bright = 1;
 
 	vertex[0].u = 0;
@@ -795,6 +864,7 @@ void MakeTexcoordLineZero(GrVertex *vertex, u8 dither)
 
 void MakeTexcoordTriangleZero(GrVertex *vertex, u8 dither)
 {
+	if (!g_cfg_psxDithering) dither = 0;
 	const u8 bright = 1;
 
 	vertex[0].u = 0;
@@ -821,6 +891,7 @@ void MakeTexcoordTriangleZero(GrVertex *vertex, u8 dither)
 
 void MakeTexcoordQuadZero(GrVertex *vertex, u8 dither)
 {
+	if (!g_cfg_psxDithering) dither = 0;
 	const u8 bright = 1;
 
 	vertex[0].u = 0;
@@ -987,22 +1058,52 @@ internal bool NativeGpu_RectOverlaps(int ax, int ay, int aw, int ah, int bx, int
 
 internal bool NativeGpu_TPageOverlapsActiveDrawPage(int tpage)
 {
-	const int pageX = (tpage & 0xf) << 6;
-	const int pageY = (tpage & 0x10) ? 0x100 : 0;
-	const int pageW = 0x100;
-	const int pageH = 0x100;
+	/* Textured CTR geometry tends to issue long runs with the same tpage and
+	 * draw environment. This predicate is queried for every textured primitive,
+	 * and AddSplit may query it again immediately for framebuffer feedback.
+	 * Cache the exact input tuple so repeated primitives become a handful of
+	 * integer comparisons instead of re-decoding the tpage and rectangle. */
+	local_persist int cacheValid = 0;
+	local_persist int cacheTPage;
+	local_persist int cacheDfe;
+	local_persist int cacheX;
+	local_persist int cacheY;
+	local_persist int cacheW;
+	local_persist int cacheH;
+	local_persist bool cacheResult;
 
-	if (!activeDrawEnv.dfe)
+	const int dfe = activeDrawEnv.dfe;
+	const int clipX = activeDrawEnv.clip.x;
+	const int clipY = activeDrawEnv.clip.y;
+	const int clipW = activeDrawEnv.clip.w;
+	const int clipH = activeDrawEnv.clip.h;
+
+	if (cacheValid &&
+	    cacheTPage == tpage &&
+	    cacheDfe == dfe &&
+	    cacheX == clipX && cacheY == clipY &&
+	    cacheW == clipW && cacheH == clipH)
 	{
-		return false;
+		return cacheResult;
 	}
 
-	if (GetTPageFormat(tpage) != TF_16_BIT)
+	bool result = false;
+	if (dfe && GetTPageFormat(tpage) == TF_16_BIT)
 	{
-		return false;
+		const int pageX = (tpage & 0xf) << 6;
+		const int pageY = (tpage & 0x10) ? 0x100 : 0;
+		result = NativeGpu_RectOverlaps(pageX, pageY, 0x100, 0x100, clipX, clipY, clipW, clipH);
 	}
 
-	return NativeGpu_RectOverlaps(pageX, pageY, pageW, pageH, activeDrawEnv.clip.x, activeDrawEnv.clip.y, activeDrawEnv.clip.w, activeDrawEnv.clip.h);
+	cacheValid = 1;
+	cacheTPage = tpage;
+	cacheDfe = dfe;
+	cacheX = clipX;
+	cacheY = clipY;
+	cacheW = clipW;
+	cacheH = clipH;
+	cacheResult = result;
+	return result;
 }
 
 internal void NativeGpu_PrepareFramebufferFeedback(int tpage)
@@ -1026,7 +1127,38 @@ internal void NativeGpu_PrepareFramebufferFeedback(int tpage)
 		DrawAllSplits();
 	}
 
-	NativeRenderer_StoreFrameBuffer(activeDrawEnv.clip.x, activeDrawEnv.clip.y, activeDrawEnv.clip.w, activeDrawEnv.clip.h);
+#if defined(CTR_INTERNAL)
+	/*
+	 * EXPERIMENTAL stress-test A/B:
+	 * Screen-feedback state is retail 30 Hz content. On host-only presentation
+	 * frames, keep the latest logical VRAM copy and only refresh the GPU-side
+	 * framebuffer texture. This avoids a synchronous GL readback + 16-bit pack
+	 * + VRAM re-upload hundreds of times per second.
+	 *
+	 * Keep normal gameplay untouched until visual QA confirms that 30 Hz
+	 * feedback cadence is acceptable for heat-warp/blur-style effects.
+	 */
+	if (NativePerf_IsStressTestActive() &&
+	    NativeWorld_IsActive() &&
+	    (Platform_GetLegacy30HzTicks() <= 0))
+	{
+		static int s_loggedFeedbackCadenceExp = 0;
+		if (!s_loggedFeedbackCadenceExp)
+		{
+			Platform_Log("[CTR GPU] EXP feedback cadence: host frames deferred, logical ticks materialized\n");
+			s_loggedFeedbackCadenceExp = 1;
+		}
+		NativeRenderer_StoreFrameBufferDeferred(
+			activeDrawEnv.clip.x, activeDrawEnv.clip.y,
+			activeDrawEnv.clip.w, activeDrawEnv.clip.h);
+	}
+	else
+#endif
+	{
+		NativeRenderer_StoreFrameBuffer(
+			activeDrawEnv.clip.x, activeDrawEnv.clip.y,
+			activeDrawEnv.clip.w, activeDrawEnv.clip.h);
+	}
 	if (s_presentCaptureActive)
 	{
 		s_presentFrames[s_presentWriteFrame].unsafeFramebufferFeedback = 1;
@@ -1057,6 +1189,9 @@ internal void AddSplit(bool semiTrans, bool textured, bool framebufferFeedback)
 	// textured draws unless E6 forces it. Recursive screen-copy effects depend
 	// on this bit surviving after the blended textured pass.
 	bool psxTextureOutputSTP = textured && s_gpu.overrideTexture == 0;
+	const bool nativeDepthCandidate = s_gpu.nativeDepthCandidate;
+	const bool canMergeTexturedSemiTrans =
+		psxTexturedSemiTrans && NativeRenderer_CanSinglePassPSXTexturedSemiTrans(blendMode);
 
 	if (textured && s_gpu.overrideTexture != 0)
 	{
@@ -1067,9 +1202,11 @@ internal void AddSplit(bool semiTrans, bool textured, bool framebufferFeedback)
 	}
 
 	// FIXME: compare drawing environment too?
-	if (!psxTexturedSemiTrans && curSplit->blendMode == blendMode && curSplit->texFormat == texFormat && curSplit->textureId == textureId &&
+	if ((!psxTexturedSemiTrans || canMergeTexturedSemiTrans) &&
+	    curSplit->blendMode == blendMode && curSplit->texFormat == texFormat && curSplit->textureId == textureId &&
 	    curSplit->drawPrimMode == s_gpu.drawPrimMode && curSplit->psxTexturedSemiTrans == psxTexturedSemiTrans &&
 	    curSplit->psxTextureOutputSTP == psxTextureOutputSTP && curSplit->psxDrawMaskSet == s_gpu.psxDrawMaskSet &&
+	    curSplit->nativeDepthCandidate == nativeDepthCandidate &&
 	    curSplit->drawenv.clip.x == activeDrawEnv.clip.x && curSplit->drawenv.clip.y == activeDrawEnv.clip.y &&
 	    curSplit->drawenv.clip.w == activeDrawEnv.clip.w && curSplit->drawenv.clip.h == activeDrawEnv.clip.h && curSplit->drawenv.dfe == activeDrawEnv.dfe &&
 	    curSplit->debugText == s_gpu.currentSplitDebugText)
@@ -1093,6 +1230,7 @@ internal void AddSplit(bool semiTrans, bool textured, bool framebufferFeedback)
 	split->psxTexturedSemiTrans = psxTexturedSemiTrans;
 	split->psxTextureOutputSTP = psxTextureOutputSTP;
 	split->psxDrawMaskSet = s_gpu.psxDrawMaskSet;
+	split->nativeDepthCandidate = nativeDepthCandidate;
 	split->drawenv = activeDrawEnv;
 	split->dispenv = activeDispEnv;
 	split->debugText = s_gpu.currentSplitDebugText;
@@ -1102,6 +1240,39 @@ internal void AddSplit(bool semiTrans, bool textured, bool framebufferFeedback)
 
 	split->startVertex = s_gpu.vertexIndex;
 	split->numVerts = 0;
+}
+
+internal int NativeGpu_SplitHasFullDepth(const GPUDrawSplit *split)
+{
+	u32 endVertex;
+
+	if (split == NULL || split->numVerts == 0)
+		return 0;
+
+	endVertex = split->startVertex + split->numVerts;
+	if (endVertex > (u32)s_gpu.vertexIndex)
+		return 0;
+
+	for (u32 i = split->startVertex; i < endVertex; i++)
+	{
+		if (s_gpu.vertexBuffer[i].depth == 0)
+			return 0;
+	}
+
+	return 1;
+}
+
+static int NativeGpu_LevelPCDepthInteropStressEnabled(void)
+{
+	static int checked, enabled;
+	if (!checked)
+	{
+		FILE *f=fopen("debug/level_pc_depth_interop_stress.enable","rb");
+		enabled=(f!=NULL);
+		if (f)fclose(f);
+		checked=1;
+	}
+	return enabled && NativePerf_IsStressTestMeasuring();
 }
 
 void DrawSplit(const GPUDrawSplit *split)
@@ -1126,6 +1297,58 @@ void DrawSplit(const GPUDrawSplit *split)
 		return;
 	}
 
+	/*
+	 * Hidden experimental Z-buffer:
+	 * - only on-screen opaque splits;
+	 * - only when every vertex carries reliable GTE depth;
+	 * - never for semitransparent/offscreen/UI-style fallback geometry.
+	 */
+	/*
+	 * Experimental Z is deliberately custom-only after QA showed that a
+	 * global retail-world depth policy makes level geometry, smoke/particles
+	 * and ghost-style effects disagree with CTR's authored OT ordering.
+	 * Short-circuit before the vertex scan while Z is off: the previous code
+	 * paid O(vertices) depth validation for every opaque split even disabled.
+	 */
+		/* Experimental interop makes full-depth retail PS1 triangles eligible,
+	 * while unprojected UI, particles and ambiguous vertices remain OT-only. */
+	/* Audit native SZ comparability against GPU terrain on a few model
+	 * triangles around the bottom middle of the screen. */
+	if (NativeGpu_LevelPCDepthInteropStressEnabled() &&
+	    drawOnScreen && split->blendMode==BM_NONE &&
+	    split->numVerts>=3)
+	{
+		static int sampleCount;
+		if (sampleCount<22)
+		{
+			u32 end=split->startVertex+split->numVerts;
+			if(end>(u32)s_gpu.vertexIndex)end=(u32)s_gpu.vertexIndex;
+			for(u32 i=split->startVertex;i+2<end;i+=3)
+			{
+				const GrVertex *a=&s_gpu.vertexBuffer[i];
+				const GrVertex *b=&s_gpu.vertexBuffer[i+1];
+				const GrVertex *c=&s_gpu.vertexBuffer[i+2];
+				float mx=((float)a->x+b->x+c->x)/3.0f;
+				float my=((float)a->y+b->y+c->y)/3.0f;
+				if(mx>=115.f && mx<=210.f && my>=120.f && my<=225.f &&
+				    a->depth>0 && b->depth>0 && c->depth>0)
+				{
+					Platform_Log("[LEVEL PC GPU] PS1 SZ sample x=%.1f y=%.1f depth=%u,%u,%u nativeCandidate=%d texFmt=%d\n",
+						mx,my,(unsigned)a->depth,(unsigned)b->depth,(unsigned)c->depth,
+						(int)split->nativeDepthCandidate,(int)split->texFormat);
+					if(++sampleCount>=22)break;
+				}
+			}
+		}
+	}
+	NativeRenderer_SetExperimentalDepthEligible(
+		NativeRenderer_GetExperimentalZBuffer() &&
+		(split->nativeDepthCandidate || NativeGpu_LevelPCDepthInteropStressEnabled()) &&
+		drawOnScreen &&
+		(split->blendMode == BM_NONE) &&
+		!split->psxTexturedSemiTrans &&
+		NativeGpu_SplitHasFullDepth(split));
+
 	NativeRenderer_SetStencilMode(split->drawPrimMode); // draw with mask 0x16
 
 	NativeRenderer_SetTexture(split->textureId, split->texFormat);
@@ -1143,19 +1366,37 @@ void DrawSplit(const GPUDrawSplit *split)
 
 	if (split->psxTexturedSemiTrans)
 	{
-		// NOTE(aalhendi): CTR native renderer divergence from upstream PsyCross.
-		// PS1 textured ABE only blends texels whose sampled 16-bit color has STP
-		// set; non-STP texels remain opaque. Native split state is per draw,
-		// so draw this primitive-sized split twice with shader-side STP masks.
-		NativeRenderer_SetBlendMode(BM_NONE);
-		NativeRenderer_SetPSXTextureSemiTransPass(1);
-		NativeRenderer_DrawTriangles(split->startVertex, split->numVerts / 3);
+		if (NativeRenderer_CanSinglePassPSXTexturedSemiTrans(split->blendMode))
+		{
+			int singlePassMode = 0;
+			switch (split->blendMode)
+			{
+			case BM_AVERAGE: singlePassMode = 3; break;
+			case BM_ADD: singlePassMode = 4; break;
+			case BM_ADD_QUATER_SOURCE: singlePassMode = 5; break;
+			default: break;
+			}
 
-		NativeRenderer_SetBlendMode(split->blendMode);
-		NativeRenderer_SetPSXTextureSemiTransPass(2);
-		NativeRenderer_DrawTriangles(split->startVertex, split->numVerts / 3);
+			/* Modern path: shader emits a second per-fragment blend factor so STP
+			 * and non-STP texels preserve PS1 behavior in one ordered draw call. */
+			NativeRenderer_SetPSXTexturedSemiTransBlendMode(split->blendMode);
+			NativeRenderer_SetPSXTextureSemiTransPass(singlePassMode);
+			NativeRenderer_DrawTriangles(split->startVertex, split->numVerts / 3);
+			NativeRenderer_SetPSXTextureSemiTransPass(0);
+		}
+		else
+		{
+			// Compatibility path (and PS1 subtract mode): two ordered passes.
+			NativeRenderer_SetBlendMode(BM_NONE);
+			NativeRenderer_SetPSXTextureSemiTransPass(1);
+			NativeRenderer_DrawTriangles(split->startVertex, split->numVerts / 3);
 
-		NativeRenderer_SetPSXTextureSemiTransPass(0);
+			NativeRenderer_SetBlendMode(split->blendMode);
+			NativeRenderer_SetPSXTextureSemiTransPass(2);
+			NativeRenderer_DrawTriangles(split->startVertex, split->numVerts / 3);
+
+			NativeRenderer_SetPSXTextureSemiTransPass(0);
+		}
 	}
 	else
 	{
@@ -1231,6 +1472,55 @@ internal void NativeGpu_PresentationEncodeAxis(float value, s16 *baseOut, s8 *fr
 	*fracOut = (s8)frac;
 }
 
+internal int NativeGpu_SubpixelQ16ToQ8(s32 value16)
+{
+	/* Screen coordinates are far inside s32 limits. Round 16.16 -> 24.8 using
+	   integer shifts so the 32-bit build never pays for a 64-bit divide here. */
+	if (value16 >= 0)
+		return (value16 + 0x80) >> 8;
+	return -(((-value16) + 0x80) >> 8);
+}
+
+internal void NativeGpu_PresentationEncodeAxisFixed(s32 value16, s16 *baseOut, s8 *fracOut)
+{
+	/* Same final 1/256-pixel representation as the float encoder, directly from
+	   the GTE's 16.16 coordinate. */
+	int q8 = NativeGpu_SubpixelQ16ToQ8(value16);
+	int base;
+	int frac;
+
+	if (q8 >= 0)
+		base = (q8 + 0x80) >> 8;
+	else
+		base = -(((-q8) + 0x80) >> 8);
+
+	frac = q8 - (base * 256);
+	if (frac > 127)
+	{
+		base++;
+		frac -= 256;
+	}
+	else if (frac < -128)
+	{
+		base--;
+		frac += 256;
+	}
+
+	if (base < -32768)
+	{
+		base = -32768;
+		frac = 0;
+	}
+	else if (base > 32767)
+	{
+		base = 32767;
+		frac = 0;
+	}
+
+	*baseOut = (s16)base;
+	*fracOut = (s8)frac;
+}
+
 /* V152: Visibility must use the same 1/256-pixel positions sent to GL.
    The retail integer NCLIP can collapse distant floor triangles to a line.
    Do not change the emulated GTE: collision still needs retail arithmetic. */
@@ -1244,23 +1534,56 @@ s32 NativeGpu_CorrectSubpixelNclip(const void *p0, const void *p1, const void *p
     if (!g_cfg_subpixelGeometry || !s_nativeGpuSubpixelCullEnabled) return retailNclip;
     for (int i = 0; i < 3; i++)
     {
-        float fx, fy;
-        s16 base;
-        s8 fraction;
+        s32 x16, y16;
         u32 packed;
         if (positions[i] == NULL) return retailNclip;
         packed = (u32)(u16)positions[i][0] | ((u32)(u16)positions[i][1] << 16);
-        if (!NativeGTE_GetStoredSubpixel(positions[i], packed, &fx, &fy)) return retailNclip;
-        NativeGpu_PresentationEncodeAxis(fx, &base, &fraction);
-        x[i] = (s64)base * 256 + fraction;
-        NativeGpu_PresentationEncodeAxis(fy, &base, &fraction);
-        y[i] = (s64)base * 256 + fraction;
+        if (!NativeGTE_GetStoredSubpixelFixed(positions[i], packed, &x16, &y16)) return retailNclip;
+
+        /* Cull with the exact same 1/256-pixel quantization used by GL. */
+        x[i] = NativeGpu_SubpixelQ16ToQ8(x16);
+        y[i] = NativeGpu_SubpixelQ16ToQ8(y16);
     }
     area = (x[1] - x[0]) * (y[2] - y[0]) - (y[1] - y[0]) * (x[2] - x[0]);
     fineNclip = (area > 0) - (area < 0);
     if (((retailNclip > 0) - (retailNclip < 0)) == fineNclip) return retailNclip;
     if (corrected++ < 12)
         NATIVE_GPU_LOG("V152 subpixel cull correction: integer=%d preciseSign=%d areaQ16=%lld\n",
+                       retailNclip, fineNclip, (long long)area);
+    return fineNclip;
+}
+
+/* OBJ-specific culling path: preserve the exact per-store fractional
+   projection instead of the canonical shared-edge value used by level geometry. */
+s32 NativeGpu_CorrectSubpixelNclipLocal(const void *p0, const void *p1, const void *p2, s32 retailNclip)
+{
+    const s16 *positions[3] = {p0, p1, p2};
+    s64 x[3], y[3], area;
+    s32 fineNclip;
+    static u32 corrected = 0;
+
+    if (!g_cfg_subpixelGeometry || !s_nativeGpuSubpixelCullEnabled)
+        return retailNclip;
+
+    for (int i = 0; i < 3; i++)
+    {
+        s32 x16, y16;
+        u32 packed;
+        if (positions[i] == NULL) return retailNclip;
+        packed = (u32)(u16)positions[i][0] | ((u32)(u16)positions[i][1] << 16);
+        if (!NativeGTE_GetStoredSubpixelFixedLocal(positions[i], packed, &x16, &y16))
+            return retailNclip;
+        x[i] = NativeGpu_SubpixelQ16ToQ8(x16);
+        y[i] = NativeGpu_SubpixelQ16ToQ8(y16);
+    }
+
+    area = (x[1] - x[0]) * (y[2] - y[0]) - (y[1] - y[0]) * (x[2] - x[0]);
+    fineNclip = (area > 0) - (area < 0);
+    if (((retailNclip > 0) - (retailNclip < 0)) == fineNclip)
+        return retailNclip;
+
+    if (corrected++ < 12)
+        NATIVE_GPU_LOG("OBJ local subpixel cull correction: integer=%d preciseSign=%d areaQ16=%lld\n",
                        retailNclip, fineNclip, (long long)area);
     return fineNclip;
 }
@@ -1403,14 +1726,46 @@ void DrawAllSplits()
 	// before the live GPU state is cleared below.
 	NativeGpu_PresentationAppendCurrentBatch();
 
+	/* Stress-only native terrain ordering experiment:
+	 * draw the GPU-resident track before drawing PS1 OT split primitives,
+	 * rather than after characters in NativeRenderer_EndScene.
+	 * This intentionally lets karts/HUD draw on top of the track, but still
+	 * needs full depth interop for correct wall/kart occlusion.
+	 * Default path unchanged unless explicitly enabled and measured.
+	 */
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	{
+		static int nativeEarlyChecked, nativeEarlyEnabled, logged;
+		if (!nativeEarlyChecked)
+		{
+			FILE *f=fopen("debug/level_pc_gpu_draw_early_stress.enable","rb");
+			nativeEarlyEnabled=(f!=NULL);
+			if(f)fclose(f);
+			nativeEarlyChecked=1;
+		}
+		if(nativeEarlyEnabled && NativePerf_IsStressTestMeasuring())
+		{
+			if(!logged)
+			{
+				Platform_Log("[LEVEL PC GPU] STRESS ONLY: draw resident terrain BEFORE PS1 splits\n");
+				logged=1;
+			}
+			NativeRenderer_LevelPCDrawQueued();
+		}
+	}
+#endif
 	// next code ideally should be called before EndScene
 	NativeRenderer_UpdateVertexBuffer(s_gpu.vertexBuffer, s_gpu.vertexIndex);
+	NativePerf_AddSplits((u32)((s_gpu.splitIndex > 0) ? s_gpu.splitIndex : 0));
 
 	for (int i = 1; i <= s_gpu.splitIndex; i++)
 	{
 		DrawSplit(&s_gpu.splits[i]);
 	}
 
+	/* QA-only resident GPU buffers for OBJ assets staged by draw workers.
+	 * Actual draw and OT translation remain retail and bit-identical. */
+	NativeGpuModel_FlushStaged();
 	ClearSplits();
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_DRAW_ALL_SPLITS);
 }
@@ -1421,12 +1776,10 @@ int ParseTaglessPrimitive(u32 *command);
 
 internal bool NativeGpu_IsValidOTLink(uintptr_t link)
 {
-	if (NativeGpuLinks_IsRegisteredHostPointer((const void *)link))
-	{
-		return (link & (sizeof(u32) - 1)) == 0;
-	}
-
-	return false;
+	/* nextPrim() reached this point through NativeGpuLinks_ToHostPointer(),
+	 * which already rejects tokens outside every registered range. Do not
+	 * scan the host-range table a second time for the same OT hop. */
+	return (link != 0) && ((link & (sizeof(u32) - 1)) == 0);
 }
 
 internal u32 NativeGpu_ReadPacketWordForLog(uintptr_t packet, int wordIndex)
@@ -1608,6 +1961,8 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 		}
 	}
 
+	/* Never let a self-contained B3 override leak to the next DrawOTag call. */
+	NativeGpu_ClearScopedPsyxOverride();
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_DRAW_OTAG_PARSE);
 }
 
@@ -1797,6 +2152,113 @@ internal int ProcessGouraudLines(P_TAG *polyTag)
 	return 0;
 }
 
+/* Native GPU decode for ordinary PS1 textured level/instance packets.
+ * Packet/OT order, blend state, framebuffer feedback, texture sampling, and
+ * full GTE metadata are unchanged. Only combine the redundant position, UV,
+ * color and native metadata passes over each polygon into one vertex write.
+ * Rollback marker (checked once at startup): debug/gpu_fused_legacy.disable
+ */
+internal bool NativeGpu_FusedLegacyTexturedEnabled(void)
+{
+	static int checked;
+	static bool enabled;
+	if (!checked)
+	{
+		FILE *marker = fopen("debug/gpu_fused_legacy.disable", "rb");
+		enabled = (marker == NULL);
+		if (marker != NULL) fclose(marker);
+		checked = 1;
+	}
+	return enabled;
+}
+
+internal void NativeGpu_BuildTexturedPolygonFused(
+	VERTTYPE *const *positions, const u8 *const *uvs,
+	const u8 *const *colors, int vertexCount, int tpage, int clut,
+	bool shadeTexOn)
+{
+	GrVertex *dst = &s_gpu.vertexBuffer[s_gpu.vertexIndex];
+	s32 x16[4], y16[4];
+	u16 depths[4];
+	int allSubpixel = g_cfg_subpixelGeometry != 0;
+	int allDepth = 1;
+	float ofsX, ofsY;
+	const short texPage = GetTPageBase(tpage);
+	const u8 dither = (g_cfg_psxDithering &&
+		(GET_TPAGE_DITHER(tpage) || activeDrawEnv.dtd)) ? 1 : 0;
+
+	assert(vertexCount == 3 || vertexCount == 4);
+	DrawEnvOffset(&ofsX, &ofsY);
+
+	for (int i = 0; i < vertexCount; ++i)
+	{
+		GrVertex *v = &dst[i];
+		VERTTYPE *xy = positions[i];
+		const u8 *uv = uvs[i];
+		const u8 *color = colors[i];
+
+		/* Match MakeVertexPosition and NativeGpu_ClearVertexMetadata. */
+		v->x = xy[0] + ofsX;
+		v->y = xy[1] + ofsY;
+		v->_p0 = 0;
+		v->_p1 = 0;
+		v->tcx = 0;
+		v->tcy = 0;
+		v->depth = 0;
+		v->_depthPad = 0;
+
+		/* Match MakeTexcoordTriangle/Quad. */
+		v->page = texPage;
+		v->clut = clut;
+		v->u = uv[0];
+		v->v = uv[1];
+		v->bright = 2;
+		v->dither = dither;
+
+		/* Match MakeColourTriangle/Quad, including flat unshaded FT*. */
+		v->r = shadeTexOn ? color[0] : 128;
+		v->g = shadeTexOn ? color[1] : 128;
+		v->b = shadeTexOn ? color[2] : 128;
+		v->a = 255;
+
+		/* Read metadata while the source PS1 packet is still alive. */
+		const int meta = GetVertexPresentationMetadata(
+			xy, &x16[i], &y16[i], &depths[i]);
+		allSubpixel &= (meta & 1) != 0;
+		allDepth &= (meta & 2) != 0;
+	}
+
+	/* Match the all-or-nothing subpixel rule (no cracked PS1 edges).
+	 * Keep the original integral draw-env offset conversion, depth and
+	 * 1/256-pixel quantization exactly. */
+	if (g_cfg_subpixelGeometry)
+	{
+		if (allSubpixel)
+		{
+			const s32 ofsX16 = (s32)ofsX * 65536;
+			const s32 ofsY16 = (s32)ofsY * 65536;
+			for (int i = 0; i < vertexCount; ++i)
+			{
+				NativeGpu_PresentationEncodeAxisFixed(
+					x16[i] + ofsX16, &dst[i].x, &dst[i]._p0);
+				NativeGpu_PresentationEncodeAxisFixed(
+					y16[i] + ofsY16, &dst[i].y, &dst[i]._p1);
+			}
+			NativeGpu_RecordSubpixelPrimitive(1);
+		}
+		else
+		{
+			NativeGpu_RecordSubpixelPrimitive(0);
+		}
+	}
+
+	if (allDepth)
+	{
+		for (int i = 0; i < vertexCount; ++i)
+			dst[i].depth = depths[i];
+	}
+}
+
 internal int ProcessFlatPoly(P_TAG *polyTag)
 {
 	const bool shadeTexOn = (polyTag->code & 1) == 0;
@@ -1831,10 +2293,21 @@ internal int ProcessFlatPoly(P_TAG *polyTag)
 			AddSplit(semiTrans, true, NativeGpu_TPageOverlapsActiveDrawPage(poly->tpage));
 
 			GrVertex *firstVertex = &s_gpu.vertexBuffer[s_gpu.vertexIndex];
-			MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2);
-			MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut,
-			                     GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
-			MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0);
+			if (NativeGpu_FusedLegacyTexturedEnabled())
+			{
+				NativeGpu_BuildTexturedPolygonFused(
+					(VERTTYPE *[3]){ &poly->x0, &poly->x1, &poly->x2 },
+					(const u8 *[3]){ &poly->u0, &poly->u1, &poly->u2 },
+					(const u8 *[3]){ &poly->r0, &poly->r0, &poly->r0 },
+					3, poly->tpage, poly->clut, shadeTexOn);
+			}
+			else
+			{
+				MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2);
+				MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut,
+				                     GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
+				MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0);
+			}
 
 			s_gpu.vertexIndex += 3;
 		}
@@ -1864,10 +2337,21 @@ internal int ProcessFlatPoly(P_TAG *polyTag)
 		AddSplit(semiTrans, true, NativeGpu_TPageOverlapsActiveDrawPage(poly->tpage));
 
 		GrVertex *firstVertex = &s_gpu.vertexBuffer[s_gpu.vertexIndex];
-		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2);
-		MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut,
-		                 GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
-		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+		if (NativeGpu_FusedLegacyTexturedEnabled())
+		{
+			NativeGpu_BuildTexturedPolygonFused(
+				(VERTTYPE *[4]){ &poly->x0, &poly->x1, &poly->x3, &poly->x2 },
+				(const u8 *[4]){ &poly->u0, &poly->u1, &poly->u3, &poly->u2 },
+				(const u8 *[4]){ &poly->r0, &poly->r0, &poly->r0, &poly->r0 },
+				4, poly->tpage, poly->clut, shadeTexOn);
+		}
+		else
+		{
+			MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2);
+			MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut,
+			                 GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
+			MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+		}
 
 		TriangulateQuad();
 
@@ -1910,9 +2394,20 @@ internal int ProcessGouraudPoly(P_TAG *polyTag)
 		AddSplit(semiTrans, true, NativeGpu_TPageOverlapsActiveDrawPage(poly->tpage));
 
 		GrVertex *firstVertex = &s_gpu.vertexBuffer[s_gpu.vertexIndex];
-		MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2);
-		MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
-		MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r2);
+		if (NativeGpu_FusedLegacyTexturedEnabled())
+		{
+			NativeGpu_BuildTexturedPolygonFused(
+				(VERTTYPE *[3]){ &poly->x0, &poly->x1, &poly->x2 },
+				(const u8 *[3]){ &poly->u0, &poly->u1, &poly->u2 },
+				(const u8 *[3]){ &poly->r0, &poly->r1, &poly->r2 },
+				3, poly->tpage, poly->clut, shadeTexOn);
+		}
+		else
+		{
+			MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2);
+			MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
+			MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r2);
+		}
 
 		s_gpu.vertexIndex += 3;
 
@@ -1943,10 +2438,21 @@ internal int ProcessGouraudPoly(P_TAG *polyTag)
 		AddSplit(semiTrans, true, NativeGpu_TPageOverlapsActiveDrawPage(poly->tpage));
 
 		GrVertex *firstVertex = &s_gpu.vertexBuffer[s_gpu.vertexIndex];
-		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2);
-		MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut,
-		                 GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
-		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r3, &poly->r2);
+		if (NativeGpu_FusedLegacyTexturedEnabled())
+		{
+			NativeGpu_BuildTexturedPolygonFused(
+				(VERTTYPE *[4]){ &poly->x0, &poly->x1, &poly->x3, &poly->x2 },
+				(const u8 *[4]){ &poly->u0, &poly->u1, &poly->u3, &poly->u2 },
+				(const u8 *[4]){ &poly->r0, &poly->r1, &poly->r3, &poly->r2 },
+				4, poly->tpage, poly->clut, shadeTexOn);
+		}
+		else
+		{
+			MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2);
+			MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut,
+			                 GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
+			MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r3, &poly->r2);
+		}
 
 		TriangulateQuad();
 
@@ -2232,6 +2738,165 @@ internal int ProcessPsyXPrims(P_TAG *polyTag)
 		s_gpu.overrideTextureHeight = psytex->code[1] >> 16 & 0xFFF;
 		return 2;
 	}
+	case 0x03:
+	{
+		DR_PSYX_TEX_GT3 *psytri = (DR_PSYX_TEX_GT3 *)polyTag;
+
+		/*
+		 * B3 is self-contained, but consecutive custom triangles commonly use
+		 * the same external texture. Keep the override scoped across adjacent B3
+		 * packets so AddSplit can batch them. ParsePrimitive restores the state
+		 * immediately before any non-B3 primitive, preserving retail ordering.
+		 */
+		if (!s_gpu.psyxScopedOverrideActive)
+		{
+			s_gpu.psyxScopedPrevTexture = s_gpu.overrideTexture;
+			s_gpu.psyxScopedPrevTextureWidth = s_gpu.overrideTextureWidth;
+			s_gpu.psyxScopedPrevTextureHeight = s_gpu.overrideTextureHeight;
+			s_gpu.psyxScopedOverrideActive = true;
+		}
+		s_gpu.overrideTexture = psytri->code[0] & 0xFFFFFF;
+		s_gpu.overrideTextureWidth = psytri->code[1] & 0xFFF;
+		s_gpu.overrideTextureHeight = psytri->code[1] >> 16 & 0xFFF;
+
+		/* DR_PSYX_TEX_GT3 is emitted by the native custom OBJ/vehicle path.
+		 * Tag only this primitive as eligible for the experimental custom-only
+		 * depth buffer; retail world, particles, ghosts and UI stay OT-only. */
+		{
+			const int firstVertexIndex = s_gpu.vertexIndex;
+			s_gpu.nativeDepthCandidate = true;
+
+			if (psytri->nativeFlags & DR_PSYX_TEX_GT3_FLAG_EXACT_METADATA)
+			{
+				POLY_GT3 *poly = &psytri->poly;
+				const bool semiTrans = (poly->code & 2) != 0;
+				GrVertex *firstVertex;
+				float ofsX, ofsY;
+
+				activeDrawEnv.tpage = poly->tpage;
+				AddSplit(semiTrans, true,
+				         NativeGpu_TPageOverlapsActiveDrawPage(poly->tpage));
+
+				firstVertex = &s_gpu.vertexBuffer[s_gpu.vertexIndex];
+				DrawEnvOffset(&ofsX, &ofsY);
+
+				/* Fused native B3 decoder: fill every packed GrVertex field in
+				 * one pass. The old path cleared metadata then ran separate
+				 * position, UV, color and high-resolution sideband passes over
+				 * the same three vertices for every OBJ wheel/kart triangle.
+				 * No change to triangle ordering, depth, color or UV data. */
+				const VERTTYPE *xy[3] = {
+					&poly->x0, &poly->x1, &poly->x2
+				};
+				const u8 *uv[3] = {
+					&poly->u0, &poly->u1, &poly->u2
+				};
+				const u8 *colors[3] = {
+					&poly->r0, &poly->r1, &poly->r2
+				};
+				const short texPage = GetTPageBase(poly->tpage);
+				const u8 dither = (g_cfg_psxDithering &&
+					(GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd)) ? 1 : 0;
+				const bool hiResUV =
+					(psytri->nativeFlags & DR_PSYX_TEX_GT3_FLAG_HIRES_UV) != 0;
+
+				for (int j = 0; j < 3; ++j)
+				{
+					GrVertex *v = &firstVertex[j];
+					v->x = xy[j][0] + ofsX;
+					v->y = xy[j][1] + ofsY;
+					v->page = texPage;
+					v->clut = poly->clut;
+					v->u = uv[j][0];
+					v->v = uv[j][1];
+					v->bright = 2;
+					v->dither = hiResUV ? 255 : dither;
+					v->r = colors[j][0];
+					v->g = colors[j][1];
+					v->b = colors[j][2];
+					v->a = 255;
+					v->tcx = hiResUV ? psytri->uvFrac[j][0] : 0;
+					v->tcy = hiResUV ? psytri->uvFrac[j][1] : 0;
+					v->_p0 = g_cfg_subpixelGeometry ? psytri->xyFrac[j][0] : 0;
+					v->_p1 = g_cfg_subpixelGeometry ? psytri->xyFrac[j][1] : 0;
+					v->depth = psytri->depth[j];
+					v->_depthPad = 0;
+				}
+				if (g_cfg_subpixelGeometry)
+					NativeGpu_RecordSubpixelPrimitive(1);
+				s_gpu.vertexIndex += 3;
+			}
+			else
+			{
+				ProcessGouraudPoly((P_TAG *)&psytri->poly);
+			}
+
+			s_gpu.nativeDepthCandidate = false;
+
+			/* B3 is the native custom-OBJ path. The embedded POLY_GT3 keeps
+			 * PS1-compatible integer UVs, while this sideband restores the
+			 * fractional Blender UV bits after the decoder has emitted
+			 * its three GrVertex entries. dither=255 is an otherwise-unused
+			 * marker consumed only by the external RGBA shader. */
+			if ((psytri->nativeFlags & DR_PSYX_TEX_GT3_FLAG_HIRES_UV) &&
+			    !(psytri->nativeFlags & DR_PSYX_TEX_GT3_FLAG_EXACT_METADATA) &&
+			    (s_gpu.vertexIndex == firstVertexIndex + 3))
+			{
+				/* Exact native B3 metadata already writes fractional UVs and
+				 * the RGBA shader marker in the fused vertex pass above. */
+				for (int j = 0; j < 3; ++j)
+				{
+					GrVertex *vertex = &s_gpu.vertexBuffer[firstVertexIndex + j];
+					vertex->tcx = psytri->uvFrac[j][0];
+					vertex->tcy = psytri->uvFrac[j][1];
+					vertex->dither = 255;
+				}
+			}
+		}
+
+		return (int)(sizeof(*psytri) / sizeof(u32)) - P_LEN;
+	}
+	case 0x05:
+	{
+		/* Native 3D static level packet at its native PS1 OT position.
+		 * Unlike upstream Turbocharged B3, Crash Forge reserves B3 for
+		 * modular OBJ triangles; B5 is intentionally collision-free.
+		 * Flush only prior PS1 batches, draw queued VBO once, then continue
+		 * parsing later PS1 sprites, characters, particles and UI in order. */
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+		if (NativeRenderer_LevelPCEnabled())
+		{
+			if (NativeGpu_HasPendingSplits())
+				DrawAllSplits();
+			NativeRenderer_LevelPCDrawQueued();
+			static int markerSeen;
+			if(!markerSeen)
+			{
+				Platform_Log("[LEVEL PC GPU] OT B5 marker consumed; prior PS1 splits flushed, native terrain drawn\n");
+				markerSeen=1;
+			}
+		}
+#endif
+		return 1;
+	}
+	case 0x04:
+	{
+		DR_PSYX_TEX_FT4 *psyquad = (DR_PSYX_TEX_FT4 *)polyTag;
+
+		/* UI glyph/image packet: scope the external RGBA texture to one FT4.
+		   This keeps the normal OT ordering while avoiding a bind/reset pair. */
+		s_gpu.overrideTexture = psyquad->code[0] & 0xFFFFFF;
+		s_gpu.overrideTextureWidth = psyquad->code[1] & 0xFFF;
+		s_gpu.overrideTextureHeight = psyquad->code[1] >> 16 & 0xFFF;
+
+		ProcessFlatPoly((P_TAG *)&psyquad->poly);
+
+		s_gpu.overrideTexture = 0;
+		s_gpu.overrideTextureWidth = 256;
+		s_gpu.overrideTextureHeight = 256;
+
+		return (int)(sizeof(*psyquad) / sizeof(u32)) - P_LEN;
+	}
 	case 0x02:
 	{
 		// [A] Psy-X custom debug marker packet
@@ -2249,6 +2914,16 @@ internal int ProcessPsyXPrims(P_TAG *polyTag)
 int ParsePrimitive(P_TAG *polyTag)
 {
 	const int primType = polyTag->code & 0xF0;
+	const int primSubType = polyTag->code & 0x0F;
+
+	/* B3 custom triangles carry their texture inline and may batch with the
+	 * immediately adjacent B3 packet. Any other drawable primitive must first
+	 * restore the texture state that existed before the custom run. */
+	if (s_gpu.psyxScopedOverrideActive &&
+	    !((primType == 0xB0) && (primSubType == 0x03)))
+	{
+		NativeGpu_ClearScopedPsyxOverride();
+	}
 
 	int primLength = 0;
 	bool handledZeroLength = false;

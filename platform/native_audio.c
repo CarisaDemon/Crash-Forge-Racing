@@ -1,4 +1,6 @@
 #include <macros.h>
+#include <NativeHowlSampleCatalog.h>
+#include <NativeCustomSampleRegistry.h>
 #include <platform/native_audio.h>
 #include <platform/native_custom_music.h>
 #include <platform/native_assets.h>
@@ -318,6 +320,9 @@ struct NativeAudioSnapshot
 };
 
 global_variable struct NativeAudioState s_audio;
+#if defined(CTR_CSEQ_TEST_BUILD)
+static int s_cseqNativePitchLogCount;
+#endif
 
 internal b32 NativeAudio_OutputOpen(void)
 {
@@ -1518,7 +1523,14 @@ internal int NativeAudio_DecodeAdpcmNibble(u8 soundParameter, int nibble, int *o
 	return sample;
 }
 
-internal int NativeAudio_DecodeSpuSample(u32 addr, u32 loopAddr, struct NativeAudioPcmBuffer *pcm, int *loopStart, int *loopEnd, int *loopEnabled)
+internal int NativeAudio_DecodeAdpcmBytes(
+	const u8 *bytes,
+	int byteCount,
+	int explicitLoopByteOffset,
+	struct NativeAudioPcmBuffer *pcm,
+	int *loopStart,
+	int *loopEnd,
+	int *loopEnabled)
 {
 	int old = 0;
 	int older = 0;
@@ -1529,18 +1541,19 @@ internal int NativeAudio_DecodeSpuSample(u32 addr, u32 loopAddr, struct NativeAu
 	int hasLoopEnd = 0;
 	int hasRepeat = 0;
 
-	if (addr >= NATIVE_AUDIO_SPU_MEMSIZE)
+	if (bytes == NULL || byteCount < 16)
 	{
 		return 0;
 	}
 
-	for (block = (int)addr; block + 16 <= NATIVE_AUDIO_SPU_MEMSIZE; block += 16)
+	for (block = 0; block + 16 <= byteCount; block += 16)
 	{
-		u8 soundParameter = s_audio.spu.memory[block];
-		u8 flags = s_audio.spu.memory[block + 1];
+		u8 soundParameter = bytes[block];
+		u8 flags = bytes[block + 1];
 		int i;
 
-		if ((loopAddr > addr) && (loopAddr == (u32)block))
+		if ((explicitLoopByteOffset >= 0) &&
+		    (explicitLoopByteOffset == block))
 		{
 			loopStartSample = pcm->count;
 			hasLoopStart = 1;
@@ -1553,12 +1566,24 @@ internal int NativeAudio_DecodeSpuSample(u32 addr, u32 loopAddr, struct NativeAu
 
 		for (i = 0; i < 14; i++)
 		{
-			u8 packed = s_audio.spu.memory[block + 2 + i];
-			if (!NativeAudio_PcmPush(pcm, (s16)NativeAudio_DecodeAdpcmNibble(soundParameter, packed & 0xf, &old, &older)))
+			u8 packed = bytes[block + 2 + i];
+			if (!NativeAudio_PcmPush(
+		        pcm,
+		        (s16)NativeAudio_DecodeAdpcmNibble(
+		            soundParameter,
+		            packed & 0xf,
+		            &old,
+		            &older)))
 			{
 				return 0;
 			}
-			if (!NativeAudio_PcmPush(pcm, (s16)NativeAudio_DecodeAdpcmNibble(soundParameter, (packed >> 4) & 0xf, &old, &older)))
+			if (!NativeAudio_PcmPush(
+		        pcm,
+		        (s16)NativeAudio_DecodeAdpcmNibble(
+		            soundParameter,
+		            (packed >> 4) & 0xf,
+		            &old,
+		            &older)))
 			{
 				return 0;
 			}
@@ -1575,8 +1600,66 @@ internal int NativeAudio_DecodeSpuSample(u32 addr, u32 loopAddr, struct NativeAu
 
 	*loopStart = hasLoopStart ? loopStartSample : 0;
 	*loopEnd = hasLoopEnd ? loopEndSample : pcm->count;
-	*loopEnabled = (hasLoopEnd && hasRepeat && (*loopEnd > *loopStart));
+	*loopEnabled =
+		(hasLoopEnd && hasRepeat && (*loopEnd > *loopStart));
 	return pcm->count > 0;
+}
+
+internal int NativeAudio_DecodeSpuSample(
+	u32 addr,
+	u32 loopAddr,
+	struct NativeAudioPcmBuffer *pcm,
+	int *loopStart,
+	int *loopEnd,
+	int *loopEnabled)
+{
+	int explicitLoopByteOffset = -1;
+
+	if (addr >= NATIVE_AUDIO_SPU_MEMSIZE)
+	{
+		return 0;
+	}
+
+	if (loopAddr > addr && loopAddr < NATIVE_AUDIO_SPU_MEMSIZE)
+	{
+		explicitLoopByteOffset = (int)(loopAddr - addr);
+	}
+
+	return NativeAudio_DecodeAdpcmBytes(
+		&s_audio.spu.memory[addr],
+		NATIVE_AUDIO_SPU_MEMSIZE - (int)addr,
+		explicitLoopByteOffset,
+		pcm,
+		loopStart,
+		loopEnd,
+		loopEnabled);
+}
+
+internal int NativeAudio_DecodeRetailCatalogSample(
+	u32 handle,
+	struct NativeAudioPcmBuffer *pcm,
+	int *loopStart,
+	int *loopEnd,
+	int *loopEnabled)
+{
+	const unsigned char *bytes = NULL;
+	int byteCount = 0;
+	int spuIndex = NativeHowlSampleCatalog_DecodeRetailHandle(handle);
+
+	if (spuIndex < 0 ||
+	    !NativeHowlSampleCatalog_GetBlob(spuIndex, &bytes, &byteCount))
+	{
+		return 0;
+	}
+
+	return NativeAudio_DecodeAdpcmBytes(
+		(const u8 *)bytes,
+		byteCount,
+		-1,
+		pcm,
+		loopStart,
+		loopEnd,
+		loopEnabled);
 }
 
 internal void NativeAudio_FreeVoicePcm(struct NativeAudioVoice *voice)
@@ -1634,12 +1717,49 @@ internal int NativeAudio_PrepareVoicePcmBuffer(u32 addr, struct NativeAudioPcmBu
 	int maxBytes;
 	int marker;
 
-	if (addr >= NATIVE_AUDIO_SPU_MEMSIZE)
+	if (NativeCustomSampleRegistry_IsHandle(addr))
 	{
-		return 0;
-	}
+		struct NativeCustomSampleView view;
+		int index = NativeCustomSampleRegistry_DecodeHandle(addr);
 
-	maxSamples = ((NATIVE_AUDIO_SPU_MEMSIZE - (int)addr) / 16) * XA_SAMPLES_PER_SOUND_UNIT;
+		if (index < 0 ||
+		    !NativeCustomSampleRegistry_GetView(index, &view) ||
+		    view.samples == NULL ||
+		    view.sampleCount <= 0)
+		{
+			return 0;
+		}
+
+		maxSamples = view.sampleCount;
+	}
+	else if (NativeHowlSampleCatalog_IsRetailHandle(addr))
+	{
+		const unsigned char *bytes = NULL;
+		int byteCount = 0;
+		int spuIndex = NativeHowlSampleCatalog_DecodeRetailHandle(addr);
+
+		if (spuIndex < 0 ||
+		    !NativeHowlSampleCatalog_GetBlob(spuIndex, &bytes, &byteCount) ||
+		    bytes == NULL ||
+		    byteCount < 16)
+		{
+			return 0;
+		}
+
+		maxSamples =
+			(byteCount / 16) * XA_SAMPLES_PER_SOUND_UNIT;
+	}
+	else
+	{
+		if (addr >= NATIVE_AUDIO_SPU_MEMSIZE)
+		{
+			return 0;
+		}
+
+		maxSamples =
+			((NATIVE_AUDIO_SPU_MEMSIZE - (int)addr) / 16) *
+			XA_SAMPLES_PER_SOUND_UNIT;
+	}
 	if ((maxSamples <= 0) || (maxSamples > (INT_MAX / (int)sizeof(s16))))
 	{
 		return 0;
@@ -1701,7 +1821,56 @@ internal int NativeAudio_UpdateVoiceSample(struct NativeAudioVoice *voice)
 		}
 	}
 
-	if (!NativeAudio_DecodeSpuSample(voice->attr.addr, voice->attr.loop_addr, &pcm, &loopStart, &loopEnd, &loopEnabled))
+	if (NativeCustomSampleRegistry_IsHandle(voice->attr.addr))
+	{
+		struct NativeCustomSampleView view;
+		int index = NativeCustomSampleRegistry_DecodeHandle(voice->attr.addr);
+
+		if (index < 0 ||
+		    !NativeCustomSampleRegistry_GetView(index, &view) ||
+		    view.samples == NULL ||
+		    view.sampleCount <= 0 ||
+		    view.sampleCount > pcm.capacity)
+		{
+			NativeAudio_ArenaRewind(&s_audio.voicePcmArena, arenaMarker);
+			NativeAudio_FreeVoicePcm(voice);
+			voice->active = 0;
+			voice->sampleDirty = 0;
+			return 0;
+		}
+
+		memcpy(
+			pcm.samples,
+			view.samples,
+			(size_t)view.sampleCount * sizeof(s16));
+		pcm.count = view.sampleCount;
+		loopStart = view.loopStart;
+		loopEnd = view.loopEnd;
+		loopEnabled = view.loopEnabled;
+	}
+	else if (NativeHowlSampleCatalog_IsRetailHandle(voice->attr.addr))
+	{
+		if (!NativeAudio_DecodeRetailCatalogSample(
+		        voice->attr.addr,
+		        &pcm,
+		        &loopStart,
+		        &loopEnd,
+		        &loopEnabled))
+		{
+			NativeAudio_ArenaRewind(&s_audio.voicePcmArena, arenaMarker);
+			NativeAudio_FreeVoicePcm(voice);
+			voice->active = 0;
+			voice->sampleDirty = 0;
+			return 0;
+		}
+	}
+	else if (!NativeAudio_DecodeSpuSample(
+	             voice->attr.addr,
+	             voice->attr.loop_addr,
+	             &pcm,
+	             &loopStart,
+	             &loopEnd,
+	             &loopEnabled))
 	{
 		NativeAudio_ArenaRewind(&s_audio.voicePcmArena, arenaMarker);
 		NativeAudio_FreeVoicePcm(voice);
@@ -1779,7 +1948,10 @@ internal void NativeAudio_CopyXAToState(struct NativeAudioXAState *dst, const st
 
 internal int NativeAudio_ValidateVoiceSnapshot(const struct NativeAudioVoiceState *voice)
 {
-	if (voice->active && (voice->attr.addr >= NATIVE_AUDIO_SPU_MEMSIZE))
+	if (voice->active &&
+	    (voice->attr.addr >= NATIVE_AUDIO_SPU_MEMSIZE) &&
+	    !NativeHowlSampleCatalog_IsRetailHandle(voice->attr.addr) &&
+	    !NativeCustomSampleRegistry_IsHandle(voice->attr.addr))
 	{
 		return 0;
 	}
@@ -3264,6 +3436,13 @@ void NativeAudio_Shutdown(void)
 		s_audio.output.device = 0;
 	}
 
+	/*
+	 * The global HOWL catalog is native-only host memory. It is intentionally
+	 * independent from retail bank lifetime, so release it with the host audio
+	 * backend rather than when a level bank is destroyed.
+	 */
+	NativeHowlSampleCatalog_Shutdown();
+
 	SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }
 
@@ -3460,6 +3639,19 @@ void NativeAudio_SpuSetKey(s32 on_off, u32 voice_bit)
 		voice = &s_audio.voices[i];
 		if (on_off && !s_audio.muted)
 		{
+#if defined(CTR_CSEQ_TEST_BUILD)
+			if (NativeHowlSampleCatalog_IsRetailHandle(voice->attr.addr) &&
+			    s_cseqNativePitchLogCount < 64)
+			{
+				Platform_Log(
+					"[CSEQ NATIVE] voice=%d spu=%d pitch=0x%04x addr=0x%08x\n",
+					i,
+					NativeHowlSampleCatalog_DecodeRetailHandle(voice->attr.addr),
+					voice->attr.pitch,
+					voice->attr.addr);
+				s_cseqNativePitchLogCount++;
+			}
+#endif
 			if ((voice->pcm == NULL) || voice->sampleDirty)
 			{
 				NativeAudio_UpdateVoiceSample(voice);

@@ -3,6 +3,7 @@
 
 #include <common.h>
 #include <CharacterRegistry.h>
+#include <NativeReserves.h>
 
 #include "226/R226.c"
 #include "227/R227.c"
@@ -27,6 +28,7 @@
 
 #include "CAM.c"
 
+#include "NativeReserves.c"
 #include "BOTS.c"
 #include "CDSYS.c"
 
@@ -77,6 +79,11 @@
 #include "HOWL/HOWL_CseqMusic.c"
 #include "HOWL/HOWL_Bank.c"
 #include "HOWL/HOWL_Load.c"
+#include "HOWL/NativeHowlSampleCatalog.c"
+#if defined(CTR_CSEQ_LIBERATION)
+#include "HOWL/NativeCustomSampleRegistry.c"
+#include "HOWL/NativeMusicRegistry.c"
+#endif
 #include "HOWL/HOWL_CseqOpcode.c"
 #include "HOWL/HOWL_SongPool.c"
 #include "HOWL/HOWL_Settings.c"
@@ -107,6 +114,14 @@
 #include "LOAD/LOAD_Howl.c"
 #include "LOAD/LOAD_Assets.c"
 #include "CharacterRegistry.c"
+#include "NativeSession.c"
+#include "NativeChat.c"
+#include "NativeHangout.c"
+#include "VehiclePartRegistry.c"
+#include "RacerLoadout.c"
+#include "NativeRacerVisual.c"
+#include "VanillaRacerSeparation.c"
+#include "VanillaRacerPatch.c"
 #include "LOAD/LOAD_Queue.c"
 #include "LOAD/LOAD_Hub.c"
 #include "LOAD/LOAD_Overlays.c"
@@ -252,6 +267,7 @@
 #include "230/R230.c"
 #include "230/D230.c"
 #include "230/MM_Battle.c"
+#include "230/MM_Mods.c"
 #include "230/MM_MenuFlow.c"
 #include "230/MM_Title.c"
 #include "230/MM_CheatCodes.c"

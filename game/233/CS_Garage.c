@@ -1,4 +1,7 @@
 #include <common.h>
+#ifdef CTR_NATIVE
+#include <platform/native_custom_music.h>
+#endif
 
 enum GarageInputMask
 {
@@ -73,6 +76,25 @@ void CS_Garage_ZoomOut(s16 zoomState)
 		Garage_Enter(sdata->advCharSelectIndex_curr);
 
 		Audio_SetState_Safe(AUDIO_GARAGE);
+
+#ifdef CTR_NATIVE
+		/* Retail keeps the main-menu CSEQ flowing through Adventure Garage.
+		 * Only replace it when an explicit level-40 override exists; otherwise
+		 * leave the current music untouched for faithful retail continuity.
+		 * Keep this trigger source-agnostic so native CSEQ overrides can share
+		 * the same level resolver later. */
+		if (NativeCustomMusic_HasLevelTrack(ADVENTURE_GARAGE) &&
+			NativeCustomMusic_TryStartLevel(ADVENTURE_GARAGE))
+		{
+			if (sdata->cseqBoolPlay != 0 &&
+				sdata->cseqHighestIndex == 0)
+			{
+				/* Preserve CSEQ state/clock but silence it while the custom
+				 * level-40 track is audible. */
+				CseqMusic_ChangeVolume(0, 0, 0);
+			}
+		}
+#endif
 	}
 }
 

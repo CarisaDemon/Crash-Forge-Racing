@@ -62,6 +62,10 @@ CTR_STATIC_ASSERT(RACE_FLAG_TRIG_TABLE_MASK == 0x3ff);
 CTR_STATIC_ASSERT(RACE_FLAG_TRIG_HIGH_HALF_MASK == 0x400);
 CTR_STATIC_ASSERT(RACE_FLAG_TRIG_NEGATE_MASK == 0x800);
 
+#if defined(CTR_NATIVE)
+static int s_nativeLoadingTextAccumMS;
+#endif
+
 struct RaceFlagProjectedRow
 {
 	u32 xy[RACE_FLAG_SCREEN_POINTS_PER_ROW];
@@ -174,6 +178,9 @@ void RaceFlag_BeginTransition(int direction)
 	if (direction == RACE_FLAG_TRANSITION_BEGIN_ONSCREEN)
 	{
 		sdata->RaceFlag_LoadingTextAnimFrame = -1;
+#if defined(CTR_NATIVE)
+		s_nativeLoadingTextAccumMS = 0;
+#endif
 
 		sdata->RaceFlag_Position = RACE_FLAG_POSITION_OFFSCREEN;
 
@@ -200,6 +207,9 @@ void RaceFlag_SetFullyOnScreen()
 {
 	sdata->RaceFlag_AnimationType = RACE_FLAG_TRANSITION_ONSCREEN;
 	sdata->RaceFlag_LoadingTextAnimFrame = -1;
+#if defined(CTR_NATIVE)
+	s_nativeLoadingTextAccumMS = 0;
+#endif
 
 	// flag is now fully on-screen
 	sdata->RaceFlag_Position = RACE_FLAG_POSITION_ONSCREEN;
@@ -214,6 +224,9 @@ void RaceFlag_SetFullyOffScreen()
 {
 	sdata->RaceFlag_AnimationType = RACE_FLAG_TRANSITION_ONSCREEN;
 	sdata->RaceFlag_LoadingTextAnimFrame = -1;
+#if defined(CTR_NATIVE)
+	s_nativeLoadingTextAccumMS = 0;
+#endif
 
 	// flag is now fully off-screen
 	sdata->RaceFlag_Position = RACE_FLAG_POSITION_OFFSCREEN;
@@ -288,7 +301,12 @@ u32 *RaceFlag_GetOT(void)
 				positionStep = -(s16)position;
 				if (position < 1)
 				{
-					positionStep = -1;
+#if defined(CTR_NATIVE)
+					/* Unlimited may render multiple frames before one whole
+					 * millisecond passes. Do not move the flag on zero-time frames. */
+					if (gGT->elapsedTimeMS != 0)
+#endif
+						positionStep = -1;
 				}
 
 				sdata->RaceFlag_Position += positionStep;
@@ -342,6 +360,9 @@ u32 *RaceFlag_GetOT(void)
 void RaceFlag_ResetTextAnim(void)
 {
 	sdata->RaceFlag_LoadingTextAnimFrame = -1;
+#if defined(CTR_NATIVE)
+	s_nativeLoadingTextAccumMS = 0;
+#endif
 }
 
 
@@ -382,7 +403,14 @@ void RaceFlag_DrawLoadingString(void)
 	{
 		if (RACE_FLAG_LOADING_IDLE_SLIDE_LIMIT < (int)sdata->RaceFlag_Transition)
 		{
-			sdata->RaceFlag_Transition -= RACE_FLAG_LOADING_IDLE_SLIDE_STEP;
+			int slideSteps = 1;
+#if defined(CTR_NATIVE)
+			/* The LOADING text slides away at retail 30 Hz, not once per
+			 * host render frame (which may run above 2000 FPS). */
+			if (Platform_GetHighRefreshMode())
+				slideSteps = Platform_GetLegacy30HzTicks();
+#endif
+			sdata->RaceFlag_Transition -= RACE_FLAG_LOADING_IDLE_SLIDE_STEP * slideSteps;
 		}
 	}
 	else
@@ -467,11 +495,23 @@ void RaceFlag_DrawLoadingString(void)
 
 	if (letterAnimFrame < RACE_FLAG_LOADING_ANIM_RESET_FRAME)
 	{
-		int frameAdvance = gGT->elapsedTimeMS >> RACE_FLAG_LOADING_FRAME_TIME_SHIFT;
+		int frameAdvance;
 
-		if (frameAdvance < RACE_FLAG_LOADING_MIN_FRAME_ADVANCE)
+#if defined(CTR_NATIVE)
+		if (Platform_GetHighRefreshMode())
 		{
-			frameAdvance = RACE_FLAG_LOADING_MIN_FRAME_ADVANCE;
+			// Keep the flying LOADING text on its original ~30 Hz content clock
+			// while the loading screen itself continues rendering at 200 Hz.
+			s_nativeLoadingTextAccumMS += gGT->elapsedTimeMS;
+			frameAdvance = s_nativeLoadingTextAccumMS >> RACE_FLAG_LOADING_FRAME_TIME_SHIFT;
+			s_nativeLoadingTextAccumMS &= (1 << RACE_FLAG_LOADING_FRAME_TIME_SHIFT) - 1;
+		}
+		else
+#endif
+		{
+			frameAdvance = gGT->elapsedTimeMS >> RACE_FLAG_LOADING_FRAME_TIME_SHIFT;
+			if (frameAdvance < RACE_FLAG_LOADING_MIN_FRAME_ADVANCE)
+				frameAdvance = RACE_FLAG_LOADING_MIN_FRAME_ADVANCE;
 		}
 
 		sdata->RaceFlag_LoadingTextAnimFrame += frameAdvance;
@@ -479,6 +519,9 @@ void RaceFlag_DrawLoadingString(void)
 
 	else
 	{
+#if defined(CTR_NATIVE)
+		s_nativeLoadingTextAccumMS = 0;
+#endif
 		sdata->RaceFlag_LoadingTextAnimFrame = -1;
 		if ((u32)(sdata->Loading.stage - RACE_FLAG_LOADING_REPEAT_STAGE_FIRST) < RACE_FLAG_LOADING_REPEAT_STAGE_COUNT)
 		{

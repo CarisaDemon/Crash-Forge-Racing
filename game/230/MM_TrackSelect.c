@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <platform/native_custom_tracks.h>
+#endif
 
 enum TrackSelectVideoState
 {
@@ -67,10 +70,44 @@ enum
 	MM_TRACK_SELECT_INPUT = BTN_UP | BTN_DOWN | BTN_TRIANGLE | BTN_SQUARE_one | BTN_CROSS_one | BTN_CIRCLE,
 };
 
+#if defined(CTR_NATIVE)
+/* Extend the selected rows privately, preserving the retail D230 ABI and the
+   original game progress/highscore indices. Every community row routes to
+   the standard Crash Cove race shell, with only VRM/LEV file reads replaced. */
+static struct MainMenu_LevelRow s_nctMenuRows[18 + NATIVE_CUSTOM_TRACK_LIMIT];
+static int s_nctMenuCount=18;
+static void NCT_MenuInitRows(void)
+{
+    int index;
+    NativeCustomTracks_Scan();
+    s_nctMenuCount = MM_TRACK_SELECT_ARCADE_TRACK_COUNT +
+                     NativeCustomTracks_Count();
+    memcpy(s_nctMenuRows,D230.arcadeTracks,sizeof(D230.arcadeTracks));
+    for (index=MM_TRACK_SELECT_ARCADE_TRACK_COUNT;
+         index<s_nctMenuCount; ++index)
+    {
+        s_nctMenuRows[index] = D230.arcadeTracks[0];
+        s_nctMenuRows[index].levID = CRASH_COVE;
+        s_nctMenuRows[index].unlock = MM_TRACK_UNLOCK_ALWAYS;
+    }
+}
+static const char *NCT_MenuTrackName(int index)
+{
+    const char *name=NativeCustomTracks_Name(
+        index-MM_TRACK_SELECT_ARCADE_TRACK_COUNT);
+    return name?name:"CUSTOM TRACK";
+}
+#endif
+
 CTR_STATIC_ASSERT(MM_TRACK_VIDEO_ICON == 1);
 CTR_STATIC_ASSERT(MM_TRACK_VIDEO_START_STREAM == 2);
 CTR_STATIC_ASSERT(MM_TRACK_VIDEO_PLAYING == 3);
 CTR_STATIC_ASSERT(MM_TRACK_SELECT_INPUT == 0x40073);
+
+#if defined(CTR_NATIVE)
+/* Visual hover only. Track selection itself changes exclusively on a click. */
+static int s_nativeTrackTouchHoverRow = -1;
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800afa44-0x800afa94.
 void MM_TrackSelect_Video_SetDefaults(void)
@@ -370,6 +407,15 @@ void MM_TrackSelect_Init(void)
 	struct MainMenu_LevelRow *selectMenu = D230.arcadeTracks;
 	s16 numTracks = MM_TRACK_SELECT_ARCADE_TRACK_COUNT;
 
+#if defined(CTR_NATIVE)
+	/* Scan once on opening the selection screen, never every frame. */
+	NCT_MenuInitRows();
+	if ((sdata->gGT->gameMode1 & BATTLE_MODE) == 0)
+	{
+		selectMenu = s_nctMenuRows;
+		numTracks = (s16)s_nctMenuCount;
+	}
+#endif
 	// lap selection menu is closed by default
 	D230.trackSelect.lapBoxOpen = false;
 	D230.trackSelect.transition.state = ENTERING_MENU;
@@ -466,6 +512,9 @@ void MM_TrackSelect_MenuProc(struct RectMenu *menu)
 				if (D230.trackSelect.transition.startAfterExit == 0)
 				{
 					// return to character selection
+#if defined(CTR_NATIVE)
+					NativeCustomTracks_ClearSelection();
+#endif
 					sdata->ptrDesiredMenu = &D230.menuCharacterSelect;
 					MM_Characters_RestoreIDs();
 					return;
@@ -487,6 +536,21 @@ void MM_TrackSelect_MenuProc(struct RectMenu *menu)
 				// if you are in time trial mode
 				if ((gGT->gameMode1 & TIME_TRIAL) != 0)
 				{
+#if defined(CTR_NATIVE)
+					if (NativeCustomTracks_IsSelected())
+					{
+						/* The retail ghost browser indexes Crash Cove ghost data:
+						   do not mislabel those records as community track ghosts. */
+						sdata->ptrGhostTapePlaying = MEMPACK_AllocHighMem(
+							MM_TRACK_SELECT_GHOST_TAPE_ALLOC_SIZE);
+						if (sdata->ptrGhostTapePlaying)
+							memset(sdata->ptrGhostTapePlaying,0,
+								MM_TRACK_SELECT_GHOST_TAPE_CLEAR_SIZE);
+						sdata->boolReplayHumanGhost=0;
+						sdata->ptrDesiredMenu=&data.menuQueueLoadTrack;
+						return;
+					}
+#endif
 					// allocate room at the end of RAM for ghosts
 					sdata->ptrGhostTapePlaying = MEMPACK_AllocHighMem(MM_TRACK_SELECT_GHOST_TAPE_ALLOC_SIZE /*, R230.s_loaded_ghost_data*/);
 
@@ -526,6 +590,13 @@ void MM_TrackSelect_MenuProc(struct RectMenu *menu)
 		selectMenu = &D230.battleTracks[0];
 		numTracks = MM_TRACK_SELECT_BATTLE_TRACK_COUNT;
 	}
+#if defined(CTR_NATIVE)
+	else
+	{
+		selectMenu = s_nctMenuRows;
+		numTracks = (s16)s_nctMenuCount;
+	}
+#endif
 
 	s16 currTrack = menu->rowSelected;
 	sdata->trackSelBackup = currTrack;
@@ -535,8 +606,11 @@ void MM_TrackSelect_MenuProc(struct RectMenu *menu)
 	if (D230.trackSelect.lapBoxOpen == 0)
 	{
 #if defined(CTR_NATIVE)
-		/* Touch rows: resolve the visible curved list before normal button handling,
-		   then turn a click into a normal Cross press on that exact track. */
+		/* Mouse hover is visual only. A click above/below the center row
+		   performs exactly one previous/next action; clicking the centered
+		   track confirms it. This prevents a stationary cursor from repeatedly
+		   scrolling the list. */
+		s_nativeTrackTouchHoverRow = -1;
 		if ((D230.trackSelect.transition.state == IN_MENU) &&
 		    (D230.trackSelect.trackChangeFrames == 0))
 		{
@@ -544,43 +618,30 @@ void MM_TrackSelect_MenuProc(struct RectMenu *menu)
 			int mouseY;
 			if (RECTMENU_NativeTouchGet(&mouseX, &mouseY))
 			{
-				int scanTrackTouch = (int)menu->rowSelected - 1;
-				int touchTrack = menu->rowSelected;
-
-				for (int hiddenRowIndex = 0;
-				     hiddenRowIndex < MM_TRACK_SELECT_CENTER_ROW;
-				     hiddenRowIndex++)
-				{
-					do
-					{
-						touchTrack = (s16)scanTrackTouch;
-						if (scanTrackTouch < 0)
-							touchTrack = numTracks - 1;
-
-						scanTrackTouch = touchTrack - 1;
-					} while (!MM_TrackSelect_boolTrackOpen(&selectMenu[touchTrack]));
-				}
-
 				for (int touchRowIndex = 0;
 				     touchRowIndex < MM_TRACK_SELECT_VISIBLE_ROWS;
 				     touchRowIndex++)
 				{
-					int touchRowPhase = touchRowIndex * MM_TRACK_SELECT_ROW_PHASE_UNIT;
+					int touchRowPhase =
+						touchRowIndex * MM_TRACK_SELECT_ROW_PHASE_UNIT;
 					u32 touchRowAngle =
-						((touchRowPhase >> 0x10) + -MM_TRACK_SELECT_CENTER_ROW) *
+						((touchRowPhase >> 0x10) +
+						 -MM_TRACK_SELECT_CENTER_ROW) *
 						MM_TRACK_SELECT_ROW_ANGLE_STEP;
-
 					RECT touchRect;
+
 					touchRect.w = MM_TRACK_SELECT_ROW_W;
 					touchRect.h = MM_TRACK_SELECT_ROW_H;
 					touchRect.x =
 						(s16)((u32)D230.trackSelect_rowListTransition.currX +
-						(MATH_Cos(touchRowAngle) * MM_TRACK_SELECT_ROW_X_RADIUS >>
+						(MATH_Cos(touchRowAngle) *
+						 MM_TRACK_SELECT_ROW_X_RADIUS >>
 						 MM_TRACK_SELECT_ROW_X_SHIFT) +
 						MM_TRACK_SELECT_ROW_X_OFFSET);
 					touchRect.y =
 						(s16)((u32)D230.trackSelect_rowListTransition.currY +
-						(MATH_Sin(touchRowAngle) * MM_TRACK_SELECT_ROW_Y_RADIUS >>
+						(MATH_Sin(touchRowAngle) *
+						 MM_TRACK_SELECT_ROW_Y_RADIUS >>
 						 MM_TRACK_SELECT_ROW_Y_SHIFT) +
 						MM_TRACK_SELECT_ROW_Y_OFFSET);
 
@@ -589,23 +650,19 @@ void MM_TrackSelect_MenuProc(struct RectMenu *menu)
 					    (mouseY >= touchRect.y) &&
 					    (mouseY < touchRect.y + touchRect.h))
 					{
-						menu->rowSelected = (s16)touchTrack;
-						D230.trackSelect.currentTrack = (s16)touchTrack;
-						currTrack = (s16)touchTrack;
+						s_nativeTrackTouchHoverRow = touchRowIndex;
 
 						if (RECTMENU_NativeTouchConsumeRect(&touchRect))
 						{
-							sdata->buttonTapPerPlayer[0] |= BTN_CROSS_one;
+							if (touchRowIndex < MM_TRACK_SELECT_CENTER_ROW)
+								sdata->buttonTapPerPlayer[0] |= BTN_UP;
+							else if (touchRowIndex > MM_TRACK_SELECT_CENTER_ROW)
+								sdata->buttonTapPerPlayer[0] |= BTN_DOWN;
+							else
+								sdata->buttonTapPerPlayer[0] |= BTN_CROSS_one;
 						}
 						break;
 					}
-
-					do
-					{
-						touchTrack++;
-						if (touchTrack >= numTracks)
-							touchTrack = 0;
-					} while (!MM_TrackSelect_boolTrackOpen(&selectMenu[touchTrack]));
 				}
 			}
 		}
@@ -798,6 +855,14 @@ void MM_TrackSelect_MenuProc(struct RectMenu *menu)
 
 	MM_TrackSelect_Video_State(resetPreviewVideo);
 
+#if defined(CTR_NATIVE)
+	if ((gGT->gameMode1 & BATTLE_MODE)==0 &&
+	    menu->rowSelected>=MM_TRACK_SELECT_ARCADE_TRACK_COUNT)
+		NativeCustomTracks_Select(
+			menu->rowSelected-MM_TRACK_SELECT_ARCADE_TRACK_COUNT);
+	else
+		NativeCustomTracks_ClearSelection();
+#endif
 	gGT->currLEV = selectMenu[menu->rowSelected].levID;
 	s32 scanTrack = (int)menu->rowSelected + -1;
 
@@ -851,7 +916,12 @@ void MM_TrackSelect_MenuProc(struct RectMenu *menu)
 		rowRect.y = rowY;
 
 		// if you are in time trial mode
-		if ((gGT->gameMode1 & TIME_TRIAL) != 0)
+		if ((gGT->gameMode1 & TIME_TRIAL) != 0
+#if defined(CTR_NATIVE)
+			&& (gGT->gameMode1 & BATTLE_MODE ||
+			    currTrack<MM_TRACK_SELECT_ARCADE_TRACK_COUNT)
+#endif
+		)
 		{
 			// backup level ID
 			s16 previousLevelID = gGT->levelID;
@@ -899,13 +969,35 @@ void MM_TrackSelect_MenuProc(struct RectMenu *menu)
 		}
 
 		// Draw string
+#if defined(CTR_NATIVE)
+		if (!(gGT->gameMode1 & BATTLE_MODE) &&
+		    currTrack>=MM_TRACK_SELECT_ARCADE_TRACK_COUNT)
+			DecalFont_DrawLine(NCT_MenuTrackName(currTrack),
+				(rowX + MM_TRACK_SELECT_ROW_NAME_X_OFFSET),
+				(rowBaseY + MM_TRACK_SELECT_ROW_NAME_Y_OFFSET),
+				FONT_BIG, ORANGE);
+		else
+#endif
 		DecalFont_DrawLine(sdata->lngStrings[data.metaDataLEV[selectMenu[currTrack].levID].name_LNG], (rowX + MM_TRACK_SELECT_ROW_NAME_X_OFFSET),
 		                   (rowBaseY + MM_TRACK_SELECT_ROW_NAME_Y_OFFSET), FONT_BIG, ORANGE);
 
-		if ((D230.trackSelect.trackChangeFrames == 0) && ((s16)rowIndex == MM_TRACK_SELECT_CENTER_ROW))
+		if ((D230.trackSelect.trackChangeFrames == 0) &&
+		    (((s16)rowIndex == MM_TRACK_SELECT_CENTER_ROW)
+#if defined(CTR_NATIVE)
+		     || ((int)rowIndex == s_nativeTrackTouchHoverRow)
+#endif
+		    ))
 		{
-			// if you are in time trial mode
-			if ((gGT->gameMode1 & TIME_TRIAL) != 0)
+			/* Ghost-data messaging belongs to the selected center row only.
+			   Mouse hover may highlight other rows, but must not make them
+			   behave like the current selection. */
+			if (((s16)rowIndex == MM_TRACK_SELECT_CENTER_ROW) &&
+			    ((gGT->gameMode1 & TIME_TRIAL) != 0)
+#if defined(CTR_NATIVE)
+			    && ((gGT->gameMode1 & BATTLE_MODE) ||
+			        currTrack<MM_TRACK_SELECT_ARCADE_TRACK_COUNT)
+#endif
+			    )
 			{
 				// Check if this track has Ghost Data
 				s16 ghostProfileCount = RefreshCard_CountGhostProfilesForLEV(selectMenu[currTrack].levID);

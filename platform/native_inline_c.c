@@ -140,6 +140,12 @@ void MTC2_S(s32 value, s32 reg)
 
 void CTC2(u32 value, s32 reg)
 {
+#if defined(CTR_NATIVE)
+	if ((reg >= 0) && (reg <= 7))
+	{
+		NativeGTE_InvalidatePresentationMatrixMatch();
+	}
+#endif
 	switch (reg)
 	{
 	case 4:
@@ -166,6 +172,12 @@ void CTC2(u32 value, s32 reg)
 
 void CTC2_S(s32 value, s32 reg)
 {
+#if defined(CTR_NATIVE)
+	if ((reg >= 0) && (reg <= 7))
+	{
+		NativeGTE_InvalidatePresentationMatrixMatch();
+	}
+#endif
 	switch (reg)
 	{
 	case 4:

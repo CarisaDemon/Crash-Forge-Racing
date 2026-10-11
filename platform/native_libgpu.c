@@ -17,6 +17,28 @@
 #include <platform.h>
 
 #include <string.h>
+#include <stdio.h>
+
+#if defined(CTR_INTERNAL)
+static int DrawSync_ForceFramebufferReadbackEnabled(void)
+{
+	static int checked = 0;
+	static int enabled = 0;
+
+	if (!checked)
+	{
+		FILE *marker = fopen("debug/drawsync_force_readback.enable", "rb");
+		enabled = marker != NULL;
+		if (marker != NULL)
+			fclose(marker);
+		checked = 1;
+		if (enabled)
+			Platform_LogWarn("[CTR Native] DrawSync legacy framebuffer readback forced: ON\n");
+	}
+
+	return enabled;
+}
+#endif
 
 // NOTE(aalhendi): Native libgpu preserves the retail-shaped PsyQ GPU facade
 // while keeping the game-facing GPU symbols under ctr-native ownership. The
@@ -49,7 +71,12 @@ int DrawSync(int mode)
 	{
 		DrawAllSplits();
 	}
-	NativeRenderer_ReadFramebufferDataToVRAM();
+#if defined(CTR_INTERNAL)
+	if (DrawSync_ForceFramebufferReadbackEnabled())
+	{
+		NativeRenderer_ReadFramebufferDataToVRAM();
+	}
+#endif
 
 	if (drawsync_callback != NULL)
 	{

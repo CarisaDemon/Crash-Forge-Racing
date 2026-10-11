@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <stdint.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8002991c-0x80029988
 u32 howl_InstrumentPitch(int basePitch, int pitchIndex, u32 distort)
@@ -94,7 +97,11 @@ void howl_ParseHeader(struct HowlHeader *hh)
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80029ab4-0x80029b2c
 void howl_ParseCseqHeader(struct CseqHeader *ch)
 {
+#if defined(CTR_NATIVE)
+	uintptr_t addr = (uintptr_t)ch;
+#else
 	u32 addr = (u32)ch;
+#endif
 
 	sdata->ptrCseqHeader = (struct CseqHeader *)addr;
 	addr += sizeof(struct CseqHeader);

@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800b344c-0x800b351c.
 void AH_HintMenu_FiveArrows(int posY, s16 rotation)
@@ -187,7 +190,11 @@ void AH_HintMenu_MenuProc(struct RectMenu *menu)
 				else
 				{
 					// If there is no loading in progress
-					if ((sdata->load_inProgress == 0) && (sdata->XA_State == 0))
+					if ((sdata->load_inProgress == 0) && (sdata->XA_State == 0)
+#if defined(CTR_NATIVE)
+					    && !NativeHangout_IsActive()
+#endif
+					   )
 					{
 						sdata->instMaskHints3D = VehTalkMask_Init();
 

@@ -637,7 +637,19 @@ void ThTick_RunBucket(struct Thread *thread)
 		if (t->funcThTick != NULL)
 		{
 #if defined(CTR_NATIVE)
+#if defined(CTR_INTERNAL)
+            int botProfileID=-1;
+            if(t->funcThTick==BOTS_ThTick_Drive && t->object!=NULL)
+            {
+                botProfileID=((struct Driver*)t->object)->driverID;
+                NativePerf_BotBegin(botProfileID,NATIVE_PERF_BOT_AI);
+            }
+#endif
 			t = ThTick_RunThreadNative(&context, t);
+#if defined(CTR_INTERNAL)
+            if(botProfileID>=0)
+                NativePerf_BotEnd(botProfileID,NATIVE_PERF_BOT_AI);
+#endif
 #else
 			t->funcThTick(t);
 #endif

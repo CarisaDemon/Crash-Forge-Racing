@@ -1,4 +1,8 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#include <NativeHUD.h>
+#endif
 
 enum AHMapIconID
 {
@@ -55,6 +59,9 @@ enum AHMapMainConstants
 	AH_MAP_ICON_BOTTOM_HALF = 4,
 	AH_MAP_SCREEN_POS_X = 500,
 	AH_MAP_SCREEN_POS_Y = 195,
+	/* Keep the map high and keep the speedometer/meters at their normal HUD
+	 * coordinates. Overlap is solved by OT layering, not by moving gauges. */
+	AH_MAP_COMBINED_OFFSET_Y = -80,
 	AH_MAP_HUD_SLOT_SLIDE_METER = 8,
 	AH_MAP_HUD_SLOT_RELIC_COUNT = 0xe,
 	AH_MAP_HUD_SLOT_KEY_COUNT = 0xf,
@@ -83,6 +90,7 @@ CTR_STATIC_ASSERT(AH_MAP_ICON_TOP_HALF == 3);
 CTR_STATIC_ASSERT(AH_MAP_ICON_BOTTOM_HALF == 4);
 CTR_STATIC_ASSERT(AH_MAP_SCREEN_POS_X == 500);
 CTR_STATIC_ASSERT(AH_MAP_SCREEN_POS_Y == 195);
+CTR_STATIC_ASSERT(AH_MAP_COMBINED_OFFSET_Y == -80);
 CTR_STATIC_ASSERT(AH_MAP_HUD_SLOT_SLIDE_METER == 8);
 CTR_STATIC_ASSERT(AH_MAP_HUD_SLOT_RELIC_COUNT == 0xe);
 CTR_STATIC_ASSERT(AH_MAP_HUD_SLOT_KEY_COUNT == 0xf);
@@ -552,6 +560,11 @@ void AH_Map_Warppads(struct UIMap *map, struct Thread *warppadThread, s16 *arrow
 		b32 drawsTrophyArrow = false;
 		b32 includeInSoundDistance = true;
 
+#if defined(CTR_NATIVE)
+		if (NativeHangout_IsActive())
+			visualState = AH_WP_VISUAL_LOCKED;
+#endif
+
 		struct Instance *warppadInst = warppadThread->inst;
 		int color;
 
@@ -623,7 +636,11 @@ void AH_Map_Warppads(struct UIMap *map, struct Thread *warppadThread, s16 *arrow
 	}
 
 	// play sound from closest unlocked warppad
+#if defined(CTR_NATIVE)
+	if (!NativeHangout_IsActive() && closestWarppadInst != NULL)
+#else
 	if (closestWarppadInst != NULL)
+#endif
 	{
 		PlayWarppadSound(minDistance << 1);
 	}
@@ -647,6 +664,10 @@ void AH_Map_Main(void)
 	struct Driver *advDriver = gGT->drivers[0];
 	struct UiElement2D *hud = data.hudStructPtr[gGT->numPlyrCurrGame - 1];
 	struct UIMap *map = NULL;
+
+#if defined(CTR_NATIVE)
+	NativeHUD_HandleGameplayToggle();
+#endif
 
 	int raceFlagState = RaceFlag_GetCanDraw();
 	if (raceFlagState == 0)
@@ -691,6 +712,10 @@ void AH_Map_Main(void)
 
 		D232.mapPriorityArrowDrawn = 0;
 
+#if defined(CTR_NATIVE)
+		/* Story/Adventure gameplay uses the same combined map + speedometer HUD. */
+		UI_Map_NativeSetScreenOffset(0, AH_MAP_COMBINED_OFFSET_Y);
+#endif
 		UI_Map_DrawDrivers(map, gGT->threadBuckets[PLAYER].thread, &driverIconCounter);
 
 		AH_Map_Warppads(map, gGT->threadBuckets[WARPPAD].thread, &arrowCounter);
@@ -699,23 +724,65 @@ void AH_Map_Main(void)
 
 		UI_Map_DrawMap(gGT->ptrIcons[AH_MAP_ICON_TOP_HALF], gGT->ptrIcons[AH_MAP_ICON_BOTTOM_HALF],
 
-		               AH_MAP_SCREEN_POS_X, AH_MAP_SCREEN_POS_Y,
+		               AH_MAP_SCREEN_POS_X,
+#if defined(CTR_NATIVE)
+		               AH_MAP_SCREEN_POS_Y + AH_MAP_COMBINED_OFFSET_Y,
+#else
+		               AH_MAP_SCREEN_POS_Y,
+#endif
 
 		               &gGT->backBuffer->primMem, gGT->pushBuffer_UI.ptrOT, 1);
 
-		UI_DrawSlideMeter(hud[AH_MAP_HUD_SLOT_SLIDE_METER].x, hud[AH_MAP_HUD_SLOT_SLIDE_METER].y, advDriver);
+#if defined(CTR_NATIVE)
+		UI_Map_NativeSetScreenOffset(0, 0);
+
+		/* The UI OT is prepend-based: submit jump meter first so it stays
+		 * in front of either speedometer style. */
+		UI_JumpMeter_Draw(
+			hud[UI_HUD_SLOT_JUMP_METER].x,
+			hud[UI_HUD_SLOT_JUMP_METER].y,
+			advDriver);
+
+		/* Saffi replaces the retail speedometer in Adventure too. The retail
+		 * gauge sits slightly higher so it clears the drift meter. */
+		if (!NativeHUD_GetSaffiEnabled())
+		{
+			UI_DrawSpeedNeedle(
+				hud[UI_HUD_SLOT_SPEEDOMETER].x,
+				hud[UI_HUD_SLOT_SPEEDOMETER].y + NATIVE_HUD_RETAIL_SPEEDOMETER_OFFSET_Y,
+				advDriver);
+			UI_DrawSpeedBGOffsetY(NATIVE_HUD_RETAIL_SPEEDOMETER_OFFSET_Y);
+		}
+#endif
+
+		UI_DrawSlideMeter(
+			hud[AH_MAP_HUD_SLOT_SLIDE_METER].x,
+			hud[AH_MAP_HUD_SLOT_SLIDE_METER].y,
+			advDriver);
 	}
 
-	UI_DrawNumRelic(hud[AH_MAP_HUD_SLOT_RELIC_COUNT].x + AH_MAP_HUD_COUNTER_OFFSET_X, hud[AH_MAP_HUD_SLOT_RELIC_COUNT].y + AH_MAP_HUD_COUNTER_OFFSET_Y);
-	UI_DrawNumKey(hud[AH_MAP_HUD_SLOT_KEY_COUNT].x + AH_MAP_HUD_COUNTER_OFFSET_X, hud[AH_MAP_HUD_SLOT_KEY_COUNT].y + AH_MAP_HUD_COUNTER_OFFSET_Y);
-	UI_DrawNumTrophy(hud[AH_MAP_HUD_SLOT_TROPHY_COUNT].x + AH_MAP_HUD_COUNTER_OFFSET_X, hud[AH_MAP_HUD_SLOT_TROPHY_COUNT].y + AH_MAP_HUD_COUNTER_OFFSET_Y);
+#if defined(CTR_NATIVE)
+	/* Gameplay HUD options are also valid in Adventure hubs. Saffi replaces
+	 * the retail speedometer, while jump/slide stay at their normal coordinates
+	 * and render over it through the prepend-based UI OT ordering. */
+	NativeHUD_RenderPlayerExtras(advDriver);
+#endif
+
+#if defined(CTR_NATIVE)
+	if (!NativeHangout_IsActive())
+#endif
+	{
+		UI_DrawNumRelic(hud[AH_MAP_HUD_SLOT_RELIC_COUNT].x + AH_MAP_HUD_COUNTER_OFFSET_X, hud[AH_MAP_HUD_SLOT_RELIC_COUNT].y + AH_MAP_HUD_COUNTER_OFFSET_Y);
+		UI_DrawNumKey(hud[AH_MAP_HUD_SLOT_KEY_COUNT].x + AH_MAP_HUD_COUNTER_OFFSET_X, hud[AH_MAP_HUD_SLOT_KEY_COUNT].y + AH_MAP_HUD_COUNTER_OFFSET_Y);
+		UI_DrawNumTrophy(hud[AH_MAP_HUD_SLOT_TROPHY_COUNT].x + AH_MAP_HUD_COUNTER_OFFSET_X, hud[AH_MAP_HUD_SLOT_TROPHY_COUNT].y + AH_MAP_HUD_COUNTER_OFFSET_Y);
+	}
 
 #if defined(CTR_NATIVE)
 	// NOTE(aalhendi): Retail appends this prompt after DrawOTag starts; the PS1
 	// GPU can still consume that late OT write. Native DrawOTag parses
 	// synchronously, so emit only this static prompt during the hub UI pass and
 	// leave AH_MaskHint_Update to run the real state/audio timing later.
-	if (sdata->AkuAkuHintState == 5)
+	if (!NativeHangout_IsActive() && sdata->AkuAkuHintState == 5)
 	{
 		AH_MaskHint_DrawRepeatPrompt();
 	}

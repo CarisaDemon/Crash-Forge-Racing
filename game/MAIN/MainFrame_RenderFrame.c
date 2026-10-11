@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#endif
 
 #if defined(CTR_NATIVE)
 #include "platform/native_log.h"
@@ -17,14 +20,167 @@
 volatile int gCtrDebugSkipLevelGeometry = 0;
 #endif
 
+#if defined(CTR_NATIVE)
+#include <stdlib.h>
+#include <string.h>
+
+struct NativeHudDiscardState
+{
+	int active;
+	struct OTMem savedOT;
+	void *savedPrimCursor;
+	s32 savedPrimCount;
+	uint32_t *savedPlayerOT[4];
+	uint32_t *savedUiPushOT;
+};
+
+static uint32_t *s_nativeHudDiscardOT;
+static u32 s_nativeHudDiscardOTBytes;
+
+static uint32_t *NativeHud_DiscardRemapOT(
+	uint32_t *ptr,
+	uint32_t *oldStart,
+	uint32_t *oldEnd,
+	uint32_t *newStart)
+{
+	if (ptr == NULL || oldStart == NULL || oldEnd == NULL ||
+	    ptr < oldStart || ptr >= oldEnd)
+	{
+		return newStart;
+	}
+
+	return newStart + (ptr - oldStart);
+}
+
+static int NativeHud_ShouldHideGameplay(const struct GameTracker *gGT)
+{
+	if (gGT == NULL || !Platform_GetHudHidden())
+		return 0;
+
+	/* Menus/results stay usable. During END_OF_RACE the live Finished/Loser
+	 * phase is still hideable, but once the results menu takes over it remains
+	 * visible so H can never leave the player navigating blindly. */
+	if ((gGT->gameMode1 & MAIN_MENU) != 0)
+		return 0;
+	if ((gGT->hudFlags & HUD_FLAG_CUP_STANDINGS) != 0)
+		return 0;
+	if (((gGT->gameMode1 & END_OF_RACE) != 0) &&
+	    gGT->timerEndOfRaceVS == 0)
+		return 0;
+	return 1;
+}
+
+static int NativeHud_BeginDiscard(
+	struct GameTracker *gGT,
+	struct NativeHudDiscardState *state)
+{
+	struct DB *db;
+	u32 bytes;
+	uint32_t *oldStart;
+	uint32_t *oldEnd;
+	int i;
+
+	if (state == NULL)
+		return 0;
+	memset(state, 0, sizeof(*state));
+
+	if (!NativeHud_ShouldHideGameplay(gGT) || gGT->backBuffer == NULL)
+		return 0;
+
+	db = gGT->backBuffer;
+	bytes = db->otMem.capacityBytes;
+	if (bytes < sizeof(uint32_t))
+		return 0;
+
+	if (s_nativeHudDiscardOTBytes < bytes)
+	{
+		uint32_t *grown = (uint32_t *)realloc(s_nativeHudDiscardOT, bytes);
+		if (grown == NULL)
+			return 0;
+		s_nativeHudDiscardOT = grown;
+		s_nativeHudDiscardOTBytes = bytes;
+	}
+
+	memset(s_nativeHudDiscardOT, 0, bytes);
+
+	state->savedOT = db->otMem;
+	state->savedPrimCursor = db->primMem.cursor;
+	state->savedPrimCount = db->primMem.primitiveCount;
+	for (i = 0; i < 4; i++)
+		state->savedPlayerOT[i] = gGT->pushBuffer[i].ptrOT;
+	state->savedUiPushOT = gGT->pushBuffer_UI.ptrOT;
+
+	oldStart = state->savedOT.start;
+	oldEnd = state->savedOT.end;
+
+	db->otMem.start = s_nativeHudDiscardOT;
+	db->otMem.end = (uint32_t *)((char *)s_nativeHudDiscardOT + bytes);
+	db->otMem.cursor = NativeHud_DiscardRemapOT(
+		state->savedOT.cursor, oldStart, oldEnd, s_nativeHudDiscardOT);
+	db->otMem.uiOT = NativeHud_DiscardRemapOT(
+		state->savedOT.uiOT, oldStart, oldEnd, s_nativeHudDiscardOT);
+
+	for (i = 0; i < 4; i++)
+	{
+		gGT->pushBuffer[i].ptrOT = NativeHud_DiscardRemapOT(
+			state->savedPlayerOT[i], oldStart, oldEnd, s_nativeHudDiscardOT);
+	}
+	gGT->pushBuffer_UI.ptrOT = NativeHud_DiscardRemapOT(
+		state->savedUiPushOT, oldStart, oldEnd, s_nativeHudDiscardOT);
+
+	state->active = 1;
+	return 1;
+}
+
+static void NativeHud_EndDiscard(
+	struct GameTracker *gGT,
+	struct NativeHudDiscardState *state)
+{
+	int i;
+
+	if (gGT == NULL || state == NULL || !state->active)
+		return;
+
+	gGT->backBuffer->otMem = state->savedOT;
+	gGT->backBuffer->primMem.cursor = state->savedPrimCursor;
+	gGT->backBuffer->primMem.primitiveCount = state->savedPrimCount;
+	for (i = 0; i < 4; i++)
+		gGT->pushBuffer[i].ptrOT = state->savedPlayerOT[i];
+	gGT->pushBuffer_UI.ptrOT = state->savedUiPushOT;
+	state->active = 0;
+}
+
+static void NativeHud_Force3DModelsHidden(void)
+{
+	if (!Platform_GetHudHidden())
+		return;
+
+	if (sdata->ptrHudC != NULL) sdata->ptrHudC->flags |= HIDE_MODEL;
+	if (sdata->ptrHudT != NULL) sdata->ptrHudT->flags |= HIDE_MODEL;
+	if (sdata->ptrHudR != NULL) sdata->ptrHudR->flags |= HIDE_MODEL;
+	if (sdata->ptrHudCrystal != NULL) sdata->ptrHudCrystal->flags |= HIDE_MODEL;
+}
+#endif
+
 void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamepads)
 {
 	struct Level *lev = gGT->level1;
 	struct mesh_info *ptr_mesh_info = 0;
 
 	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_MAINFRAME_SETUP);
+#if defined(CTR_NATIVE)
+	{
+		struct NativeHudDiscardState discard;
+		int discarding = NativeHud_BeginDiscard(gGT, &discard);
+		DrawUnpluggedMsg(gGT, gGamepads);
+		DrawFinalLap(gGT);
+		if (discarding)
+			NativeHud_EndDiscard(gGT, &discard);
+	}
+#else
 	DrawUnpluggedMsg(gGT, gGamepads);
 	DrawFinalLap(gGT);
+#endif
 
 	ElimBG_HandleState(gGT);
 
@@ -35,6 +191,8 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 
 	if ((gGT->renderFlags & RENDER_FLAG_VISMEM_REFRESH_MASK) != 0)
 	{
+		/* Camera/PVS fallbacks keep TEST's spectator view valid now, so do not
+		 * rebuild the complete PS1 visibility memory on every host render. */
 		MainFrame_VisMemFullFrame(gGT, gGT->level1);
 	}
 
@@ -97,9 +255,20 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 
 	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_MAINFRAME_HUD);
 #if defined(CTR_NATIVE)
-    NativeWorld_DrawGhostWarning();
+	{
+		struct NativeHudDiscardState discard;
+		int discarding = NativeHud_BeginDiscard(gGT, &discard);
+		NativeWorld_DrawGhostWarning();
+		RenderAllHUD(gGT);
+		if (discarding)
+		{
+			NativeHud_EndDiscard(gGT, &discard);
+			NativeHud_Force3DModelsHidden();
+		}
+	}
+#else
+	RenderAllHUD(gGT);
 #endif
-    RenderAllHUD(gGT);
 	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_MAINFRAME_HUD);
 
 	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_MAINFRAME_EFFECTS);
@@ -163,7 +332,11 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 		MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_MAINFRAME_POST_LEVEL);
 		RenderDispEnv_World(gGT); // == RenderDispEnv_World ==
 
-		if (((gGT->hudFlags & HUD_FLAG_RACE_HUD) != 0) && (gGT->numPlyrCurrGame > 1))
+		if (((gGT->hudFlags & HUD_FLAG_RACE_HUD) != 0) && (gGT->numPlyrCurrGame > 1)
+#if defined(CTR_NATIVE)
+		    && !NativeHud_ShouldHideGameplay(gGT)
+#endif
+		   )
 		{
 			UI_RenderFrame_Wumpa3D_2P3P4P(gGT);
 		}
@@ -255,26 +428,54 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 	}
 
 #ifdef CTR_NATIVE
+	if (!Platform_GetHudHidden())
 	{
 		int fps = Platform_GetDisplayFPS();
 		if (fps > 0)
 		{
 			char fpsText[48];
-			if (Platform_GetHighRefreshMode())
 			{
-				snprintf(fpsText, sizeof(fpsText), "FPS: %d / %d", fps, Platform_GetHighRefreshTargetFPS());
-			}
-			else
-			{
-				snprintf(fpsText, sizeof(fpsText), "FPS: %d", fps);
+				const int limitMode = Platform_GetFPSLimitMode();
+				if (limitMode == PLATFORM_FPS_LIMIT_UNLIMITED)
+					snprintf(fpsText, sizeof(fpsText), "FPS: %d / Unlimited", fps);
+				else if (limitMode == PLATFORM_FPS_LIMIT_DISPLAY_HZ)
+					snprintf(fpsText, sizeof(fpsText), "FPS: %d / %d HZ",
+						fps, Platform_GetDisplayRefreshFPS());
+				else
+					snprintf(fpsText, sizeof(fpsText), "FPS: %d / %d FPS",
+						fps, Platform_GetHighRefreshTargetFPS());
 			}
 			DecalFont_DrawLine(fpsText, 8, 2, FONT_SMALL, WHITE);
 		}
+
+		if (Platform_GetPerfOverlayMode())
+		{
+			char perfText[96];
+			char rendererText[96];
+			const double frameMs = Platform_GetLastFrameTimeMS();
+			const double gpuMs = Platform_GetLastGpuFrameMS();
+
+			if (Platform_GetGpuTimingMode() && gpuMs >= 0.0)
+				snprintf(perfText, sizeof(perfText),
+					"FRAME: %.2f ms  GPU: %.2f ms", frameMs, gpuMs);
+			else
+				snprintf(perfText, sizeof(perfText),
+					"FRAME: %.2f ms  GPU: OFF", frameMs);
+
+			snprintf(rendererText, sizeof(rendererText),
+				"VRAM: %s  Z: %s",
+				Platform_GetExperimentalCompactVRAMMode() ? "RG8 EXP" : "RG32F",
+				Platform_GetExperimentalZBufferMode() ? "CUSTOM EXP" : "OFF");
+
+			DecalFont_DrawLine(perfText, 8, 12, FONT_SMALL, WHITE);
+			DecalFont_DrawLine(rendererText, 8, 22, FONT_SMALL, WHITE);
+		}
 	}
 
-	/* Native mouse/touch chrome sits directly under the FPS counter.
-	   It updates globally so SKIP/BACK can finish screen-transition slides. */
-	RECTMENU_NativeTouchUpdateDrawChrome();
+	/* Keep menu chrome usable while paused/options are open, but remove it
+	   together with the live HUD when H is hiding gameplay overlays. */
+	if (!Platform_GetHudHidden() || sdata->ptrActiveMenu != 0)
+		RECTMENU_NativeTouchUpdateDrawChrome();
 #endif
 	RenderDispEnv_UI(gGT);
 	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_MAINFRAME_UI);
@@ -678,7 +879,22 @@ void RenderAllHUD(struct GameTracker *gGT)
 					if (gGT->pushBuffer_UI.fadeFromBlack_currentValue > 0xfff)
 					{
 						AH_Map_Main();
+#if defined(CTR_NATIVE)
+						NativeHangout_Render(gGT);
+#endif
 
+#if defined(CTR_NATIVE)
+						if (NativeHangout_IsActive())
+						{
+							/* Drop any stale request that was queued before
+							 * Hangout took ownership of the hub. */
+							sdata->AkuHint_RequestedHint = -1;
+							sdata->AkuHint_boolInterruptWarppad = 0;
+							sdata->AkuAkuHintState = 0;
+							sdata->boolDraw3D_AdvMask = 0;
+						}
+						else
+#endif
 						if (sdata->AkuHint_RequestedHint != -1)
 						{
 							AH_MaskHint_Start(sdata->AkuHint_RequestedHint, sdata->AkuHint_boolInterruptWarppad);
@@ -1008,17 +1224,13 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 			scratch->fullDynamicFadeDepthStart = CTR_MipsAddLo(scratch->bspLodDistanceThreshold, MAIN_RENDER_LEVEL_GEOMETRY_FULL_DYNAMIC_FADE_OFFSET);
 
 #if defined(CTR_NATIVE)
-			/* PC high-detail profile: retail switches geometry/texture detail early
-			   to fit PS1 raster/primitive budgets. In native 1P gameplay keep the
-			   higher-detail buckets and recursive subdivision active twice as far.
-			   Menus/cutscenes keep retail thresholds. */
+			/* Native performance baseline: keep retail LOD distances. The previous
+			   2x distance profile roughly doubled how long high-detail level buckets
+			   stayed active, which feeds substantially more quads into DrawLevelOvr1P
+			   and then through the PS1 command parser. Perspective-correct/subpixel
+			   rendering already removes the main visual reason for that amplification. */
 			if ((gGT->gameMode1 & (MAIN_MENU | GAME_CUTSCENE)) == 0)
 			{
-				scratch->bspLodDistanceThreshold *= 2;
-				scratch->textureLodDepthThreshold0 *= 2;
-				scratch->textureLodDepthThreshold1 *= 2;
-				scratch->topLevelNearDepthThreshold *= 2;
-				scratch->recursiveNearDepthThreshold *= 2;
 				scratch->fullDynamicFadeDepthStart = CTR_MipsAddLo(
 					scratch->bspLodDistanceThreshold,
 					MAIN_RENDER_LEVEL_GEOMETRY_FULL_DYNAMIC_FADE_OFFSET);
@@ -1026,17 +1238,34 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 #endif
 		}
 
-		RenderLists_PreInit();
-		gGT->bspLeafsDrawn = 0;
+#if defined(CTR_NATIVE)
+		if (!NativeObj_CustomTrack_IsActive())
+#endif
+		{
+			MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_LEVEL_RENDERLISTS);
+			RenderLists_PreInit();
+			gGT->bspLeafsDrawn = 0;
 
-		gGT->bspLeafsDrawn += RenderLists_Init1P2P(ptr_mesh_info->bspRoot, gGT->visMem1->visLeafList[0], pushBuffer, (u32)&gGT->LevRenderLists[0],
-		                                           gGT->visMem1->bspList[0], numPlyrCurrGame);
+			gGT->bspLeafsDrawn += RenderLists_Init1P2P(ptr_mesh_info->bspRoot, gGT->visMem1->visLeafList[0], pushBuffer, (u32)&gGT->LevRenderLists[0],
+			                                           gGT->visMem1->bspList[0], numPlyrCurrGame);
+			MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_LEVEL_RENDERLISTS);
 
-		// 226-229
-		DrawLevelOvr1P(&gGT->LevRenderLists[0], pushBuffer, (struct BSP *)ptr_mesh_info, &gGT->backBuffer->primMem, gGT->visMem1->visFaceList[0],
-		               level1->ptr_tex_waterEnvMap); // waterEnvMap?
+			// 226-229
+			MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_LEVEL_DRAW_OVR);
+			DrawLevelOvr1P(&gGT->LevRenderLists[0], pushBuffer, (struct BSP *)ptr_mesh_info, &gGT->backBuffer->primMem, gGT->visMem1->visFaceList[0],
+			               level1->ptr_tex_waterEnvMap); // waterEnvMap?
+			MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_LEVEL_DRAW_OVR);
+		}
+#if defined(CTR_NATIVE)
+		else
+		{
+			gGT->bspLeafsDrawn = 0;
+		}
+#endif
 
+		MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_LEVEL_SKY);
 		DrawSky_Full(level1->ptr_skybox, pushBuffer, &gGT->backBuffer->primMem);
+		MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_LEVEL_SKY);
 
 		// skybox gradient
 		if ((level1->configFlags & 1) != 0)

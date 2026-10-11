@@ -1,0 +1,71 @@
+name: Windows Experimental Game Release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  game-release:
+    if: contains(github.event.head_commit.message, '[publish-game]') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout game source
+        uses: actions/checkout@v4
+      - name: Install MSYS2 Mingw32 dependencies
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW32
+          update: true
+          install: >-
+            mingw-w64-i686-gcc
+            mingw-w64-i686-cmake
+            mingw-w64-i686-ninja
+            mingw-w64-i686-libvorbis
+            mingw-w64-i686-pkgconf
+      - name: Configure and build portable game
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build_release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCTR_CPU_NATIVE=OFF -DCTR_LTO=ON -DCTR_PGO_MODE=OFF
+          cmake --build build_release --target ctr_native -j 4
+      - name: Verify executable version and package files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $ver = '2.1.0'
+          $exe='build_release/ctr_native.exe'
+          if (!(Test-Path $exe)) { throw 'Game EXE missing' }
+          $output = & $exe --version
+          if ($LASTEXITCODE -ne 0 -or $output -notmatch '2\.1\.0') { throw "Wrong game version: $output" }
+          $bytes=[IO.File]::ReadAllBytes((Resolve-Path $exe))
+          $off=[BitConverter]::ToInt32($bytes,0x3c)
+          if ($bytes[$off+4] -ne 0x4c -or $bytes[$off+5] -ne 0x01) { throw 'Expected 32-bit x86 PE' }
+          $dst='build_release/Crash-Forge-Racing-Windows'
+          New-Item -ItemType Directory -Path "$dst/assets/UI_NATIVE" -Force | Out-Null
+          Copy-Item $exe "$dst/ctr-native.exe"
+          Copy-Item LICENSE "$dst/LICENSE.txt"
+          Copy-Item THIRD_PARTY_NOTICES.md "$dst/THIRD_PARTY_NOTICES.txt"
+          Copy-Item 'release_resources/README_FIRST.txt' "$dst/README_FIRST.txt"
+          Copy-Item 'release_resources/UI_NATIVE/*.png' "$dst/assets/UI_NATIVE/"
+          $files=Get-ChildItem $dst -File -Recurse
+          if ($files.Count -ne 8) { throw "Expected 8 release files, found $($files.Count)" }
+          if ($files | Where-Object { $_.Name -match '\.(iso|bin|cue|sav|mcr|ogg|log)$' }) {throw 'Prohibited file included'}
+          Compress-Archive -Path "$dst/*" -DestinationPath 'build_release/Crash-Forge-Racing-Windows.zip' -CompressionLevel Optimal
+          $sha=(Get-FileHash 'build_release/Crash-Forge-Racing-Windows.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText('build_release/Crash-Forge-Racing-Windows.zip.sha256',"$sha  Crash-Forge-Racing-Windows.zip`n")
+      - name: Upload game build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Crash-Forge-Racing-Windows-v2.1.0
+          path: |
+            build_release/Crash-Forge-Racing-Windows.zip
+            build_release/Crash-Forge-Racing-Windows.zip.sha256
+          if-no-files-found: error
+      - name: Publish experimental release
+        if: contains(github.event.head_commit.message, '[publish-game]')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v2.1.0 build_release/Crash-Forge-Racing-Windows.zip build_release/Crash-Forge-Racing-Windows.zip.sha256 --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Crash Forge: Racing v2.1.0 — Experimental" --notes-file RELEASE_NOTES_GAME_v2.1.0.md --prerelease

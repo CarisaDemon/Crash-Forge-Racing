@@ -1,4 +1,8 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <platform/native_input.h>
+#include <platform/native_input_glyphs.h>
+#endif
 
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80044ef8-0x80044f90.
@@ -44,8 +48,34 @@ enum NativeTouchChromeMode
 global_variable unsigned int s_nativeTouchTapMask = 0;
 global_variable int s_nativeTouchMouseX = -1;
 global_variable int s_nativeTouchMouseY = -1;
+global_variable int s_nativeTouchMouseActive = 0;
 global_variable struct RectMenu *s_nativeTouchHoverMenu = NULL;
 global_variable int s_nativeTouchHoverRow = -1;
+global_variable unsigned int s_nativeMenuKeyboardPrevRaw = 0;
+
+internal u32 RECTMENU_NativeRawButtonsToMenuButtons(u32 raw)
+{
+	u32 buttons = 0;
+
+	if (raw & RAW_BTN_UP) buttons |= BTN_UP;
+	if (raw & RAW_BTN_DOWN) buttons |= BTN_DOWN;
+	if (raw & RAW_BTN_LEFT) buttons |= BTN_LEFT;
+	if (raw & RAW_BTN_RIGHT) buttons |= BTN_RIGHT;
+	if (raw & RAW_BTN_CROSS) buttons |= BTN_CROSS;
+	if (raw & RAW_BTN_SQUARE) buttons |= BTN_SQUARE;
+	if (raw & RAW_BTN_CIRCLE) buttons |= BTN_CIRCLE;
+	if (raw & RAW_BTN_TRIANGLE) buttons |= BTN_TRIANGLE;
+	if (raw & RAW_BTN_L1) buttons |= BTN_L1;
+	if (raw & RAW_BTN_R1) buttons |= BTN_R1;
+	if (raw & RAW_BTN_L2) buttons |= BTN_L2;
+	if (raw & RAW_BTN_R2) buttons |= BTN_R2;
+	if (raw & RAW_BTN_L3) buttons |= BTN_L3;
+	if (raw & RAW_BTN_R3) buttons |= BTN_R3;
+	if (raw & RAW_BTN_START) buttons |= BTN_START;
+	if (raw & RAW_BTN_SELECT) buttons |= BTN_SELECT;
+
+	return buttons;
+}
 
 global_variable int s_nativeTouchChromeInitialized = 0;
 global_variable int s_nativeTouchChromeMode = NATIVE_TOUCH_CHROME_HIDDEN;
@@ -63,12 +93,16 @@ int RECTMENU_NativeTouchGet(int *mouseX, int *mouseY)
 		*mouseY = s_nativeTouchMouseY;
 	}
 
-	return (s_nativeTouchMouseX >= 0) && (s_nativeTouchMouseY >= 0);
+	return s_nativeTouchMouseActive &&
+	       (s_nativeTouchMouseX >= 0) &&
+	       (s_nativeTouchMouseY >= 0);
 }
 
 int RECTMENU_NativeTouchConsumeRect(const RECT *rect)
 {
-	if ((rect == NULL) || ((s_nativeTouchTapMask & PLATFORM_MOUSE_UI_LEFT) == 0))
+	if (!s_nativeTouchMouseActive ||
+	    (rect == NULL) ||
+	    ((s_nativeTouchTapMask & PLATFORM_MOUSE_UI_LEFT) == 0))
 	{
 		return 0;
 	}
@@ -87,7 +121,8 @@ int RECTMENU_NativeTouchConsumeRect(const RECT *rect)
 
 void RECTMENU_NativeTouchHoverMenuRow(struct RectMenu *menu, int row, const RECT *rect)
 {
-	if ((menu == NULL) || (rect == NULL) ||
+	if (!s_nativeTouchMouseActive ||
+	    (menu == NULL) || (rect == NULL) ||
 	    (s_nativeTouchMouseX < rect->x) ||
 	    (s_nativeTouchMouseX >= rect->x + rect->w) ||
 	    (s_nativeTouchMouseY < rect->y) ||
@@ -103,7 +138,8 @@ void RECTMENU_NativeTouchHoverMenuRow(struct RectMenu *menu, int row, const RECT
 
 internal int RECTMENU_NativeTouchPointInChromeButton(void)
 {
-	if (s_nativeTouchChromeInputMode == NATIVE_TOUCH_CHROME_HIDDEN)
+	if (!s_nativeTouchMouseActive ||
+	    s_nativeTouchChromeInputMode == NATIVE_TOUCH_CHROME_HIDDEN)
 	{
 		return 0;
 	}
@@ -131,6 +167,7 @@ internal void RECTMENU_NativeTouchDrawChromeButton(int mode, int offsetX, int in
 	}
 
 	if (interactive &&
+	    s_nativeTouchMouseActive &&
 	    (s_nativeTouchMouseX >= rect.x) &&
 	    (s_nativeTouchMouseX < rect.x + rect.w) &&
 	    (s_nativeTouchMouseY >= rect.y) &&
@@ -145,23 +182,100 @@ internal void RECTMENU_NativeTouchDrawChromeButton(int mode, int offsetX, int in
 
 	RECTMENU_DrawInnerRect(&rect, 0, gGT->backBuffer->otMem.uiOT);
 
-	if (mode == NATIVE_TOUCH_CHROME_BACK)
+	/* Mouse mode uses clean text-only navigation chrome. Controller/keyboard
+	   glyphs return as soon as non-mouse menu input takes ownership again. */
+	if ((mode == NATIVE_TOUCH_CHROME_BACK) && s_nativeTouchMouseActive)
 	{
-		RECTMENU_DrawPolyGT4(
-			gGT->ptrIcons[0x83],
-			(s16)(x + 3),
-			NATIVE_TOUCH_BACK_Y + 2,
-			&gGT->backBuffer->primMem,
-			gGT->pushBuffer_UI.ptrOT,
-			0x80808080, 0x80808080, 0x80808080, 0x80808080,
-			0,
-			FP(0.5));
 		DecalFont_DrawLine(
 			"BACK",
-			x + 22,
+			x + (NATIVE_TOUCH_BACK_W >> 1),
 			NATIVE_TOUCH_BACK_Y + 5,
 			FONT_SMALL,
-			WHITE);
+			JUSTIFY_CENTER | WHITE);
+		return;
+	}
+
+	if (mode == NATIVE_TOUCH_CHROME_BACK)
+	{
+		char glyph[48];
+		const int kind = Platform_InputGetPlayerDeviceKind(0);
+		const int hasGlyph =
+			Platform_InputFormatPlayerBindingName(
+				0,
+				PLATFORM_INPUT_ACTION_TRIANGLE,
+				glyph,
+				(int)sizeof(glyph)) &&
+			strcmp(glyph, "--") != 0;
+		int drewAtlasGlyph = 0;
+
+		/* Use the supplied face-button atlas for every gamepad family:
+		   PlayStation, Xbox and Generic. A remap to a shoulder/axis or a
+		   keyboard binding intentionally falls back to readable text. */
+		if (kind != PLATFORM_INPUT_DEVICE_NONE &&
+		    Platform_InputResolvePlayerGlyphStyle(0) !=
+			    PLATFORM_INPUT_GLYPH_KEYBOARD)
+		{
+			const int rawBinding =
+				Platform_InputGetGamepadBindingForPlayer(
+					0, PLATFORM_INPUT_ACTION_TRIANGLE);
+
+			drewAtlasGlyph = Platform_InputGlyphsDrawBinding(
+				0,
+				rawBinding,
+				x + 3,
+				NATIVE_TOUCH_BACK_Y + 3,
+				30,
+				14,
+				&gGT->backBuffer->primMem,
+				gGT->backBuffer->otMem.uiOT);
+		}
+
+		if (drewAtlasGlyph)
+		{
+			DecalFont_DrawLine(
+				"BACK",
+				x + 37,
+				NATIVE_TOUCH_BACK_Y + 5,
+				FONT_SMALL,
+				WHITE);
+		}
+		else if (hasGlyph)
+		{
+			const int glyphLen = (int)strlen(glyph);
+			const int glyphW =
+				glyphLen <= 3 ? 18 :
+				(glyphLen <= 7 ? 34 : 48);
+			RECT glyphRect = {
+				(s16)(x + 3),
+				NATIVE_TOUCH_BACK_Y + 3,
+				(s16)glyphW,
+				14,
+			};
+
+			RECTMENU_DrawInnerRect(
+				&glyphRect, 0, gGT->backBuffer->otMem.uiOT);
+			DecalFont_DrawLine(
+				glyph,
+				x + 3 + (glyphW >> 1),
+				NATIVE_TOUCH_BACK_Y + 5,
+				FONT_SMALL,
+				JUSTIFY_CENTER | WHITE);
+			DecalFont_DrawLine(
+				"BACK",
+				x + 7 + glyphW,
+				NATIVE_TOUCH_BACK_Y + 5,
+				FONT_SMALL,
+				WHITE);
+		}
+		else
+		{
+			DecalFont_DrawLine(
+				"BACK",
+				x + (NATIVE_TOUCH_BACK_W >> 1),
+				NATIVE_TOUCH_BACK_Y + 5,
+				FONT_SMALL,
+				JUSTIFY_CENTER | WHITE);
+		}
 	}
 	else
 	{
@@ -885,7 +999,7 @@ LAB_80045e94:
 		int rowTop = posY_prev - 1;
 		int rowLeft = local_40 + posX + menu->posX_prev;
 
-		if (Platform_GetMouseUiPosition(&mouseX, &mouseY) &&
+		if (RECTMENU_NativeTouchGet(&mouseX, &mouseY) &&
 		    (mouseX >= rowLeft) && (mouseX < rowLeft + menuWidth))
 		{
 			if ((state & SHOW_ONLY_HIGHLIT_ROW) != 0)
@@ -1048,11 +1162,23 @@ void RECTMENU_CollectInput()
 	activeSub = sdata->activeSubMenu;
 
 #if defined(CTR_NATIVE)
-	s_nativeTouchTapMask = Platform_ConsumeMouseUiTaps();
-	if (!Platform_GetMouseUiPosition(&s_nativeTouchMouseX, &s_nativeTouchMouseY))
 	{
-		s_nativeTouchMouseX = -1;
-		s_nativeTouchMouseY = -1;
+		int mouseActivity = Platform_ConsumeMouseUiActivity();
+		s_nativeTouchTapMask = Platform_ConsumeMouseUiTaps();
+
+		/* Mouse hover owns menu selection only after real mouse activity.
+		   A click always counts as activity even if the cursor did not move. */
+		if (mouseActivity || (s_nativeTouchTapMask != 0))
+			s_nativeTouchMouseActive = 1;
+
+		if (!Platform_GetMouseUiPosition(
+				&s_nativeTouchMouseX,
+				&s_nativeTouchMouseY))
+		{
+			s_nativeTouchMouseX = -1;
+			s_nativeTouchMouseY = -1;
+			s_nativeTouchMouseActive = 0;
+		}
 	}
 #endif
 
@@ -1076,6 +1202,41 @@ void RECTMENU_CollectInput()
 	}
 
 #if defined(CTR_NATIVE)
+	/* Gameplay ownership and menu ownership are intentionally separate.
+	   If P1 uses a gamepad, P1's keyboard bindings remain a global UI
+	   fallback so keyboard + mouse can still navigate every menu. If P1
+	   itself is keyboard-driven, normal pad processing already supplies the
+	   keyboard and controllers assigned to other players do not get aliased
+	   into P1. */
+	if (Platform_InputGetPlayerDeviceKind(0) == PLATFORM_INPUT_DEVICE_GAMEPAD)
+	{
+		u32 rawHeld = Platform_InputGetMenuKeyboardRawButtons(0);
+		u32 rawTap = rawHeld & ~s_nativeMenuKeyboardPrevRaw;
+		u32 menuHeld = RECTMENU_NativeRawButtonsToMenuButtons(rawHeld);
+		u32 menuTap = RECTMENU_NativeRawButtonsToMenuButtons(rawTap);
+
+		s_nativeMenuKeyboardPrevRaw = rawHeld;
+		sdata->buttonTapPerPlayer[0] |= menuTap;
+		sdata->buttonHeldPerPlayer[0] |= menuHeld;
+		sdata->AnyPlayerTap |= menuTap;
+		sdata->AnyPlayerHold |= menuHeld;
+	}
+	else
+	{
+		s_nativeMenuKeyboardPrevRaw = 0;
+	}
+
+	/* Controller/keyboard navigation takes ownership only on a real
+	   discrete menu press. A held state (including stick drift or a stale
+	   button after returning from gameplay/stress test) must not continuously
+	   disable mouse hover every frame. A real mouse click in the same frame
+	   intentionally wins. */
+	if ((sdata->AnyPlayerTap != 0) &&
+	    (s_nativeTouchTapMask == 0))
+	{
+		s_nativeTouchMouseActive = 0;
+	}
+
 	/* Top-left touch chrome: SKIP during title intro, BACK everywhere else. */
 	if (((s_nativeTouchTapMask & PLATFORM_MOUSE_UI_LEFT) != 0) &&
 	    RECTMENU_NativeTouchPointInChromeButton())

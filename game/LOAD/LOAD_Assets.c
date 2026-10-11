@@ -4,6 +4,17 @@
 #include <platform/native_checkpoint.h>
 #endif
 
+#if defined(CTR_NATIVE)
+static b32 LOAD_DuplicateCharactersAllowed(void)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	const u32 storyMask =
+		ADVENTURE_MODE | ADVENTURE_BOSS | ADVENTURE_CUP | ADVENTURE_ARENA;
+
+	return (gGT != NULL) && ((gGT->gameMode1 & storyMask) == 0);
+}
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800326b4-0x80032700.
 void LOAD_RunPtrMap(char *origin, int *patchArr, int numPtrs)
 {
@@ -26,24 +37,39 @@ void LOAD_Robots2P(struct BigHeader *bigfile, int p1, int p2, void (*callback)(s
 	u8 *robotSet;
 	b32 boolFoundRepeat = false;
 
-	// 8 sets, but only check 7 because the last is the Gem Cups pack (4 bosses).
-	for (setIndex = 0; setIndex < LOAD_2P_AI_SET_COUNT; setIndex++)
+#if defined(CTR_NATIVE)
+	if (LOAD_DuplicateCharactersAllowed())
 	{
+		/* Native non-story modes do not reserve character identities.
+		 * Pick a deterministic AI pack without filtering P1/P2 out, so
+		 * humans and bots are free to share the same racer. */
+		int p1Pack = CharacterRegistry_GetDriverPackID(p1);
+		int p2Pack = CharacterRegistry_GetDriverPackID(p2);
+		setIndex = (p1Pack * 3 + p2Pack) % LOAD_2P_AI_SET_COUNT;
 		robotSet = data.characterIDs_2P_AIs[setIndex];
-
-		boolFoundRepeat = false;
-		for (int racerIndex = 0; racerIndex < LOAD_2P_AI_SET_RACER_COUNT; racerIndex++)
+	}
+	else
+#endif
+	{
+		// Retail/story behavior: choose a set that does not repeat P1/P2.
+		for (setIndex = 0; setIndex < LOAD_2P_AI_SET_COUNT; setIndex++)
 		{
-			if ((robotSet[racerIndex] == p1) || (robotSet[racerIndex] == p2))
+			robotSet = data.characterIDs_2P_AIs[setIndex];
+
+			boolFoundRepeat = false;
+			for (int racerIndex = 0; racerIndex < LOAD_2P_AI_SET_RACER_COUNT; racerIndex++)
 			{
-				boolFoundRepeat = true;
+				if ((robotSet[racerIndex] == p1) || (robotSet[racerIndex] == p2))
+				{
+					boolFoundRepeat = true;
+					break;
+				}
+			}
+
+			if (!boolFoundRepeat)
+			{
 				break;
 			}
-		}
-
-		if (!boolFoundRepeat)
-		{
-			break;
 		}
 	}
 
@@ -69,7 +95,15 @@ void LOAD_Robots1P(int characterID)
 
 	for (int i = 1; i < LOAD_CHARACTER_ID_COUNT; i++, newCharacterID++)
 	{
+#if defined(CTR_NATIVE)
+		/* Outside story mode, do not skip the human's character. The
+		 * automatic roster remains deterministic, but duplicate identities
+		 * are legal just like duplicate human selections. */
+		if (!LOAD_DuplicateCharactersAllowed() &&
+			(newCharacterID == characterID))
+#else
 		if (newCharacterID == characterID)
+#endif
 		{
 			newCharacterID++;
 		}

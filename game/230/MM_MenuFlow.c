@@ -308,6 +308,35 @@ void MM_MenuProc_Main(struct RectMenu *mainMenu)
 {
 	struct GameTracker *gGT = sdata->gGT;
 
+#if defined(CTR_PGO_TRAINING) || (defined(CTR_NATIVE) && defined(CTR_INTERNAL))
+	/*
+	 * Internal direct Stress Test launch. This deliberately bypasses
+	 * title input/intro timing so profile generation never steals keyboard or
+	 * mouse focus from the user's desktop.
+	 */
+	{
+		static int s_pgoAutorunChecked = 0;
+		if (!s_pgoAutorunChecked)
+		{
+			FILE *autorun = fopen("debug/perf.autorun", "rb");
+			s_pgoAutorunChecked = 1;
+			if (autorun != NULL)
+			{
+				fclose(autorun);
+				remove("debug/perf.autorun");
+				NativePerf_SetStressTestActive(1);
+				gGT->demoCountdownTimer = TITLE_DEMO_IDLE_FRAMES;
+				D230.titleMenuState = TITLE_MENU_STATE_EXITING;
+				D230.desiredMenuIndex = MM_EXIT_ROUTE_DEMO;
+				D230.titleMenuTransitionFrame = D230.titleMenuTransitionDurationFrames + 1;
+				Platform_Log("[PERF TEST] PGO direct autorun\n");
+				MM_Title_MenuUpdate();
+				return;
+			}
+		}
+	}
+#endif
+
 #ifdef CTR_NATIVE
 	MM_SetupTitleOptionsRow(mainMenu);
 	if (MainFreeze_TitleOptionsIsOpen())
@@ -384,6 +413,9 @@ void MM_MenuProc_Main(struct RectMenu *mainMenu)
 
 #ifdef CTR_NATIVE
 	if (MM_NativeTitleExitConfirmUpdate(mainMenu))
+		return;
+
+	if (MM_Mods_UpdateMainMenu(mainMenu))
 		return;
 #endif
 

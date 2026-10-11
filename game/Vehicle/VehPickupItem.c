@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#endif
 
 static inline void VehPickupItem_CopyMatrix(MATRIX *dst, const MATRIX *src)
 {
@@ -1233,6 +1236,16 @@ void VehPickupItem_ShootOnCirclePress(struct Driver *d)
 	{
 		VehPickState_NewState(d, d->pendingDamageType, d->pendingDamageAttacker, d->pendingDamageReasonByte);
 	}
+
+#if defined(CTR_NATIVE)
+	if (NativeHangout_ShouldBlockGameplayInput())
+	{
+		/* World state still advances while the live Hangout menu is open.
+		 * Suppress only player weapon input, not pending damage/effects. */
+		d->actionsFlagSet &= ~ACTION_WEAPON_FIRE_REQUEST;
+		return;
+	}
+#endif
 
 	// If you want to fire a weapon
 	if ((d->actionsFlagSet & ACTION_WEAPON_FIRE_REQUEST) == 0)

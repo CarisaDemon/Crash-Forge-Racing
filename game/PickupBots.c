@@ -472,6 +472,14 @@ static void PickupBots_UpdateBoss(void)
 	struct Driver *player = gGT->drivers[0];
 	struct MetaDataBOSS *bossMeta = sdata->bossWeaponMeta;
 
+	/* During level swaps gameMode1 can retain ADVENTURE_BOSS briefly after
+	 * the boss/player driver slots have already been torn down. Do not run
+	 * boss weapon logic against stale transition state. */
+	if ((boss == NULL) || (player == NULL) || (bossMeta == NULL))
+	{
+		return;
+	}
+
 	if (((boss->botData.botFlags & BOT_FLAG_DAMAGE_ACTIVE) != 0) || ((boss->actionsFlagSet & ACTION_RACE_FINISHED) != 0) || (boss->instTntRecv != NULL) ||
 	    (boss->clockReceive != 0) || (boss->botData.aiPhysics.speedLinear < PICKUPBOTS_BOSS_SPEED_MIN))
 	{

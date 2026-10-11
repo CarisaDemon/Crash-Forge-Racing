@@ -1,8 +1,22 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800b3dd8-0x800b3f88.
 void AH_MaskHint_Start(s16 hintId, u16 bool_interruptWarppad)
 {
+#if defined(CTR_NATIVE)
+	if (NativeHangout_IsActive())
+	{
+		sdata->AkuHint_RequestedHint = -1;
+		sdata->AkuHint_boolInterruptWarppad = 0;
+		sdata->AkuAkuHintState = 0;
+		sdata->boolDraw3D_AdvMask = 0;
+		return;
+	}
+#endif
+
 	// copy parameters
 	D232.maskWarppadBoolInterrupt = bool_interruptWarppad;
 	D232.maskHintID = hintId;
@@ -424,11 +438,25 @@ void AH_MaskHint_Update()
 			D232.maskWarppadDelayFrames--;
 		}
 
+#if defined(CTR_NATIVE)
+		/*
+		 * Triangle stays unbound in Adventure gameplay. Cross/X (accelerate)
+		 * now skips Aku's repeat prompt/dialogue once the normal delay is done.
+		 */
+		if ((delayComplete &&
+		     (VehTalkMask_boolNoXA() ||
+		      ((sdata->gGamepads->gamepad[0].buttonsTapped & BTN_CROSS_one) != 0))) &&
+		    (sdata->AkuAkuHintState++,
+
+		     // If you're in Adventure Arena
+		     ((gGT->gameMode1 & ADVENTURE_ARENA) != 0)))
+#else
 		if ((delayComplete && (VehTalkMask_boolNoXA() || ((sdata->gGamepads->gamepad[0].buttonsTapped & BTN_TRIANGLE) != 0))) &&
 		    (sdata->AkuAkuHintState++,
 
 		     // If you're in Adventure Arena
 		     ((gGT->gameMode1 & ADVENTURE_ARENA) != 0)))
+#endif
 		{
 			// show map again
 			gGT->hudFlags &= ~HUD_FLAG_HIDE_ADVENTURE_MAP;

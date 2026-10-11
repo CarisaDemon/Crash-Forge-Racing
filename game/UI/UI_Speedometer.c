@@ -142,13 +142,21 @@ const Color DrawSpeedBG_Colors[7] = {
 #endif
 
 // NOTE(aalhendi): PSX path ASM-verified NTSC-U 926 0x800516ac-0x80051c64.
+#if defined(CTR_NATIVE)
+void UI_DrawSpeedBGOffsetY(int offsetY)
+#else
 void UI_DrawSpeedBG(void)
+#endif
 {
 	Point *vertexes = (Point *)&data.speedometerBG_vertData[0];
 	Point *vertexesExtLine = (Point *)&data.speedometerBG_vertData[1];
 	int pointCount = sizeof(data.speedometerBG_vertData) / (sizeof(Point) * 2);
 	const s16 xOffset = 480;
+#if defined(CTR_NATIVE)
+	const s16 yOffset = (s16)(190 + offsetY);
+#else
 	const s16 yOffset = 190;
+#endif
 
 	/* Draw the horizontal lines - they're a bit wider than the speedometer width */
 	for (int i = 0; i < pointCount; i += 2)
@@ -243,3 +251,10 @@ void UI_DrawSpeedBG(void)
 		AddPrimitive(p, sdata->gGT->pushBuffer_UI.ptrOT);
 	}
 }
+
+#if defined(CTR_NATIVE)
+void UI_DrawSpeedBG(void)
+{
+	UI_DrawSpeedBGOffsetY(0);
+}
+#endif

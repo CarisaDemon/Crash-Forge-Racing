@@ -574,12 +574,109 @@ const char *NativeAssets_GetAssetDir(void)
 
 int NativeAssets_BuildPathStr8(NativeStr8 relativePath, char *dst, size_t dstSize)
 {
-	if (!s_nativeAssetsInitialized && !NativeAssets_Init("."))
-	{
-		return 0;
-	}
+    char key[NATIVE_ASSETS_PATH_MAX];
+    char alternative[NATIVE_ASSETS_PATH_MAX];
+    char candidate[NATIVE_ASSETS_PATH_MAX];
+    NativeStr8 shortPath;
+    static const char *legacyCategories[] = {
+        "racers", "karts", "wheels", "music", "tracks",
+        "vanilla_racer_masks"
+    };
+    int category;
+    int isLegacy = 0;
 
-	return NativePath_Join(dst, dstSize, NativeStr8_FromCString(s_nativeAssetsDir), relativePath);
+    if (!s_nativeAssetsInitialized && !NativeAssets_Init("."))
+        return 0;
+
+    /* Ordinary retail assets retain the original assets/ root. */
+    if (!NativePath_Join(dst, dstSize,
+            NativeStr8_FromCString(s_nativeAssetsDir), relativePath))
+        return 0;
+
+    shortPath = NativePath_SkipLeadingSeparators(relativePath);
+    if (shortPath.len < 4u ||
+        (memcmp(shortPath.ptr, "mods", 4u) != 0))
+        return 1;
+    if (!NativeAssets_NormalizeRelativeKey(relativePath,key,sizeof(key)))
+        return 0;
+
+    if (!strcmp(key, "mods"))
+        return NativePath_Join(dst, dstSize,
+            NativeStr8_FromCString(s_nativeAssetsBaseDir),
+            NATIVE_STR8_LIT("mods"));
+
+    if (strncmp(key,"mods/",5))
+        return 1;
+
+    /* A separate top-level <game>/mods/<mod-name>/ contains all new modules.
+       Legacy assets/mods/<category>/<slug>/ stays readable, unchanged.
+       This routing happens only on mod lookups, not hot render paths. */
+    for (category=0; category<(int)(sizeof(legacyCategories) /
+                                     sizeof(legacyCategories[0])); category++)
+    {
+        char prefix[56];
+        snprintf(prefix,sizeof(prefix),"mods/%s",legacyCategories[category]);
+        if (!strcmp(key,prefix) ||
+            (!strncmp(key,prefix,strlen(prefix)) &&
+             key[strlen(prefix)]=='/'))
+        {
+            isLegacy=1;
+            break;
+        }
+    }
+    if (!isLegacy)
+        return NativePath_Join(dst, dstSize,
+            NativeStr8_FromCString(s_nativeAssetsBaseDir),
+            NativeStr8_FromCString(key));
+
+    /* Character / kart / wheel / music old loaders still address
+       mods/<category>/<slug>/<asset>. If the legacy file is missing,
+       resolve the already-validated web module in <game>/mods/<id>/. */
+    if (category >= 4 ||
+        NativeAssets_FileExistsHost(dst) ||
+        NativeAssets_DirectoryExistsHost(dst))
+        return 1;
+
+    {
+        const char *prefix = legacyCategories[category];
+        const char *rest = key + 5u + strlen(prefix);
+        char slug[80];
+        const char *slash;
+        const char *suffix;
+        size_t length;
+        size_t k;
+        if (*rest != '/') return 1;
+        rest++;
+        slash=strchr(rest,'/');
+        length=slash?(size_t)(slash-rest):strlen(rest);
+        if (!length || length > 63u) return 1;
+        for (k=0;k<length;k++)
+        {
+            char c=rest[k];
+            if (!((c>='a'&&c<='z')||(c>='0'&&c<='9')||
+                  c=='-'||c=='_'))
+                return 1;
+        }
+        memcpy(slug,rest,length);
+        slug[length]='\0';
+        suffix=slash?slash+1:"";
+        if (*suffix)
+            snprintf(alternative,sizeof(alternative),"mods/%s/%s",
+                     slug,suffix);
+        else
+            snprintf(alternative,sizeof(alternative),"mods/%s",slug);
+        if (!NativePath_Join(candidate,sizeof(candidate),
+                NativeStr8_FromCString(s_nativeAssetsBaseDir),
+                NativeStr8_FromCString(alternative)))
+            return 1;
+        if (NativeAssets_FileExistsHost(candidate) ||
+            NativeAssets_DirectoryExistsHost(candidate))
+        {
+            if (strlen(candidate) >= dstSize) return 0;
+            strcpy(dst,candidate);
+        }
+    }
+    return 1;
 }
 
 int NativeAssets_BuildPath(const char *relativePath, char *dst, size_t dstSize)

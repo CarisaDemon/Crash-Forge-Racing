@@ -1,11 +1,34 @@
 #include <common.h>
 
+#if defined(CTR_NATIVE)
+#include <platform/native_perf.h>
+void BOTS_NativeAssignStressLoadout(int driverID);
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800abcac-0x800ac178.
 void MM_Title_MenuUpdate(void)
 {
 	struct GameTracker *gGT = sdata->gGT;
 	u16 seenDemo;
 	s16 cutsceneLev;
+
+#if defined(CTR_PGO_TRAINING) || (defined(CTR_NATIVE) && defined(CTR_INTERNAL))
+	/*
+	 * Training-only unattended boot: keep the regular perf.autorun marker for
+	 * MM_Mods, but skip the title intro wait so the Stress Test can start
+	 * without synthesizing keyboard/mouse input on the user's desktop.
+	 */
+	if (D230.titleMenuState == TITLE_MENU_STATE_INTRO)
+	{
+		FILE *autorun = fopen("debug/perf.autorun", "rb");
+		if (autorun != NULL)
+		{
+			fclose(autorun);
+			D230.titleIntroFrame = TITLE_INTRO_MENU_READY_FRAME;
+			D230.titleMenuTransitionFrame = 0;
+		}
+	}
+#endif
 
 	// 0 - watching Crash + C-T-R letters animation
 	// 1 - in the main menu
@@ -188,6 +211,57 @@ void MM_Title_MenuUpdate(void)
 
 		// enable Arcade Mode
 		gGT->gameMode1 |= ARCADE_MODE;
+
+#if defined(CTR_NATIVE)
+		if (NativePerf_IsStressTestActive())
+		{
+			const int modCount = CharacterRegistry_GetModCount();
+
+			/* TEST reuses retail demo-race startup because it already converts
+			 * the only human slot into an AI after all eight racers spawn. */
+			gGT->boolDemoMode = 1;
+			gGT->numPlyrCurrGame = 1;
+			gGT->numPlyrNextGame = 1;
+			gGT->demoCountdownTimer = 0x7fffffff;
+
+			if (modCount > 0)
+			{
+				for (int driverID = 0; driverID < 8; ++driverID)
+					data.characterIDs[driverID] = 16 + (driverID % modCount);
+			}
+			else
+			{
+				for (int driverID = 0; driverID < 8; ++driverID)
+					data.characterIDs[driverID] = driverID & 7;
+			}
+
+			/* Player 1 becomes the eighth AI in demo mode. Give that slot
+			 * the same full 3D stress loadout BEFORE its racer is spawned. */
+			BOTS_NativeAssignStressLoadout(0);
+
+			{
+				FILE *oxideMarker = fopen("debug/perf.oxide", "rb");
+				FILE *crashMarker = fopen("debug/perf.crashcove", "rb");
+				const int useOxide = oxideMarker != NULL;
+				const int useCrashCove = (crashMarker != NULL) && !useOxide;
+				if (oxideMarker != NULL)
+					fclose(oxideMarker);
+				if (crashMarker != NULL)
+					fclose(crashMarker);
+
+				/* Internal unattended stress test ONLY. Crash Cove's skybox is
+				 * needed to profile its expensive CPU vertex projection. */
+				cutsceneLev = useOxide ? OXIDE_STATION :
+					(useCrashCove ? CRASH_COVE : COCO_PARK);
+				Platform_Log(
+					"[PERF TEST] launch track=%s custom_pool=%d all_bots=1 items=1\n",
+					useOxide ? "OXIDE_STATION" :
+					(useCrashCove ? "CRASH_COVE" : "COCO_PARK"),
+					modCount);
+			}
+			goto LAB_800abfc0;
+		}
+#endif
 
 		// If you have not viewed Oxide cutscene yet
 		if (gGT->boolSeenOxideIntro == 0)

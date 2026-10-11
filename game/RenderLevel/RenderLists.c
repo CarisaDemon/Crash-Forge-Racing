@@ -4,6 +4,10 @@
 void NativeGTE_ActivatePresentationMatrix(const MATRIX *matrix);
 #endif
 
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+#include <platform/native_perf.h>
+#endif
+
 enum RenderListsSlot1P2P
 {
 	RENDER_LIST_SLOT_4X4 = 0,
@@ -28,6 +32,11 @@ struct RenderListsScratchRecord
 };
 
 CTR_STATIC_ASSERT(sizeof(struct RenderListsScratchRecord) == 0x10);
+
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+#define NATIVE_STRESS_RENDER_STACK_CAPACITY 2048
+static struct RenderListsScratchRecord s_nativeStressRenderStack[NATIVE_STRESS_RENDER_STACK_CAPACITY];
+#endif
 
 static int RenderLists_IsVisible(const int *visLeafList, BspChildId childID)
 {
@@ -74,6 +83,18 @@ static void RenderLists_Load1P2PGteState(struct PushBuffer *pb)
 
 static int RenderLists_FrustumRejectsCorner(const struct PushBufferFrustumPlane *plane, const s16 *point)
 {
+#if defined(CTR_NATIVE)
+	/* Exact scalar equivalent of retail llv0bk for this use-site.
+	 * Validated against the GTE path for >3.7 million Stress Test plane/corner
+	 * checks with zero result mismatches. Avoids five GTE register writes,
+	 * generic COP2 decode and IR readback for every BSP frustum plane. */
+	const s64 raw =
+		(s64)plane->normal.x * (s64)point[0] +
+		(s64)plane->normal.y * (s64)point[1] +
+		(s64)plane->normal.z * (s64)point[2] -
+		(s64)2 * (s64)plane->halfDistance * 4096;
+	return raw >= 4096;
+#else
 	// NOTE(aalhendi): Retail 0x80070290 tests the selected BSP corner with llv0bk and rejects when IR1 is positive.
 	MTC2(CTR_PackS16Pair(point[0], point[1]), 0);
 	MTC2((u32)(s32)point[2], 1);
@@ -83,12 +104,231 @@ static int RenderLists_FrustumRejectsCorner(const struct PushBufferFrustumPlane 
 	doCOP2(0x04a2012);
 
 	return MFC2_S(9) > 0;
+#endif
 }
+
+#if defined(CTR_NATIVE)
+static int RenderLists_ProjectDistanceExactNative(struct PushBuffer *pb, const struct BoundingBox *box)
+{
+	const MATRIX *m = &pb->matrix_ViewProj;
+	const int cornerIndex = pb->RenderListJmpIndex[5] & 7;
+	const s64 x = (s64)((cornerIndex & 1) ? box->min.x : box->max.x);
+	const s64 y = (s64)((cornerIndex & 2) ? box->min.y : box->max.y);
+	const s64 z = (s64)((cornerIndex & 4) ? box->min.z : box->max.z);
+	const s64 raw =
+		((s64)m->t[2] << 12) +
+		(s64)m->m[2][0] * x +
+		(s64)m->m[2][1] * y +
+		(s64)m->m[2][2] * z;
+
+	/* Exact SZ3-only equivalent of RTPS for the BSP LOD test.
+	 * The old float shortcut occasionally differed by +/-1 around LOD
+	 * thresholds; this integer path matched retail GTE SZ3 in every one of
+	 * >700k validated Stress Test samples. */
+	if (raw <= 0)
+		return 0;
+
+	{
+		const s64 depth = raw >> 12;
+		if (depth >= 65535)
+			return 65535;
+		return (int)depth;
+	}
+}
+#endif
+
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+struct NativeStressFrustumCache
+{
+	struct PushBuffer *pb;
+	float row[3][3];
+	float absRow[3][3];
+	float trans[3];
+	float projX;
+	float projY;
+	float halfW;
+	float halfH;
+};
+
+static struct NativeStressFrustumCache s_nativeStressFrustum;
+
+static void RenderLists_NativePrepareCameraFrustum(struct PushBuffer *pb)
+{
+	const MATRIX *m;
+	const float fixedScale = 1.0f / 4096.0f;
+
+	if (pb == NULL)
+	{
+		s_nativeStressFrustum.pb = NULL;
+		return;
+	}
+
+	m = &pb->matrix_ViewProj;
+	s_nativeStressFrustum.pb = pb;
+	for (int r = 0; r < 3; ++r)
+	{
+		for (int c = 0; c < 3; ++c)
+		{
+			float v = (float)m->m[r][c] * fixedScale;
+			s_nativeStressFrustum.row[r][c] = v;
+			s_nativeStressFrustum.absRow[r][c] = (v < 0.0f) ? -v : v;
+		}
+		s_nativeStressFrustum.trans[r] = (float)m->t[r];
+	}
+
+	s_nativeStressFrustum.projX = (float)pb->distanceToScreen_PREV;
+	s_nativeStressFrustum.projY = (float)pb->distanceToScreen_PREV;
+	if (Platform_GetWideMode())
+		s_nativeStressFrustum.projX *= 0.75f;
+
+	/* Stress spectator moves through viewpoints retail cameras never use.
+	   Keep a generous guard band so a BSP branch touching the screen edge is
+	   retained; PVS still does the coarse visibility work. */
+	s_nativeStressFrustum.halfW = (float)pb->rect.w * 0.5f + 32.0f;
+	s_nativeStressFrustum.halfH = (float)pb->rect.h * 0.5f + 32.0f;
+}
+
+int RenderLists_NativeBoxPassesCameraFrustum(struct PushBuffer *pb, const struct BoundingBox *box)
+{
+	const struct NativeStressFrustumCache *fc = &s_nativeStressFrustum;
+	float cx, cy, cz;
+	float ex, ey, ez;
+	float vx, vy, vz;
+	float vex, vey, vez;
+	float zFar;
+
+	if ((pb == NULL) || (box == NULL))
+		return 1;
+
+	if (fc->pb != pb)
+	{
+		RenderLists_NativePrepareCameraFrustum(pb);
+		fc = &s_nativeStressFrustum;
+	}
+
+	if ((fc->projX <= 0.0f) || (fc->projY <= 0.0f))
+		return 1;
+
+	/* Keep all culling math in float on native 32-bit builds. The previous
+	 * implementation used many 64-bit integer multiplies per BSP/quad, which
+	 * is especially expensive on x86. The matrix is converted once per render
+	 * pass and every box then becomes a small set of scalar float dot products. */
+	cx = ((float)box->min.x + (float)box->max.x) * 0.5f;
+	cy = ((float)box->min.y + (float)box->max.y) * 0.5f;
+	cz = ((float)box->min.z + (float)box->max.z) * 0.5f;
+	ex = ((float)box->max.x - (float)box->min.x) * 0.5f + 1.5f;
+	ey = ((float)box->max.y - (float)box->min.y) * 0.5f + 1.5f;
+	ez = ((float)box->max.z - (float)box->min.z) * 0.5f + 1.5f;
+
+	vx = fc->trans[0] + fc->row[0][0] * cx + fc->row[0][1] * cy + fc->row[0][2] * cz;
+	vy = fc->trans[1] + fc->row[1][0] * cx + fc->row[1][1] * cy + fc->row[1][2] * cz;
+	vz = fc->trans[2] + fc->row[2][0] * cx + fc->row[2][1] * cy + fc->row[2][2] * cz;
+
+	vex = fc->absRow[0][0] * ex + fc->absRow[0][1] * ey + fc->absRow[0][2] * ez;
+	vey = fc->absRow[1][0] * ex + fc->absRow[1][1] * ey + fc->absRow[1][2] * ez;
+	vez = fc->absRow[2][0] * ex + fc->absRow[2][1] * ey + fc->absRow[2][2] * ez;
+
+	zFar = vz + vez;
+	if (zFar <= 1.0f)
+		return 0;
+
+	if ((vz - vez) <= 1.0f)
+		return 1;
+
+	if ((fc->projX * (vx - vex)) > (fc->halfW * zFar)) return 0;
+	if ((fc->projX * (vx + vex)) < -(fc->halfW * zFar)) return 0;
+	if ((fc->projY * (vy - vey)) > (fc->halfH * zFar)) return 0;
+	if ((fc->projY * (vy + vey)) < -(fc->halfH * zFar)) return 0;
+
+	return 1;
+}
+
+/* Conservative fully-inside test for a BSP leaf. When true, every child
+ * quad-block AABB is also inside the camera frustum, so DrawLevelOvr1P can
+ * skip the more expensive per-block frustum test for this leaf. */
+int RenderLists_NativeBoxFullyInsideCameraFrustum(struct PushBuffer *pb, const struct BoundingBox *box)
+{
+	const struct NativeStressFrustumCache *fc = &s_nativeStressFrustum;
+	float cx, cy, cz;
+	float ex, ey, ez;
+	float vx, vy, vz;
+	float vex, vey, vez;
+	float zNear;
+
+	if ((pb == NULL) || (box == NULL))
+		return 0;
+
+	if (fc->pb != pb)
+	{
+		RenderLists_NativePrepareCameraFrustum(pb);
+		fc = &s_nativeStressFrustum;
+	}
+
+	if ((fc->projX <= 0.0f) || (fc->projY <= 0.0f))
+		return 0;
+
+	cx = ((float)box->min.x + (float)box->max.x) * 0.5f;
+	cy = ((float)box->min.y + (float)box->max.y) * 0.5f;
+	cz = ((float)box->min.z + (float)box->max.z) * 0.5f;
+	ex = ((float)box->max.x - (float)box->min.x) * 0.5f + 1.5f;
+	ey = ((float)box->max.y - (float)box->min.y) * 0.5f + 1.5f;
+	ez = ((float)box->max.z - (float)box->min.z) * 0.5f + 1.5f;
+
+	vx = fc->trans[0] + fc->row[0][0] * cx + fc->row[0][1] * cy + fc->row[0][2] * cz;
+	vy = fc->trans[1] + fc->row[1][0] * cx + fc->row[1][1] * cy + fc->row[1][2] * cz;
+	vz = fc->trans[2] + fc->row[2][0] * cx + fc->row[2][1] * cy + fc->row[2][2] * cz;
+
+	vex = fc->absRow[0][0] * ex + fc->absRow[0][1] * ey + fc->absRow[0][2] * ez;
+	vey = fc->absRow[1][0] * ex + fc->absRow[1][1] * ey + fc->absRow[1][2] * ez;
+	vez = fc->absRow[2][0] * ex + fc->absRow[2][1] * ey + fc->absRow[2][2] * ez;
+
+	zNear = vz - vez;
+	if (zNear <= 1.0f)
+		return 0;
+
+	if ((fc->projX * (vx + vex)) >  (fc->halfW * zNear)) return 0;
+	if ((fc->projX * (vx - vex)) < -(fc->halfW * zNear)) return 0;
+	if ((fc->projY * (vy + vey)) >  (fc->halfH * zNear)) return 0;
+	if ((fc->projY * (vy - vey)) < -(fc->halfH * zNear)) return 0;
+
+	return 1;
+}
+
+static int RenderLists_NativeProjectDistance(struct PushBuffer *pb, const struct BoundingBox *box)
+{
+	const struct NativeStressFrustumCache *fc = &s_nativeStressFrustum;
+	int cornerIndex;
+	float x, y, z;
+	float depth;
+
+	if ((pb == NULL) || (box == NULL))
+		return 0;
+	if (fc->pb != pb)
+	{
+		RenderLists_NativePrepareCameraFrustum(pb);
+		fc = &s_nativeStressFrustum;
+	}
+
+	cornerIndex = pb->RenderListJmpIndex[5] & 7;
+	x = (float)((cornerIndex & 1) ? box->min.x : box->max.x);
+	y = (float)((cornerIndex & 2) ? box->min.y : box->max.y);
+	z = (float)((cornerIndex & 4) ? box->min.z : box->max.z);
+	depth = fc->trans[2] + fc->row[2][0] * x + fc->row[2][1] * y + fc->row[2][2] * z;
+	if (depth <= 0.0f) return 0;
+	if (depth >= 65535.0f) return 65535;
+	return (int)depth;
+}
+#endif
 
 static int RenderLists_BoxPassesFrustum(struct PushBuffer *pb, const struct BoundingBox *box)
 {
 	s16 point[3];
 	const struct PushBufferFrustumPlane *plane;
+
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	if (NativePerf_IsStressTestMeasuring())
+		return RenderLists_NativeBoxPassesCameraFrustum(pb, box);
+#endif
 
 	if (pb == 0)
 	{
@@ -112,21 +352,25 @@ static int RenderLists_BoxPassesFrustum(struct PushBuffer *pb, const struct Boun
 
 static int RenderLists_ProjectDistance(struct PushBuffer *pb, const struct BoundingBox *box)
 {
-	s16 point[3];
-	int distance;
-
 	if (pb == 0)
 	{
 		return 0;
 	}
 
-	RenderLists_SelectBoxCorner(box, pb->RenderListJmpIndex[5] & 7, point);
+#if defined(CTR_NATIVE)
+	return RenderLists_ProjectDistanceExactNative(pb, box);
+#else
+	{
+		s16 point[3];
+		int distance;
 
-	CTR_GteLoadS16TripletV0(point);
-	gte_rtps();
-	gte_stsz(&distance);
-
-	return distance;
+		RenderLists_SelectBoxCorner(box, pb->RenderListJmpIndex[5] & 7, point);
+		CTR_GteLoadS16TripletV0(point);
+		gte_rtps();
+		gte_stsz(&distance);
+		return distance;
+	}
+#endif
 }
 
 static int RenderLists_Select1P2PSlot(const struct BSP *bsp, struct PushBuffer *pb, int lodDistanceThreshold)
@@ -222,6 +466,17 @@ static void RenderLists_PushChild(struct BSP *bspRoot, const int *visLeafList, s
 	}
 
 	child = &bspRoot[((u16)childID) & BSP_CHILD_ID_INDEX_MASK];
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	if (NativePerf_IsStressTestMeasuring())
+	{
+		/* Use the real camera frustum for branch rejection too. This avoids
+		 * inheriting the PS1 push-buffer AABB, whose fixed/s16 far-corner bounds
+		 * can flip at particular spectator angles and cull the whole world. */
+		if (!RenderLists_NativeBoxPassesCameraFrustum(pb, &child->box))
+			return;
+	}
+	else
+#endif
 	if (!RenderLists_BoxOverlapsPushBuffer(&child->box, &pb->bbox))
 	{
 		return;
@@ -233,9 +488,10 @@ static void RenderLists_PushChild(struct BSP *bspRoot, const int *visLeafList, s
 	}
 
 	record = *stack;
+	/* Only childID is consumed when the stack entry is popped. The BSP already
+	 * owns the authoritative bounding box, so avoid copying 12 bytes of box
+	 * data into scratch memory for every traversed child. */
 	record->childID = childID;
-	record->unused = 0;
-	record->box = child->box;
 	*stack = record + 1;
 }
 
@@ -244,6 +500,13 @@ static int RenderLists_Walk1P2P(struct BSP *bspRoot, const int *visLeafList, str
 {
 	struct RenderListsScratchRecord *stackBase = CTR_SCRATCHPAD_PTR(struct RenderListsScratchRecord, RENDER_LISTS_STACK_OFFSET);
 	struct RenderListsScratchRecord *stackEnd = CTR_SCRATCHPAD_PTR(struct RenderListsScratchRecord, CTR_SCRATCHPAD_SIZE);
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	if (NativePerf_IsStressTestMeasuring())
+	{
+		stackBase = s_nativeStressRenderStack;
+		stackEnd = s_nativeStressRenderStack + NATIVE_STRESS_RENDER_STACK_CAPACITY;
+	}
+#endif
 	struct RenderListsScratchRecord *stack = stackBase;
 	struct BSP *branch = bspRoot;
 	int lodDistanceThreshold = (numPlyr == 1) ? CTR_SCRATCHPAD_PTR(struct MainRenderLevelGeometryScratch, 0)->bspLodDistanceThreshold : 0x1540;
@@ -253,6 +516,11 @@ static int RenderLists_Walk1P2P(struct BSP *bspRoot, const int *visLeafList, str
 	{
 		return 0;
 	}
+
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	if (NativePerf_IsStressTestMeasuring())
+		RenderLists_NativePrepareCameraFrustum(pb);
+#endif
 
 	if ((bspRoot->flag & BSP_NODE_FLAG_LEAF) != 0)
 	{
@@ -269,22 +537,26 @@ static int RenderLists_Walk1P2P(struct BSP *bspRoot, const int *visLeafList, str
 
 		while (stack != stackBase)
 		{
-			struct RenderListsScratchRecord record = *--stack;
-			struct BSP *bsp = &bspRoot[((u16)record.childID) & BSP_CHILD_ID_INDEX_MASK];
+			struct RenderListsScratchRecord *record = --stack;
+			struct BSP *bsp = &bspRoot[((u16)record->childID) & BSP_CHILD_ID_INDEX_MASK];
 
-			if (((u16)record.childID & BSP_CHILD_ID_LEAF_FLAG) == 0)
+			if (((u16)record->childID & BSP_CHILD_ID_LEAF_FLAG) == 0)
 			{
 				branch = bsp;
 				goto nextBranch;
 			}
 
-			if (!RenderLists_BoxPassesFrustum(pb, &record.box))
+			if (!RenderLists_BoxPassesFrustum(pb, &bsp->box))
 			{
 				continue;
 			}
 
 			int slotIndex = RenderLists_Select1P2PSlot(bsp, pb, lodDistanceThreshold);
-			RenderLists_LinkBsp(bspRoot, bsp, RenderLists_Get1P2PHead(LevRenderList, slotIndex), bspList);
+			RenderLists_LinkBsp(
+				bspRoot,
+				bsp,
+				RenderLists_Get1P2PHead(LevRenderList, slotIndex),
+				bspList);
 			count++;
 		}
 
@@ -299,6 +571,13 @@ static int RenderLists_Walk3P4P(struct BSP *bspRoot, const int *visLeafList, str
 {
 	struct RenderListsScratchRecord *stackBase = CTR_SCRATCHPAD_PTR(struct RenderListsScratchRecord, RENDER_LISTS_STACK_OFFSET);
 	struct RenderListsScratchRecord *stackEnd = CTR_SCRATCHPAD_PTR(struct RenderListsScratchRecord, CTR_SCRATCHPAD_SIZE);
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	if (NativePerf_IsStressTestMeasuring())
+	{
+		stackBase = s_nativeStressRenderStack;
+		stackEnd = s_nativeStressRenderStack + NATIVE_STRESS_RENDER_STACK_CAPACITY;
+	}
+#endif
 	struct RenderListsScratchRecord *stack = stackBase;
 	struct BSP *branch = bspRoot;
 	int count = 0;
@@ -307,6 +586,11 @@ static int RenderLists_Walk3P4P(struct BSP *bspRoot, const int *visLeafList, str
 	{
 		return 0;
 	}
+
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	if (NativePerf_IsStressTestMeasuring())
+		RenderLists_NativePrepareCameraFrustum(pb);
+#endif
 
 	if ((bspRoot->flag & BSP_NODE_FLAG_LEAF) != 0)
 	{
@@ -324,16 +608,16 @@ static int RenderLists_Walk3P4P(struct BSP *bspRoot, const int *visLeafList, str
 
 		while (stack != stackBase)
 		{
-			struct RenderListsScratchRecord record = *--stack;
-			struct BSP *bsp = &bspRoot[((u16)record.childID) & BSP_CHILD_ID_INDEX_MASK];
+			struct RenderListsScratchRecord *record = --stack;
+			struct BSP *bsp = &bspRoot[((u16)record->childID) & BSP_CHILD_ID_INDEX_MASK];
 
-			if (((u16)record.childID & BSP_CHILD_ID_LEAF_FLAG) == 0)
+			if (((u16)record->childID & BSP_CHILD_ID_LEAF_FLAG) == 0)
 			{
 				branch = bsp;
 				goto nextBranch;
 			}
 
-			if (!RenderLists_BoxPassesFrustum(pb, &record.box))
+			if (!RenderLists_BoxPassesFrustum(pb, &bsp->box))
 			{
 				continue;
 			}

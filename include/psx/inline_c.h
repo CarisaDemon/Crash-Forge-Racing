@@ -33,9 +33,22 @@ extern int doCOP2(int op);
 #if defined(CTR_NATIVE)
 extern void NativeGTE_RecordSXYStore(void *address, int fifoIndex);
 extern void NativeGTE_CopySXYStore(void *dst, const void *src, unsigned int packed);
+extern void NativeGTE_SaveSXYStoreExact(
+	void *dst, unsigned int packed, int x16, int y16, unsigned short depth);
 extern void NativeGTE_LoadSXYStore(const void *src, unsigned int packed, int index);
 extern void NativeGTE_WriteSXYRegister(unsigned int packed, int reg);
 extern void NativeGTE_CopySXYFIFO(int src, int dst);
+extern void NativeGTE_InvalidatePresentationMatrixMatch(void);
+extern int NativeGTE_RTPS(void);
+extern int NativeGTE_RTPT(void);
+extern int NativeGTE_NCLIP(void);
+/* Exact native equivalent of MTC2(12,13,14), NCLIP and MFC2(24).
+ * Updates ALL the original GTE registers and subpixel metadata.
+ * Only used from opt-in QA; other callers use the original macros. */
+extern int NativeGTE_NCLIPLoadedTriple(unsigned int sxy0, unsigned int sxy1,
+                                      unsigned int sxy2);
+extern int NativeGTE_AVSZ3(void);
+extern int NativeGTE_LLV0BK(void);
 
 #define CTR_NATIVE_RECORD_SXY(address, fifoIndex) NativeGTE_RecordSXYStore((void *)(address), (fifoIndex))
 #else
@@ -336,9 +349,13 @@ extern void NativeGTE_CopySXYFIFO(int src, int dst);
 
 #define gte_nop()
 
+#if defined(CTR_NATIVE)
+#define gte_rtps()     NativeGTE_RTPS();
+#define gte_rtpt()     NativeGTE_RTPT();
+#else
 #define gte_rtps()     doCOP2(0x0180001);
-
 #define gte_rtpt()     doCOP2(0x0280030);
+#endif
 
 #define gte_rt()       doCOP2(0x0480012);
 
@@ -448,7 +465,11 @@ extern void NativeGTE_CopySXYFIFO(int src, int dst);
 
 #define gte_cc()                       doCOP2(0x0138041C);
 
+#if defined(CTR_NATIVE)
+#define gte_nclip()                    NativeGTE_NCLIP();
+#else
 #define gte_nclip()                    doCOP2(0x01400006);
+#endif
 
 #define gte_avsz3()                    doCOP2(0x0158002D);
 

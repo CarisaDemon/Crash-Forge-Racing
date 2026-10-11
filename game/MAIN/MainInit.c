@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeRacerVisual.h>
+#endif
 
 #ifdef CTR_NATIVE
 static void MainInit_InitVisMemBspListNodes(struct VisMem *visMem, struct mesh_info *mesh)
@@ -148,10 +151,20 @@ void MainInit_PrimMem(struct GameTracker *gGT)
 {
 	int size = MainInit_GetPrimMemSize(gGT);
 #ifdef CTR_NATIVE
-	/* PC render budget: keep retail sizing logic as the baseline, but provide
-	   generous headroom so complex native presentation paths do not hit PS1-era
-	   primitive-memory ceilings. */
-	if (size > 0) size *= 4;
+	/* PC render budget: the native camera/frustum path can legitimately expose
+	   much more geometry than the PS1 PVS did. Four times retail was still
+	   exhausting Coco Park at some camera angles, which silently dropped later
+	   world polygons. Eight times retail stays small on PC while removing that
+	   angle-dependent primitive-memory ceiling. */
+	if (size > 0) size *= 8;
+    /* The Assembly Lane prototype occupies a much larger visible world
+     * than Crash Cove. Reserve enough space for clipped faces and nearby
+     * karts without silently truncating the track's drawing packets.
+     * Two 2-MiB buffers fit the 32-MiB native mempack arena. */
+    if (gGT->levelID == CRASH_COVE &&
+        (gGT->gameMode1 & TIME_TRIAL) != 0 &&
+        size < 0x200000)
+        size = 0x200000;
 #endif
 
 	if (size == 0)
@@ -166,6 +179,9 @@ void MainInit_PrimMem(struct GameTracker *gGT)
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8003b2d4-0x8003b334.
 void MainInit_JitPoolsReset(struct GameTracker *gGT)
 {
+#if defined(CTR_NATIVE)
+	NativeObj_CustomTrack_ResetRuntime();
+#endif
 	JitPool_Clear(&gGT->JitPools.thread);
 	JitPool_Clear(&gGT->JitPools.instance);
 	JitPool_Clear(&gGT->JitPools.smallStack);
@@ -296,7 +312,15 @@ void MainInit_JitPoolsNew(struct GameTracker *gGT)
 
 	for (int i = 0; i < gGT->numPlyrCurrGame; i++)
 	{
-		data.PtrClipBuffer[i] = MEMPACK_AllocMem(MainDB_GetClipSize(gGT->levelID, gGT->numPlyrCurrGame) << 2);
+		int clipBytes = MainDB_GetClipSize(gGT->levelID, gGT->numPlyrCurrGame) << 2;
+#ifdef CTR_NATIVE
+		/* PC clip-record pool: the retail buffer is tiny because PVS pruning on
+		 * PS1 hid most geometry before clipping. Native camera/frustum rendering
+		 * can legitimately feed far more visible faces, so remove that legacy
+		 * pressure without changing any gameplay or polygon semantics. */
+		clipBytes *= 8;
+#endif
+		data.PtrClipBuffer[i] = MEMPACK_AllocMem(clipBytes);
 	}
 }
 
@@ -416,14 +440,7 @@ void MainInit_Drivers(struct GameTracker *gGT)
 		{
 			int characterID = data.characterIDs[0];
 			struct Model *selectedModel =
-				VehBirth_GetModelByName((char *)CharacterRegistry_GetAssetName(characterID));
-
-			if (selectedModel == NULL)
-			{
-				int fallbackID = CharacterRegistry_GetDriverPackID(characterID);
-				selectedModel =
-					VehBirth_GetModelByName(data.MetaDataCharacters[fallbackID].name_Debug);
-			}
+				NativeRacerVisual_ResolveModel(characterID);
 
 			if (selectedModel != NULL)
 				humanThread->inst->model = selectedModel;

@@ -3,8 +3,11 @@
 
 #include <macros.h>
 
+int NativeCustomMusic_HasLevelTrack(int levelID);
 int NativeCustomMusic_TryStartLevel(int levelID);
 int NativeCustomMusic_PreloadAll(void);
+int NativeCustomMusic_PreloadAllAsync(void);
+int NativeCustomMusic_IsPreloadComplete(void);
 void NativeCustomMusic_BeginHubClock(void);
 int NativeCustomMusic_TrySwapHub(int levelID);
 int NativeCustomMusic_ShouldMuteLevelCseq(void);

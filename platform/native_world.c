@@ -58,8 +58,6 @@ static struct Level *s_nwLevel;
 static int s_nwLevelId, s_nwActive, s_nwTick, s_nwRender, s_nwAlpha;
 static int s_nwHubCameraLogicTick;
 static u32 s_nwSerial, s_nwLastTimer;
-static u64 s_nwStatCounter;
-static u32 s_nwStatTicks, s_nwStatFrames;
 static size_t NW_Hash(const void *p, size_t cap)
 {
     uintptr_t k = (uintptr_t)p;
@@ -113,6 +111,62 @@ static NW_Particle *NW_FindParticle(struct Particle *p, int create)
     }
     return &s_nwParticle[i];
 }
+static int NW_CameraAngleDeltaAbs(s16 a, s16 b)
+{
+    int delta = ((int)b - (int)a + 2048) & 4095;
+    delta -= 2048;
+    return delta < 0 ? -delta : delta;
+}
+
+static int NW_CameraPoseNeedsSnap(
+    const NW_Camera *s,
+    const struct PushBuffer *pb,
+    int cameraMode,
+    int cameraID)
+{
+    int maxPosDelta = 0;
+    int maxRotDelta = 0;
+    int zoomDelta;
+
+    if (!s->valid || s->mode != cameraMode)
+        return 1;
+
+    for (int k = 0; k < 3; k++)
+    {
+        int posDelta = abs((int)pb->pos.v[k] - (int)s->prevPos.v[k]);
+        int rotDelta = NW_CameraAngleDeltaAbs(s->prevRot.v[k], pb->rot.v[k]);
+        if (posDelta > maxPosDelta) maxPosDelta = posDelta;
+        if (rotDelta > maxRotDelta) maxRotDelta = rotDelta;
+    }
+
+    zoomDelta = abs(pb->distanceToScreen_PREV - s->prevZoom);
+
+    /*
+     * Presentation interpolation must never invent an intermediate camera
+     * between two unrelated retail camera poses. That can point the frustum
+     * into empty space for a few host frames (especially start-line fly-ins
+     * and TEST spectator target changes), making the track appear to vanish.
+     *
+     * Normal 30 Hz follow-camera motion stays well inside these thresholds.
+     * Large discontinuities snap presentation to the new logical pose only;
+     * simulation/physics are untouched.
+     */
+    if ((maxPosDelta > 1024) || (maxRotDelta > 0x200) || (zoomDelta > 0x100))
+    {
+        static int s_snapLogBudget = 48;
+        if (s_snapLogBudget > 0)
+        {
+            Platform_Log(
+                "[WORLD111] camera-snap id=%d dpos=%d drot=%d dzoom=%d mode=%d\n",
+                cameraID, maxPosDelta, maxRotDelta, zoomDelta, cameraMode);
+            s_snapLogBudget--;
+        }
+        return 1;
+    }
+
+    return 0;
+}
+
 static void NW_Reset(void)
 {
     if (s_nwInst) memset(s_nwInst, 0, s_nwInstCap * sizeof(*s_nwInst));
@@ -136,7 +190,6 @@ int NativeWorld_Prepare(struct GameTracker *gt)
         gt->timer < s_nwLastTimer) {
         NW_Reset();
         s_nwLevel = gt->level1; s_nwLevelId = gt->levelID;
-        s_nwStatCounter = 0; s_nwStatTicks = s_nwStatFrames = 0;
         if (active) Platform_Log("[WORLD111] coherent world clock ON, level=%d; render snapshots enabled\n", gt->levelID);
     }
     s_nwLastTimer = gt->timer; s_nwActive = active;
@@ -223,9 +276,8 @@ void NativeWorld_EndTick(struct GameTracker *gt)
     NW_CaptureAll(gt, 1);
     for (int i=0;i<4;i++) {
         NW_Camera *s=&s_nwCamera[i]; struct PushBuffer *pb=&gt->pushBuffer[i];
-        int snap=!s->valid || s->mode != gt->cameraDC[i].cameraMode;
+        int snap=NW_CameraPoseNeedsSnap(s, pb, gt->cameraDC[i].cameraMode, i);
         s->currPos=pb->pos; s->currRot=pb->rot; s->currZoom=pb->distanceToScreen_PREV;
-        for (int k=0;k<3;k++) if (abs((int)s->currPos.v[k]-s->prevPos.v[k])>4096) snap=1;
         if (snap) { s->prevPos=s->currPos; s->prevRot=s->currRot; s->prevZoom=s->currZoom; }
         s->mode=gt->cameraDC[i].cameraMode; s->valid=1;
     }
@@ -243,7 +295,7 @@ void NativeWorld_EndTick(struct GameTracker *gt)
             s->prevPos=s->currPos;
         s->key=d; s->valid=1;
     }
-    s_nwLastTimer=gt->timer; ++s_nwStatTicks; s_nwTick=0;
+    s_nwLastTimer=gt->timer; s_nwTick=0;
 }
 
 void NativeWorld_HubDriverBeginTick(struct GameTracker *gt)
@@ -336,11 +388,10 @@ void NativeWorld_HubCameraEndTick(struct GameTracker *gt)
     for (int i=0;i<gt->numPlyrCurrGame && i<4;i++) {
         NW_Camera *s=&s_nwCamera[i];
         struct PushBuffer *pb=&gt->pushBuffer[i];
-        int snap=!s->valid || s->mode != gt->cameraDC[i].cameraMode;
+        int snap=NW_CameraPoseNeedsSnap(s, pb, gt->cameraDC[i].cameraMode, i);
         s->currPos=pb->pos;
         s->currRot=pb->rot;
         s->currZoom=pb->distanceToScreen_PREV;
-        for (int k=0;k<3;k++) if (abs((int)s->currPos.v[k]-s->prevPos.v[k])>4096) snap=1;
         if (snap) {
             s->prevPos=s->currPos;
             s->prevRot=s->currRot;
@@ -502,19 +553,7 @@ void NativeWorld_BeginRender(struct GameTracker *gt)
             (d->clockReceive ? d->clockReceive : (d->clockSend ? d->clockSend : ((gt->clockEffectEnabled & 1) ? 10000 : 0)));
         if (strength) DISPLAY_Blur_Main(&gt->pushBuffer[i],strength);
     }
-    ++s_nwStatFrames;
-    {
-        u64 now=SDL_GetPerformanceCounter(), freq=SDL_GetPerformanceFrequency();
-        if (!s_nwStatCounter) { s_nwStatCounter=now; s_nwStatTicks=s_nwStatFrames=0; }
-        if (now-s_nwStatCounter >= freq*2) {
-            double seconds=(double)(now-s_nwStatCounter)/(double)freq;
-            Platform_Log("[WORLD111] level=%d demo=%d sim=%.2fHz render=%.2fHz alpha=%d instances=%u particles=%u ghostTicks=%d ghostTime=%d\n",
-                gt->levelID,gt->boolDemoMode,s_nwStatTicks/seconds,s_nwStatFrames/seconds,s_nwAlpha,
-                (unsigned)s_nwInstUsed,(unsigned)s_nwParticleUsed,
-                sdata->GhostRecording.countEightFrames,sdata->GhostRecording.timeElapsedInRace);
-            s_nwStatCounter=now; s_nwStatTicks=s_nwStatFrames=0;
-        }
-    }
+
 }
 void NativeWorld_EndRender(struct GameTracker *gt)
 {

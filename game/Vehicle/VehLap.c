@@ -28,6 +28,13 @@ void VehLap_UpdateProgress(struct Driver *driver)
 		return;
 	}
 
+#if defined(CTR_NATIVE)
+	if (NativeObj_CustomTrack_UpdateProgress(driver))
+	{
+		return;
+	}
+#endif
+
 	if ((driver->actionsFlagSet & ACTION_BOT) == 0)
 	{
 		struct QuadBlock *quad = driver->lastValid;

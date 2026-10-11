@@ -114,6 +114,10 @@ CTR_STATIC_ASSERT(VEH_PHYS_FORCE_COLLISION_BEST_DIST_INIT == 0x7fffffff);
 CTR_STATIC_ASSERT(VEH_PHYS_FORCE_SURFACE_PUSHBACK_Y_BIAS == 4);
 CTR_STATIC_ASSERT(VEH_PHYS_FORCE_SURFACE_PUSHBACK_SHIFT == 6);
 
+#if defined(CTR_NATIVE)
+static u32 s_nativeTurboPadDebugPrevMask[8];
+#endif
+
 static int VehPhysForce_OnGravity_Abs(int value)
 {
 	return value < 0 ? CTR_MipsNegLo(value) : value;
@@ -611,6 +615,30 @@ void VehPhysForce_OnApplyForces(struct Thread *thread, struct Driver *driver)
 void VehPhysForce_CollideDrivers(struct Thread *thread, struct Driver *driver)
 {
 	CollStepFlags stepFlagSet = driver->stepFlagSet;
+#if defined(CTR_NATIVE)
+	if ((unsigned int)driver->driverID < 8u && driver->driverID == 0)
+	{
+		u32 padMask = (u32)stepFlagSet & COLL_STEP_TRIGGER_TURBO_PAD_MASK;
+		u32 oldPadMask = s_nativeTurboPadDebugPrevMask[driver->driverID];
+		if (padMask != oldPadMask)
+		{
+			Platform_Log(
+				"[TURBODBG] pad-state id=%d dt=%d mask=0x%x->0x%x res=%d outside=%d fireCap=%d fireSpeed=%d speed=%d approx=%d actions=0x%x\n",
+				driver->driverID,
+				sdata->gGT->elapsedTimeMS,
+				(unsigned int)oldPadMask,
+				(unsigned int)padMask,
+				NativeReserves_Get(driver),
+				driver->turbo_outsideTimer,
+				driver->fireSpeedCap,
+				driver->fireSpeed,
+				driver->speed,
+				driver->speedApprox,
+				(unsigned int)driver->actionsFlagSet);
+		}
+		s_nativeTurboPadDebugPrevMask[driver->driverID] = padMask;
+	}
+#endif
 
 	driver->velocity.x = CTR_MipsSubLo(driver->velocity.x, driver->accel.x);
 	driver->velocity.y = CTR_MipsSubLo(driver->velocity.y, driver->accel.y);

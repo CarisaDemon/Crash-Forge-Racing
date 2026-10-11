@@ -1,9 +1,18 @@
 #if defined(CTR_NATIVE)
 #include <platform/native_world_math.h>
+#include <platform/native_gltf.h>
 #include <platform/native_obj.h>
+#include <platform/native_gpu_model_qa.h>
 s32 NativeGpu_CorrectSubpixelNclip(const void *p0, const void *p1, const void *p2, s32 retailNclip);
+s32 NativeGpu_CorrectSubpixelNclipLocal(const void *p0, const void *p1, const void *p2, s32 retailNclip);
+int NativeGTE_GetStoredSubpixelFixedLocal(const void *address, u32 packedSxy, s32 *x16, s32 *y16);
+int NativeGTE_GetCurrentSubpixelFixed(int fifoIndex, s32 *x16, s32 *y16);
 #endif
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <VanillaRacerSeparation.h>
+#include <VanillaRacerPatch.h>
+#endif
 #include <math.h>
 
 
@@ -371,11 +380,17 @@ struct RenderBucketDrawContext
 	char *vertData;
 	char *nextVertData;
 	RenderBucketVertex tempCoords[4];
+	int tempSourceVertex[4];
 	struct RenderBucketPackedVertex tempPacked[4];
 	struct RenderBucketSplitVertex tempSplit[4];
 	struct RenderBucketProjectedRegs specialMirrorRegs;
 	int tempColor[4];
+#if defined(CTR_NATIVE)
+	int vanillaSeatOffsetActive;
+	int vanillaSeatOffset[3];
+#endif
 	RenderBucketVertex stack[256];
+	int stackSourceVertex[256];
 	struct RenderBucketPackedVertex packedStack[256];
 	int bitIndex;
 	int nextBitIndex;
@@ -399,21 +414,29 @@ enum
 	RENDER_BUCKET_TEX_WORD2_OFFSET = offsetof(struct TextureLayout, u2) - offsetof(struct TextureLayout, u0),
 };
 
-static u32 RenderBucket_ReadPackedWord(const void *src)
+static inline u32 RenderBucket_ReadPackedWord(const void *src)
 {
+#if SDL_BYTEORDER == SDL_LIL_ENDIAN
+	u32 value;
+	memcpy(&value, src, sizeof(value));
+	return value;
+#else
 	const u8 *bytes = (const u8 *)src;
-
 	return (u32)bytes[0] | ((u32)bytes[1] << 8) | ((u32)bytes[2] << 16) | ((u32)bytes[3] << 24);
+#endif
 }
 
-static void RenderBucket_WritePackedWord(void *dst, u32 value)
+static inline void RenderBucket_WritePackedWord(void *dst, u32 value)
 {
+#if SDL_BYTEORDER == SDL_LIL_ENDIAN
+	memcpy(dst, &value, sizeof(value));
+#else
 	u8 *bytes = (u8 *)dst;
-
 	bytes[0] = (u8)value;
 	bytes[1] = (u8)(value >> 8);
 	bytes[2] = (u8)(value >> 16);
 	bytes[3] = (u8)(value >> 24);
+#endif
 }
 
 static u32 RenderBucket_ReadMatrixWord(const MATRIX *m, u32 offset)
@@ -597,6 +620,64 @@ static u32 RenderBucket_PackXY(int x, int y)
 {
 	return ((u32)(u16)x) | ((u32)(u16)y << 16);
 }
+
+#if defined(CTR_NATIVE)
+static int RenderBucket_ClampS16(int value)
+{
+	if (value < -32768) return -32768;
+	if (value > 32767) return 32767;
+	return value;
+}
+
+static void RenderBucket_ApplyVanillaSeatOffsetPacked(
+	struct RenderBucketDrawContext *ctx,
+	struct RenderBucketPackedVertex *packed)
+{
+	int x;
+	int y;
+	s32 z;
+
+	if (ctx == NULL || packed == NULL || !ctx->vanillaSeatOffsetActive)
+		return;
+
+	x = (s16)(packed->xy & 0xffff);
+	y = (s16)(packed->xy >> 16);
+	z = (s32)packed->z;
+
+	x = RenderBucket_ClampS16(x + ctx->vanillaSeatOffset[0]);
+	y = RenderBucket_ClampS16(y + ctx->vanillaSeatOffset[1]);
+	z += ctx->vanillaSeatOffset[2];
+
+	if (z < -32768) z = -32768;
+	if (z > 32767) z = 32767;
+
+	packed->xy = RenderBucket_PackXY(x, y);
+	packed->z = (u32)z;
+}
+
+static void RenderBucket_DebugVanillaPrimitive(
+	struct RenderBucketDrawContext *ctx,
+	int primitiveIndex)
+{
+	VanillaRacerSeparation_DebugTriangle(
+		ctx->inst, primitiveIndex,
+		ctx->tempSourceVertex[1],
+		ctx->tempSourceVertex[2],
+		ctx->tempSourceVertex[3],
+		ctx->tempColor[1],
+		ctx->tempColor[2],
+		ctx->tempColor[3],
+		(s16)(ctx->tempPacked[1].xy & 0xffff),
+		(s16)(ctx->tempPacked[1].xy >> 16),
+		(s32)ctx->tempPacked[1].z,
+		(s16)(ctx->tempPacked[2].xy & 0xffff),
+		(s16)(ctx->tempPacked[2].xy >> 16),
+		(s32)ctx->tempPacked[2].z,
+		(s16)(ctx->tempPacked[3].xy & 0xffff),
+		(s16)(ctx->tempPacked[3].xy >> 16),
+		(s32)ctx->tempPacked[3].z);
+}
+#endif
 
 static struct RenderBucketExecuteScratch *RenderBucket_Scratch(void)
 {
@@ -1333,7 +1414,9 @@ static struct ModelHeader *RenderBucket_SelectModelHeader(struct Instance *inst,
 	   as distance-independent instead of letting the retail LOD walk exhaust
 	   once projectedDistance exceeds the 16-bit threshold. This keeps custom
 	   models visible at any distance without changing retail model LOD rules. */
-	if ((headersRemaining == 1) && (mh->unk1 == NATIVE_OBJ_MODEL_MAGIC))
+	if ((headersRemaining == 1) &&
+		((mh->unk1 == NATIVE_OBJ_MODEL_MAGIC) ||
+		 (mh->unk1 == NATIVE_GLTF_MODEL_MAGIC)))
 	{
 		*lodIndexOut = 0;
 		return mh;
@@ -1917,6 +2000,26 @@ static int RenderBucket_BuildDepthRange(struct Instance *inst, struct ModelFrame
 	int minDepth;
 	int maxDepth;
 
+#if defined(CTR_NATIVE)
+    if (inst != NULL && inst->model != NULL &&
+        !strcmp(inst->model->name, "assembly_lane"))
+    {
+        /* Assembly Lane covers tens of thousands of world units. The retail
+         * 1016-unit frame bbox cannot represent it. If we cull the entire
+         * mesh by that small bbox, large visible road sections disappear.
+         *
+         * This special OBJ path clips every face against the real camera
+         * frustum and writes directly into the camera's OT. It needs no
+         * private per-Instance OT allocation and must always be queued. */
+        idpp->depthOffset[0] = 0;
+        idpp->depthOffset[1] = 0;
+        idpp->otRangeNormal = 0;
+        idpp->otRangeSecondary = 0;
+        *instFlags |= RB_INSTANCE_SKIP_OT_RANGE;
+        return 1;
+    }
+#endif
+
 	RenderBucket_ProjectFrameBounds(frame, nextFrame, pb, projectionMvp, &bounds, &geomScreenHalf);
 	RenderBucket_UpdatePushBufferMetadata(pb, &bounds, instFlags);
 	if (RenderBucket_AcceptProjectedBounds(&bounds, pb, geomScreenHalf) == 0)
@@ -1939,6 +2042,20 @@ static int RenderBucket_BuildDepthRange(struct Instance *inst, struct ModelFrame
 
 	minDepth = RenderBucket_MipsAdd(bounds.minZ >> 5, -2);
 	maxDepth = RenderBucket_MipsAdd(bounds.maxZ >> 5, 1);
+
+#if defined(CTR_NATIVE)
+	if (inst != NULL &&
+	    inst->model != NULL &&
+	    !strcmp(inst->model->name, "assembly_lane"))
+	{
+		/*
+		 * The track links triangles directly into the camera OT below, so its
+		 * private Instance OT only needs a harmless single slot.
+		 */
+		minDepth = 0;
+		maxDepth = 0;
+	}
+#endif
 
 	idpp->depthOffset[0] = minDepth;
 	idpp->depthOffset[1] = maxDepth;
@@ -2316,9 +2433,10 @@ static struct RenderBucketEntry *RenderBucket_QueueDraw(struct Instance *inst, s
 	idpp->mh = mh;
 	idpp->lodIndex = lodIndex;
 #if defined(CTR_NATIVE)
-	if (mh->unk1 == NATIVE_OBJ_MODEL_MAGIC)
+	if ((mh->unk1 == NATIVE_OBJ_MODEL_MAGIC) ||
+		(mh->unk1 == NATIVE_GLTF_MODEL_MAGIC))
 	{
-		/* OBJ vertices are already unpacked; never run retail split decoding. */
+		/* Native host meshes are already unpacked; never run retail split decoding. */
 		queuedFlags &= ~SPLIT_STATE_MASK;
 	}
 #endif
@@ -2551,11 +2669,9 @@ static void RenderBucket_CopyScratchColorCache(struct RenderBucketDrawContext *c
 
 	// NOTE(aalhendi): Retail Execute copies ptrColorLayout to scratchpad 0x140
 	// before DrawFunc_Normal so UncompressAnimationFrame can service command
-	// bit 0x08000000 from the same cache.
-	for (u32 i = 0; i < count; i++)
-	{
-		scratchColor[i] = colorLayout[i];
-	}
+	// bit 0x08000000 from the same cache. A bulk copy is equivalent here and
+	// avoids a per-word loop for every visible instance.
+	memcpy(scratchColor, colorLayout, (size_t)count * sizeof(u32));
 }
 
 static int RenderBucket_GetCommandColor(struct RenderBucketDrawContext *ctx, u32 command)
@@ -4677,6 +4793,12 @@ static int RenderBucket_DrawWaterSplitClipped(struct RenderBucketDrawContext *ct
 void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 {
 	u32 *pCmd;
+	int primitiveIndex = 0;
+#if defined(CTR_NATIVE)
+	struct VanillaRacerPatchDrawFilter nativeDrawFilter;
+	const int nativeDebugExport = VanillaRacerSeparation_DebugIsActiveFor(ctx->inst);
+	VanillaRacerPatch_InitDrawFilter(&nativeDrawFilter, ctx->inst, ctx->mh);
+#endif
 
 	// NOTE(aalhendi): ASM-verified NTSC-U 926 0x8006a52c-0x8006a8e0;
 	// native uses the accepted explicit RenderBucketDrawContext command/FIFO ABI.
@@ -4705,9 +4827,14 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 		color = decoded.color;
 		if ((flags & 4) == 0)
 		{
+			ctx->stackSourceVertex[stackIndex] = ctx->vertexIndex;
 			ctx->vertexIndex++;
 		}
 
+		ctx->tempSourceVertex[0] = ctx->tempSourceVertex[1];
+		ctx->tempSourceVertex[1] = ctx->tempSourceVertex[2];
+		ctx->tempSourceVertex[2] = ctx->tempSourceVertex[3];
+		ctx->tempSourceVertex[3] = ctx->stackSourceVertex[stackIndex];
 		ctx->tempCoords[0] = ctx->tempCoords[1];
 		ctx->tempCoords[1] = ctx->tempCoords[2];
 		ctx->tempCoords[2] = ctx->tempCoords[3];
@@ -4716,6 +4843,10 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 		ctx->tempPacked[1] = ctx->tempPacked[2];
 		ctx->tempPacked[2] = ctx->tempPacked[3];
 		ctx->tempPacked[3] = decoded.packed;
+#if defined(CTR_NATIVE)
+		RenderBucket_ApplyVanillaSeatOffsetPacked(
+			ctx, &ctx->tempPacked[3]);
+#endif
 
 		ctx->tempColor[0] = ctx->tempColor[1];
 		ctx->tempColor[1] = ctx->tempColor[2];
@@ -4738,6 +4869,7 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 
 		if (reuseFirstVertex != 0)
 		{
+			ctx->tempSourceVertex[1] = ctx->tempSourceVertex[0];
 			ctx->tempCoords[1] = ctx->tempCoords[0];
 			ctx->tempPacked[1] = ctx->tempPacked[0];
 			ctx->tempColor[1] = ctx->tempColor[0];
@@ -4755,10 +4887,34 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 		drawCommand = (ctx->stripLength == 2) ? ctx->primCommand : command;
 
 		{
+			int currentPrimitiveIndex = primitiveIndex++;
 			struct TextureLayout *tex;
 			int depthMac0;
 			int isValidTexture;
 			int shouldDraw;
+
+#if defined(CTR_NATIVE)
+			if (nativeDebugExport)
+			{
+				VanillaRacerSeparation_DebugTriangle(
+					ctx->inst, currentPrimitiveIndex,
+					ctx->tempSourceVertex[1],
+					ctx->tempSourceVertex[2],
+					ctx->tempSourceVertex[3],
+					ctx->tempColor[1],
+					ctx->tempColor[2],
+					ctx->tempColor[3],
+					(s16)(ctx->tempPacked[1].xy & 0xffff),
+					(s16)(ctx->tempPacked[1].xy >> 16),
+					(s32)ctx->tempPacked[1].z,
+					(s16)(ctx->tempPacked[2].xy & 0xffff),
+					(s16)(ctx->tempPacked[2].xy >> 16),
+					(s32)ctx->tempPacked[2].z,
+					(s16)(ctx->tempPacked[3].xy & 0xffff),
+					(s16)(ctx->tempPacked[3].xy >> 16),
+					(s32)ctx->tempPacked[3].z);
+			}
+#endif
 
 			shouldDraw = RenderBucket_ProjectPrim_Normal(ctx, drawCommand, useRtps, reuseFirstVertex, &depthMac0);
 			if (shouldDraw == 0)
@@ -4773,6 +4929,15 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 				ctx->stripLength++;
 				continue;
 			}
+
+#if defined(CTR_NATIVE)
+			if (VanillaRacerPatch_ShouldHideFilteredPrimitive(
+					&nativeDrawFilter, currentPrimitiveIndex))
+			{
+				ctx->stripLength++;
+				continue;
+			}
+#endif
 
 			if (RenderBucket_DispatchDrawInstPrim(ctx, drawCommand, tex, depthMac0) < 0)
 			{
@@ -4968,6 +5133,12 @@ static int RenderBucket_DrawReflectionPrimitive(struct RenderBucketDrawContext *
 static void RenderBucket_DrawFunc_Special(struct RenderBucketDrawContext *ctx)
 {
 	u32 *pCmd = (u32 *)ctx->idpp->ptrCommandList;
+	int primitiveIndex = 0;
+#if defined(CTR_NATIVE)
+	struct VanillaRacerPatchDrawFilter nativeDrawFilter;
+	const int nativeDebugExport = VanillaRacerSeparation_DebugIsActiveFor(ctx->inst);
+	VanillaRacerPatch_InitDrawFilter(&nativeDrawFilter, ctx->inst, ctx->mh);
+#endif
 
 	// NOTE(aalhendi): ASM-verified NTSC-U 926 0x8006bbc0-0x8006bf30;
 	// native uses the accepted explicit RenderBucketDrawContext mirrored FIFO ABI.
@@ -4995,9 +5166,14 @@ static void RenderBucket_DrawFunc_Special(struct RenderBucketDrawContext *ctx)
 		color = decoded.color;
 		if ((flags & 4) == 0)
 		{
+			ctx->stackSourceVertex[stackIndex] = ctx->vertexIndex;
 			ctx->vertexIndex++;
 		}
 
+		ctx->tempSourceVertex[0] = ctx->tempSourceVertex[1];
+		ctx->tempSourceVertex[1] = ctx->tempSourceVertex[2];
+		ctx->tempSourceVertex[2] = ctx->tempSourceVertex[3];
+		ctx->tempSourceVertex[3] = ctx->stackSourceVertex[stackIndex];
 		ctx->tempCoords[0] = ctx->tempCoords[1];
 		ctx->tempCoords[1] = ctx->tempCoords[2];
 		ctx->tempCoords[2] = ctx->tempCoords[3];
@@ -5006,6 +5182,10 @@ static void RenderBucket_DrawFunc_Special(struct RenderBucketDrawContext *ctx)
 		ctx->tempPacked[1] = ctx->tempPacked[2];
 		ctx->tempPacked[2] = ctx->tempPacked[3];
 		ctx->tempPacked[3] = decoded.packed;
+#if defined(CTR_NATIVE)
+		RenderBucket_ApplyVanillaSeatOffsetPacked(
+			ctx, &ctx->tempPacked[3]);
+#endif
 
 		ctx->tempColor[0] = ctx->tempColor[1];
 		ctx->tempColor[1] = ctx->tempColor[2];
@@ -5028,6 +5208,7 @@ static void RenderBucket_DrawFunc_Special(struct RenderBucketDrawContext *ctx)
 
 		if (reuseFirstVertex != 0)
 		{
+			ctx->tempSourceVertex[1] = ctx->tempSourceVertex[0];
 			ctx->tempCoords[1] = ctx->tempCoords[0];
 			ctx->tempPacked[1] = ctx->tempPacked[0];
 			ctx->tempColor[1] = ctx->tempColor[0];
@@ -5042,8 +5223,20 @@ static void RenderBucket_DrawFunc_Special(struct RenderBucketDrawContext *ctx)
 		drawCommand = (ctx->stripLength == 2) ? ctx->primCommand : command;
 
 		{
+			int currentPrimitiveIndex = primitiveIndex++;
 			struct TextureLayout *tex;
 			int isValidTexture;
+
+#if defined(CTR_NATIVE)
+			if (nativeDebugExport)
+				RenderBucket_DebugVanillaPrimitive(ctx, currentPrimitiveIndex);
+			if (VanillaRacerPatch_ShouldHideFilteredPrimitive(
+					&nativeDrawFilter, currentPrimitiveIndex))
+			{
+				ctx->stripLength++;
+				continue;
+			}
+#endif
 
 			tex = RenderBucket_GetCommandTexture(ctx, drawCommand, &isValidTexture);
 			if (isValidTexture == 0)
@@ -5065,6 +5258,12 @@ static void RenderBucket_DrawFunc_Special(struct RenderBucketDrawContext *ctx)
 static void RenderBucket_DrawFunc_Reflection(struct RenderBucketDrawContext *ctx)
 {
 	u32 *pCmd = (u32 *)ctx->idpp->ptrCommandList;
+	int primitiveIndex = 0;
+#if defined(CTR_NATIVE)
+	struct VanillaRacerPatchDrawFilter nativeDrawFilter;
+	const int nativeDebugExport = VanillaRacerSeparation_DebugIsActiveFor(ctx->inst);
+	VanillaRacerPatch_InitDrawFilter(&nativeDrawFilter, ctx->inst, ctx->mh);
+#endif
 
 	// NOTE(aalhendi): ASM-verified NTSC-U 926 0x8006c9c4-0x8006cdec;
 	// native uses the accepted explicit RenderBucketDrawContext split/FIFO ABI.
@@ -5092,9 +5291,14 @@ static void RenderBucket_DrawFunc_Reflection(struct RenderBucketDrawContext *ctx
 		color = decoded.color;
 		if ((flags & 4) == 0)
 		{
+			ctx->stackSourceVertex[stackIndex] = ctx->vertexIndex;
 			ctx->vertexIndex++;
 		}
 
+		ctx->tempSourceVertex[0] = ctx->tempSourceVertex[1];
+		ctx->tempSourceVertex[1] = ctx->tempSourceVertex[2];
+		ctx->tempSourceVertex[2] = ctx->tempSourceVertex[3];
+		ctx->tempSourceVertex[3] = ctx->stackSourceVertex[stackIndex];
 		ctx->tempCoords[0] = ctx->tempCoords[1];
 		ctx->tempCoords[1] = ctx->tempCoords[2];
 		ctx->tempCoords[2] = ctx->tempCoords[3];
@@ -5103,6 +5307,10 @@ static void RenderBucket_DrawFunc_Reflection(struct RenderBucketDrawContext *ctx
 		ctx->tempPacked[1] = ctx->tempPacked[2];
 		ctx->tempPacked[2] = ctx->tempPacked[3];
 		ctx->tempPacked[3] = decoded.packed;
+#if defined(CTR_NATIVE)
+		RenderBucket_ApplyVanillaSeatOffsetPacked(
+			ctx, &ctx->tempPacked[3]);
+#endif
 		ctx->tempSplit[0] = ctx->tempSplit[1];
 		ctx->tempSplit[1] = ctx->tempSplit[2];
 		ctx->tempSplit[2] = ctx->tempSplit[3];
@@ -5129,6 +5337,7 @@ static void RenderBucket_DrawFunc_Reflection(struct RenderBucketDrawContext *ctx
 
 		if (reuseFirstVertex != 0)
 		{
+			ctx->tempSourceVertex[1] = ctx->tempSourceVertex[0];
 			ctx->tempCoords[1] = ctx->tempCoords[0];
 			ctx->tempPacked[1] = ctx->tempPacked[0];
 			ctx->tempSplit[1] = ctx->tempSplit[0];
@@ -5144,8 +5353,20 @@ static void RenderBucket_DrawFunc_Reflection(struct RenderBucketDrawContext *ctx
 		drawCommand = (ctx->stripLength == 2) ? ctx->primCommand : command;
 
 		{
+			int currentPrimitiveIndex = primitiveIndex++;
 			struct TextureLayout *tex;
 			int isValidTexture;
+
+#if defined(CTR_NATIVE)
+			if (nativeDebugExport)
+				RenderBucket_DebugVanillaPrimitive(ctx, currentPrimitiveIndex);
+			if (VanillaRacerPatch_ShouldHideFilteredPrimitive(
+					&nativeDrawFilter, currentPrimitiveIndex))
+			{
+				ctx->stripLength++;
+				continue;
+			}
+#endif
 
 			tex = RenderBucket_GetCommandTexture(ctx, drawCommand, &isValidTexture);
 			if (isValidTexture == 0)
@@ -5167,6 +5388,12 @@ static void RenderBucket_DrawFunc_Reflection(struct RenderBucketDrawContext *ctx
 static void RenderBucket_DrawFunc_Split(struct RenderBucketDrawContext *ctx)
 {
 	u32 *pCmd = (u32 *)ctx->idpp->ptrCommandList;
+	int primitiveIndex = 0;
+#if defined(CTR_NATIVE)
+	struct VanillaRacerPatchDrawFilter nativeDrawFilter;
+	const int nativeDebugExport = VanillaRacerSeparation_DebugIsActiveFor(ctx->inst);
+	VanillaRacerPatch_InitDrawFilter(&nativeDrawFilter, ctx->inst, ctx->mh);
+#endif
 
 	// NOTE(aalhendi): ASM-verified against NTSC-U 926 0x8006b030-0x8006b24c.
 	// The called water split helper at 0x8006d094 is audited separately.
@@ -5194,9 +5421,14 @@ static void RenderBucket_DrawFunc_Split(struct RenderBucketDrawContext *ctx)
 		color = decoded.color;
 		if ((flags & 4) == 0)
 		{
+			ctx->stackSourceVertex[stackIndex] = ctx->vertexIndex;
 			ctx->vertexIndex++;
 		}
 
+		ctx->tempSourceVertex[0] = ctx->tempSourceVertex[1];
+		ctx->tempSourceVertex[1] = ctx->tempSourceVertex[2];
+		ctx->tempSourceVertex[2] = ctx->tempSourceVertex[3];
+		ctx->tempSourceVertex[3] = ctx->stackSourceVertex[stackIndex];
 		ctx->tempCoords[0] = ctx->tempCoords[1];
 		ctx->tempCoords[1] = ctx->tempCoords[2];
 		ctx->tempCoords[2] = ctx->tempCoords[3];
@@ -5205,6 +5437,10 @@ static void RenderBucket_DrawFunc_Split(struct RenderBucketDrawContext *ctx)
 		ctx->tempPacked[1] = ctx->tempPacked[2];
 		ctx->tempPacked[2] = ctx->tempPacked[3];
 		ctx->tempPacked[3] = decoded.packed;
+#if defined(CTR_NATIVE)
+		RenderBucket_ApplyVanillaSeatOffsetPacked(
+			ctx, &ctx->tempPacked[3]);
+#endif
 		ctx->tempSplit[0] = ctx->tempSplit[1];
 		ctx->tempSplit[1] = ctx->tempSplit[2];
 		ctx->tempSplit[2] = ctx->tempSplit[3];
@@ -5231,6 +5467,7 @@ static void RenderBucket_DrawFunc_Split(struct RenderBucketDrawContext *ctx)
 
 		if (reuseFirstVertex != 0)
 		{
+			ctx->tempSourceVertex[1] = ctx->tempSourceVertex[0];
 			ctx->tempCoords[1] = ctx->tempCoords[0];
 			ctx->tempPacked[1] = ctx->tempPacked[0];
 			ctx->tempSplit[1] = ctx->tempSplit[0];
@@ -5246,10 +5483,22 @@ static void RenderBucket_DrawFunc_Split(struct RenderBucketDrawContext *ctx)
 		drawCommand = (ctx->stripLength == 2) ? ctx->primCommand : command;
 
 		{
+			int currentPrimitiveIndex = primitiveIndex++;
 			struct TextureLayout *tex;
 			int depthMac0;
 			int isValidTexture;
 			int shouldDraw;
+
+#if defined(CTR_NATIVE)
+			if (nativeDebugExport)
+				RenderBucket_DebugVanillaPrimitive(ctx, currentPrimitiveIndex);
+			if (VanillaRacerPatch_ShouldHideFilteredPrimitive(
+					&nativeDrawFilter, currentPrimitiveIndex))
+			{
+				ctx->stripLength++;
+				continue;
+			}
+#endif
 
 			shouldDraw = RenderBucket_ProjectPrim_Split(ctx, drawCommand, useRtps, reuseFirstVertex, &depthMac0);
 			if (shouldDraw == 0)
@@ -5278,6 +5527,12 @@ static void RenderBucket_DrawFunc_Split(struct RenderBucketDrawContext *ctx)
 static void RenderBucket_DrawFunc_NormalAlt(struct RenderBucketDrawContext *ctx)
 {
 	u32 *pCmd = (u32 *)ctx->idpp->ptrCommandList;
+	int primitiveIndex = 0;
+#if defined(CTR_NATIVE)
+	struct VanillaRacerPatchDrawFilter nativeDrawFilter;
+	const int nativeDebugExport = VanillaRacerSeparation_DebugIsActiveFor(ctx->inst);
+	VanillaRacerPatch_InitDrawFilter(&nativeDrawFilter, ctx->inst, ctx->mh);
+#endif
 
 	// NOTE(aalhendi): ASM-verified NTSC-U 926 alternate entry
 	// 0x8006a6b8-0x8006a8e0 inside RenderBucket_DrawFunc_Normal; native uses
@@ -5306,9 +5561,14 @@ static void RenderBucket_DrawFunc_NormalAlt(struct RenderBucketDrawContext *ctx)
 		color = decoded.color;
 		if ((flags & 4) == 0)
 		{
+			ctx->stackSourceVertex[stackIndex] = ctx->vertexIndex;
 			ctx->vertexIndex++;
 		}
 
+		ctx->tempSourceVertex[0] = ctx->tempSourceVertex[1];
+		ctx->tempSourceVertex[1] = ctx->tempSourceVertex[2];
+		ctx->tempSourceVertex[2] = ctx->tempSourceVertex[3];
+		ctx->tempSourceVertex[3] = ctx->stackSourceVertex[stackIndex];
 		ctx->tempCoords[0] = ctx->tempCoords[1];
 		ctx->tempCoords[1] = ctx->tempCoords[2];
 		ctx->tempCoords[2] = ctx->tempCoords[3];
@@ -5317,6 +5577,10 @@ static void RenderBucket_DrawFunc_NormalAlt(struct RenderBucketDrawContext *ctx)
 		ctx->tempPacked[1] = ctx->tempPacked[2];
 		ctx->tempPacked[2] = ctx->tempPacked[3];
 		ctx->tempPacked[3] = decoded.packed;
+#if defined(CTR_NATIVE)
+		RenderBucket_ApplyVanillaSeatOffsetPacked(
+			ctx, &ctx->tempPacked[3]);
+#endif
 		ctx->tempSplit[0] = ctx->tempSplit[1];
 		ctx->tempSplit[1] = ctx->tempSplit[2];
 		ctx->tempSplit[2] = ctx->tempSplit[3];
@@ -5343,6 +5607,7 @@ static void RenderBucket_DrawFunc_NormalAlt(struct RenderBucketDrawContext *ctx)
 
 		if (reuseFirstVertex != 0)
 		{
+			ctx->tempSourceVertex[1] = ctx->tempSourceVertex[0];
 			ctx->tempCoords[1] = ctx->tempCoords[0];
 			ctx->tempPacked[1] = ctx->tempPacked[0];
 			ctx->tempSplit[1] = ctx->tempSplit[0];
@@ -5358,10 +5623,34 @@ static void RenderBucket_DrawFunc_NormalAlt(struct RenderBucketDrawContext *ctx)
 		drawCommand = (ctx->stripLength == 2) ? ctx->primCommand : command;
 
 		{
+			int currentPrimitiveIndex = primitiveIndex++;
 			struct TextureLayout *tex;
 			int depthMac0;
 			int isValidTexture;
 			int shouldDraw;
+
+#if defined(CTR_NATIVE)
+			if (nativeDebugExport)
+			{
+				VanillaRacerSeparation_DebugTriangle(
+					ctx->inst, currentPrimitiveIndex,
+					ctx->tempSourceVertex[1],
+					ctx->tempSourceVertex[2],
+					ctx->tempSourceVertex[3],
+					ctx->tempColor[1],
+					ctx->tempColor[2],
+					ctx->tempColor[3],
+					(s16)(ctx->tempPacked[1].xy & 0xffff),
+					(s16)(ctx->tempPacked[1].xy >> 16),
+					(s32)ctx->tempPacked[1].z,
+					(s16)(ctx->tempPacked[2].xy & 0xffff),
+					(s16)(ctx->tempPacked[2].xy >> 16),
+					(s32)ctx->tempPacked[2].z,
+					(s16)(ctx->tempPacked[3].xy & 0xffff),
+					(s16)(ctx->tempPacked[3].xy >> 16),
+					(s32)ctx->tempPacked[3].z);
+			}
+#endif
 
 			shouldDraw = RenderBucket_ProjectPrim_Split(ctx, drawCommand, useRtps, reuseFirstVertex, &depthMac0);
 			if (shouldDraw == 0)
@@ -5376,6 +5665,15 @@ static void RenderBucket_DrawFunc_NormalAlt(struct RenderBucketDrawContext *ctx)
 				ctx->stripLength++;
 				continue;
 			}
+
+#if defined(CTR_NATIVE)
+			if (VanillaRacerPatch_ShouldHideFilteredPrimitive(
+					&nativeDrawFilter, currentPrimitiveIndex))
+			{
+				ctx->stripLength++;
+				continue;
+			}
+#endif
 
 			if (RenderBucket_DrawSplitClipped(ctx, drawCommand, tex, depthMac0) < 0)
 			{
@@ -5454,16 +5752,174 @@ static int RenderBucket_RunInstanceSetupCallback(struct RenderBucketDrawContext 
 	}
 }
 
+#if defined(CTR_NATIVE)
+static void RenderBucket_EncodeProjectionAxis(s32 value16, s16 *baseOut, s8 *fracOut)
+{
+    int q8;
+    int base;
+    int frac;
+
+    if (value16 >= 0)
+        q8 = (value16 + 0x80) >> 8;
+    else
+        q8 = -(((-value16) + 0x80) >> 8);
+
+    if (q8 >= 0)
+        base = (q8 + 0x80) >> 8;
+    else
+        base = -(((-q8) + 0x80) >> 8);
+
+    frac = q8 - (base * 256);
+    if (frac > 127)
+    {
+        base++;
+        frac -= 256;
+    }
+    else if (frac < -128)
+    {
+        base--;
+        frac += 256;
+    }
+
+    if (base < -32768)
+    {
+        base = -32768;
+        frac = 0;
+    }
+    else if (base > 32767)
+    {
+        base = 32767;
+        frac = 0;
+    }
+
+    *baseOut = (s16)base;
+    *fracOut = (s8)frac;
+}
+#endif
+
+#include "assembly_lane_clip.inc"
+
 static void RenderBucket_DrawObj(struct RenderBucketDrawContext *ctx, const struct NativeObjMesh *mesh)
 {
-    float angles[4], sine[4], cosine[4];
-    const float steerAngle = NativeObj_GetWheelSteerAngle(ctx->inst);
-    const float steerSin = sinf(steerAngle);
-    const float steerCos = cosf(steerAngle);
-    NativeObj_GetWheelAngles(ctx->inst, angles);
-    for (int w = 0; w < 4; ++w) { sine[w] = sinf(angles[w]); cosine[w] = cosf(angles[w]); }
+#if defined(CTR_NATIVE)
+    NativeGpuModel_StageMesh(mesh);
+    const unsigned int kartColorTexture =
+        NativeObj_GetKartColorTextureForInstance(ctx->inst, mesh);
+#else
+    const unsigned int kartColorTexture = 0;
+#endif
+    float angles[4] = {0, 0, 0, 0};
+    float sine[4] = {0, 0, 0, 0};
+    float cosine[4] = {1, 1, 1, 1};
+    float steerAngle = 0.0f;
+    float steerSin = 0.0f;
+    float steerCos = 1.0f;
+#if defined(CTR_NATIVE)
+    const int isCustomTrack =
+        ctx->inst != NULL &&
+        ctx->inst->model != NULL &&
+        !strcmp(ctx->inst->model->name, "assembly_lane");
+    MATRIX customTrackView;
+#else
+    const int isCustomTrack = 0;
+#endif
+    /* Large static tracks require camera-space clipping before 16-bit GTE. */
+#if defined(CTR_NATIVE)
+    if (isCustomTrack && ctx->pb != NULL)
+    {
+        RenderBucket_DrawAssemblyLaneClipped(ctx, mesh);
+        return;
+    }
+#endif
     const MATRIX *mvp = &ctx->idpp->mvp;
+#if defined(CTR_NATIVE)
+    const int gpuProjectionProbe=ctx->pb &&
+        NativeGpuModel_ProjectionQaActive();
+#endif
+#if defined(CTR_NATIVE)
+    if (isCustomTrack && ctx->pb != NULL)
+    {
+        customTrackView = ctx->pb->matrix_ViewProj;
+        customTrackView.t[0] = 0;
+        customTrackView.t[1] = 0;
+        customTrackView.t[2] = 0;
+        mvp = &customTrackView;
+    }
+#endif
     float drawOffset[3] = { mesh->userOffset[0], mesh->userOffset[1], mesh->userOffset[2] };
+    float drawOffsetScaled[3] = {
+        mesh->renderOffsetScaled[0],
+        mesh->renderOffsetScaled[1],
+        mesh->renderOffsetScaled[2]
+    };
+    float attachedScale[3] = {1.0f, 1.0f, 1.0f};
+#if defined(CTR_NATIVE)
+    const struct NativeObjMesh *primaryMesh = NativeObj_GetMesh(ctx->inst->model);
+    const int isBodyPatch =
+        VanillaRacerPatch_IsBodyMesh(ctx->inst, ctx->mh, mesh);
+
+    /* An attached native mesh (kart, etc.) reuses the host instance MVP.
+       That MVP already contains the HOST ModelHeader scale. Native OBJ meshes
+       are normalized independently to 1016 on each axis, so reusing the host
+       scale without compensation distorts their aspect ratio. Pre-scale each
+       local axis by ownHeaderScale / hostHeaderScale to reproduce the matrix
+       the attached mesh would have received if rendered as its own model. */
+    if ((mesh != primaryMesh) && !isBodyPatch && (ctx->mh != NULL))
+    {
+        const float hostScale[3] = {
+            fabsf((float)ctx->mh->scale.x),
+            fabsf((float)ctx->mh->scale.y),
+            fabsf((float)ctx->mh->scale.z)
+        };
+        const float ownScale[3] = {
+            fmaxf(1.0f, mesh->extent[0] * 1000.0f),
+            fmaxf(1.0f, mesh->extent[1] * 1000.0f),
+            fmaxf(1.0f, mesh->extent[2] * 1000.0f)
+        };
+
+        for (int axis = 0; axis < 3; ++axis)
+            if (hostScale[axis] > 0.001f)
+                attachedScale[axis] = ownScale[axis] / hostScale[axis];
+    }
+
+    /* A body-only custom character shares the kart instance transform but may
+       need a per-kart seat translation. Keep legacy combined OBJ racers at
+       their existing offset by applying this only to the instance's own mesh. */
+    if (mesh == NativeObj_GetMesh(ctx->inst->model))
+    {
+        float seatOffset[3];
+        if (NativeObj_GetModularBodySeatOffset(ctx->inst, seatOffset))
+        {
+            drawOffsetScaled[0] += seatOffset[0];
+            drawOffsetScaled[1] += seatOffset[1];
+            drawOffsetScaled[2] += seatOffset[2];
+        }
+    }
+#else
+    const int isBodyPatch = 0;
+#endif
+
+    /* The body is rigid. Only touch wheel state/trig when this mesh actually
+     * contains wheel groups. This also leaves the cached rest pose ready for
+     * future per-instance animation/shape-key deformation. */
+    if (mesh->wheelMask != 0)
+    {
+        NativeObj_GetWheelState(ctx->inst, angles, &steerAngle);
+        if (steerAngle != 0.0f)
+        {
+            steerSin = sinf(steerAngle);
+            steerCos = cosf(steerAngle);
+        }
+
+        for (int w = 0; w < 4; ++w)
+        {
+            if ((mesh->wheelMask & (1u << w)) && (angles[w] != 0.0f))
+            {
+                sine[w] = sinf(angles[w]);
+                cosine[w] = cosf(angles[w]);
+            }
+        }
+    }
 
 #if defined(CTR_NATIVE)
     /*
@@ -5513,7 +5969,25 @@ static void RenderBucket_DrawObj(struct RenderBucketDrawContext *ctx, const stru
             drawOffset[2] = ((float)animated->m[0][2] * wx +
                              (float)animated->m[1][2] * wy +
                              (float)animated->m[2][2] * wz) / 4096.0f;
+
+            /* Only the crash-fall path needs a dynamic alignment offset. */
+            for (int k = 0; k < 3; ++k)
+                drawOffsetScaled[k] =
+                    drawOffset[k] * mesh->normPerAuth[k] * mesh->userScale;
         }
+    }
+#endif
+
+#if defined(CTR_NATIVE)
+    if (isCustomTrack && ctx->pb != NULL)
+    {
+        /*
+         * Assembly Lane is world geometry, not a character-sized Instance.
+         * Use camera rotation/aspect with zero translation; vertices below are
+         * converted from physical world to camera-relative coordinates.
+         */
+        gte_SetRotMatrix(&customTrackView);
+        gte_SetTransMatrix(&customTrackView);
     }
 #endif
 
@@ -5527,119 +6001,614 @@ static void RenderBucket_DrawObj(struct RenderBucketDrawContext *ctx, const stru
     /* Squash intentionally sets scale.y to zero. The resulting flat model
      * has no volume/orientation, but its projected faces can still have area.
      * Draw either winding in that case; NCLIP still rejects collapsed edges. */
+#if defined(CTR_NATIVE)
+    struct NativeObjMesh *projectionMesh = (struct NativeObjMesh *)mesh;
+    unsigned int projectionGeneration = 0;
+    if (!isBodyPatch && projectionMesh->projectionCache != NULL && projectionMesh->positionCount > 0)
+    {
+        projectionGeneration = ++projectionMesh->projectionGeneration;
+        if (projectionGeneration == 0)
+        {
+            memset(projectionMesh->projectionCache, 0,
+                   (size_t)projectionMesh->positionCount * sizeof(*projectionMesh->projectionCache));
+            projectionGeneration = ++projectionMesh->projectionGeneration;
+        }
+    }
+#endif
+
     /* Emit native texture bindings inside the ordering table so each triangle
      * retains the game's viewport, track occlusion and draw ordering. */
     for (int i = 0; i < mesh->triangleCount; ++i) {
         const struct NativeObjTriangle *t = &mesh->triangles[i];
-        const struct NativeObjMaterial *m = &mesh->materials[t->material];
-        for (int j = 0; j < 3; ++j) {
-            float x = t->v[j].p[0], y = t->v[j].p[1], z = t->v[j].p[2];
-            int w = t->wheel;
-            if (w >= 0) {
-                const float *center = mesh->wheels[w].center;
-                if (angles[w] != 0) {
-                    float dy = y * mesh->extent[1] / 1016 - center[1];
-                    float dz = z * mesh->extent[2] / 1016 - center[2];
-                    y = (center[1] + dy * cosine[w] - dz * sine[w]) * 1016 / mesh->extent[1];
-                    z = (center[2] + dy * sine[w] + dz * cosine[w]) * 1016 / mesh->extent[2];
-                }
-                if ((w < 2) && (steerAngle != 0.0f)) {
-                    float dx = x * mesh->extent[0] / 1016 - center[0];
-                    float dz = z * mesh->extent[2] / 1016 - center[2];
-                    x = (center[0] + dx * steerCos + dz * steerSin) * 1016 / mesh->extent[0];
-                    z = (center[2] - dx * steerSin + dz * steerCos) * 1016 / mesh->extent[2];
-                }
-            }
-            x = (x + drawOffset[0] * 1016.0f / mesh->extent[0]) * mesh->userScale;
-            y = (y + drawOffset[1] * 1016.0f / mesh->extent[1]) * mesh->userScale;
-            z = (z + drawOffset[2] * 1016.0f / mesh->extent[2]) * mesh->userScale;
-            x = fmaxf(-32767.0f, fminf(32767.0f, x));
-            y = fmaxf(-32767.0f, fminf(32767.0f, y));
-            z = fmaxf(-32767.0f, fminf(32767.0f, z));
-            MTC2(RenderBucket_PackXY((s16)x, (s16)y), j * 2);
-            MTC2((s16)z, j * 2 + 1);
-        }
-        gte_rtpt();
-        /* Reject near-plane crossings instead of emitting saturated geometry. */
-        if (MFC2(17) < 16 || MFC2(18) < 16 || MFC2(19) < 16) continue;
+        const int wheel = t->wheel;
+
         u32 projectedSxy[3];
-        CTR_GteStoreSXY3(&projectedSxy[0], &projectedSxy[1], &projectedSxy[2]);
-        int facing;
-        gte_nclip();
-        gte_stopz(&facing);
-        /* At long range an HD OBJ can project many valid triangles below one
-         * integer PS1 pixel. Reuse v152's subpixel cull correction so those
-         * faces do not randomly collapse/disappear merely because NCLIP rounded
-         * their area to zero. */
-        facing = NativeGpu_CorrectSubpixelNclip(&projectedSxy[0], &projectedSxy[1], &projectedSxy[2], facing);
-        if (facing == 0 || (determinant != 0 && ((facing > 0) == (determinant > 0)))) continue;
-        int depth = (MFC2(17) + MFC2(18) + MFC2(19)) / 3 / 32;
-        if (depth < ctx->idpp->depthOffset[0]) depth = ctx->idpp->depthOffset[0];
-        if (depth > ctx->idpp->depthOffset[1]) depth = ctx->idpp->depthOffset[1];
-        if (!ctx->idpp->otRangeNormal) continue;
-        u32 *ot = (u32 *)ctx->idpp->otRangeNormal + depth;
-        size_t bytes = sizeof(POLY_GT3) + 2 * sizeof(DR_PSYX_TEX);
-        if ((char *)ctx->primMem->cursor + bytes >= (char *)ctx->primMem->guardEnd) return;
-        DR_PSYX_TEX *bind = ctx->primMem->cursor;
-        POLY_GT3 *p = (POLY_GT3 *)(bind + 1);
-        DR_PSYX_TEX *reset = (DR_PSYX_TEX *)(p + 1);
-        memset(bind, 0, bytes);
-        bind->code[0] = 0xb1000000 | (m->texture & 0xffffff);
-        bind->code[1] = 256 | (256 << 16);
-        reset->code[0] = 0xb1000000;
-        reset->code[1] = 256 | (256 << 16);
-        setPolyGT3(p);
-        if (!m->texture) setcode(p, 0x30); /* converted below to G3 */
-        CTR_GteStoreSXY3(&p->x0, &p->x1, &p->x2);
-        u8 *colors[3] = {&p->r0, &p->r1, &p->r2};
-        u8 *uv[3] = {&p->u0, &p->u1, &p->u2};
-        for (int j = 0; j < 3; ++j) {
-            for (int k = 0; k < 3; ++k)
-                colors[j][k] = RenderBucket_SaturateU8((int)(t->v[j].color[k] * m->color[k] * (m->texture ? 128 : 255)));
-            float u = t->v[j].uv[0], v = 1.0f - t->v[j].uv[1];
-            uv[j][0] = RenderBucket_SaturateU8((int)(fminf(1, fmaxf(0, u)) * 255));
-            uv[j][1] = RenderBucket_SaturateU8((int)(fminf(1, fmaxf(0, v)) * 255));
-        }
-        /* Apply the same GTE colour interpolation as retail model primitives.
-         * The instance setup callback supplies the effect colour; alphaScale
-         * controls its strength (including the full black burn effect).
-         * Keep this per draw so shared OBJ assets retain their original colours. */
-        if (ctx->idpp->alphaScale != 0) {
+        u32 projectedDepth[3];
+        int usedRigidProjectionCache = 0;
+#if defined(CTR_NATIVE)
+        const struct NativeObjProjectedVertex *projectedCacheEntry[3] = {NULL, NULL, NULL};
+#endif
+
+#if defined(CTR_NATIVE)
+        /* Rigid OBJ bodies repeat the same source position across many face
+         * corners. Project each unique OBJ position once per instance draw and
+         * reuse its SXY/depth for all triangles. Wheels and body patches stay
+         * on the fully dynamic path below. */
+        if (wheel < 0 && !isBodyPatch && projectionGeneration != 0)
+        {
+            usedRigidProjectionCache = 1;
             for (int j = 0; j < 3; ++j)
-                MTC2((u32)colors[j][0] | ((u32)colors[j][1] << 8) | ((u32)colors[j][2] << 16), 20 + j);
-            MTC2(ctx->idpp->alphaScale, 8);
-            gte_dpct();
-            for (int j = 0; j < 3; ++j) {
-                u32 color = MFC2(20 + j);
-                for (int k = 0; k < 3; ++k) colors[j][k] = (u8)(color >> (k * 8));
+            {
+                int objIndex = t->v[j].projectionIndex;
+                if (objIndex < 0 || objIndex >= projectionMesh->positionCount)
+                {
+                    usedRigidProjectionCache = 0;
+                    break;
+                }
+            }
+
+            if (usedRigidProjectionCache)
+            {
+                for (int j = 0; j < 3; ++j)
+                {
+                    struct NativeObjProjectedVertex *cached =
+                        &projectionMesh->projectionCache[t->v[j].projectionIndex];
+
+                    if (cached->generation != projectionGeneration)
+                    {
+                        float x;
+                        float y;
+                        float z;
+
+#if defined(CTR_NATIVE)
+                        if (isCustomTrack && ctx->pb != NULL)
+                        {
+                            const float worldX =
+                                t->v[j].renderP[0] *
+                                (mesh->extent[0] * 1000.0f) / 4096.0f +
+                                (float)ctx->inst->matrix.t[0];
+                            const float worldY =
+                                t->v[j].renderP[1] *
+                                (mesh->extent[1] * 1000.0f) / 4096.0f +
+                                (float)ctx->inst->matrix.t[1];
+                            const float worldZ =
+                                t->v[j].renderP[2] *
+                                (mesh->extent[2] * 1000.0f) / 4096.0f +
+                                (float)ctx->inst->matrix.t[2];
+
+                            x = worldX - (float)ctx->pb->matrix_Camera.t[0];
+                            y = worldY - (float)ctx->pb->matrix_Camera.t[1];
+                            z = worldZ - (float)ctx->pb->matrix_Camera.t[2];
+                        }
+                        else
+#endif
+                        {
+                            x = (t->v[j].renderP[0] + drawOffsetScaled[0]) * attachedScale[0];
+                            y = (t->v[j].renderP[1] + drawOffsetScaled[1]) * attachedScale[1];
+                            z = (t->v[j].renderP[2] + drawOffsetScaled[2]) * attachedScale[2];
+                        }
+
+                        if (x < -32767.0f) x = -32767.0f; else if (x > 32767.0f) x = 32767.0f;
+                        if (y < -32767.0f) y = -32767.0f; else if (y > 32767.0f) y = 32767.0f;
+                        if (z < -32767.0f) z = -32767.0f; else if (z > 32767.0f) z = 32767.0f;
+
+                        MTC2(RenderBucket_PackXY((s16)x, (s16)y), 0);
+                        MTC2((s16)z, 1);
+                        gte_rtps();
+                        cached->sxy = MFC2(14);
+                        cached->depth = (u16)MFC2(19);
+                        cached->generation = projectionGeneration;
+                        if (!NativeGTE_GetCurrentSubpixelFixed(
+                                2, &cached->x16, &cached->y16))
+                        {
+                            cached->x16 = (s32)(s16)cached->sxy * 65536;
+                            cached->y16 = (s32)(s16)(cached->sxy >> 16) * 65536;
+                        }
+                        if (gpuProjectionProbe && !isCustomTrack &&
+                            cached->depth>=16 && cached->depth<65000)
+                        {
+                            struct NativeGpuModelQASample qs={0};
+                            qs.vertexIndex=i*3+j;
+                            for(int a=0;a<3;++a)
+                            {
+                                qs.offset[a]=drawOffsetScaled[a];
+                                qs.scale[a]=attachedScale[a];
+                                qs.translation[a]=(float)mvp->t[a];
+                                for(int z=0;z<3;++z)
+                                    qs.rot[a*3+z]=(float)mvp->m[a][z]/4096.0f;
+                            }
+                            qs.h=(float)ctx->pb->distanceToScreen_PREV;
+                            qs.centerX=(float)(ctx->pb->rect.w>>1);
+                            qs.centerY=(float)(ctx->pb->rect.h>>1);
+                            qs.expectedX=(s16)cached->sxy;
+                            qs.expectedY=(s16)(cached->sxy>>16);
+                            qs.expectedDepth=(int)cached->depth;
+                            NativeGpuModel_StageRigidSample(mesh,&qs);
+                        }
+                    }
+
+                    projectedCacheEntry[j] = cached;
+                    projectedSxy[j] = cached->sxy;
+                    projectedDepth[j] = cached->depth;
+                }
             }
         }
-        /* addPrim prepends: reset first, then triangle, then binding. */
-        RenderBucket_LinkPrimRaw(ot, reset, 0x02000000);
-        if (m->texture) {
-            RenderBucket_LinkPrimRaw(ot, p, 0x09000000);
-        } else {
-            POLY_G3 flat;
-            memset(&flat, 0, sizeof(flat));
-            setPolyG3(&flat);
-            flat.x0=p->x0; flat.y0=p->y0; flat.x1=p->x1; flat.y1=p->y1; flat.x2=p->x2; flat.y2=p->y2;
-            memcpy(&flat.r0,&p->r0,3); memcpy(&flat.r1,&p->r1,3); memcpy(&flat.r2,&p->r2,3);
-            memcpy(p, &flat, sizeof(flat));
-            RenderBucket_LinkPrimRaw(ot, p, 0x06000000);
+#endif
+
+        if (!usedRigidProjectionCache)
+        {
+            if (wheel < 0)
+            {
+                int validBodyPatchTriangle = 1;
+
+                for (int j = 0; j < 3; ++j)
+                {
+                    float x;
+                    float y;
+                    float z;
+
+#if defined(CTR_NATIVE)
+                    if (isBodyPatch)
+                    {
+                        float resolved[3];
+                        if (!VanillaRacerPatch_ResolveVertex(
+                                ctx->inst, ctx->mh, mesh,
+                                t->v[j].objIndex, resolved))
+                        {
+                            validBodyPatchTriangle = 0;
+                            break;
+                        }
+
+                        x = resolved[0];
+                        y = resolved[1];
+                        z = resolved[2];
+                    }
+                    else
+#endif
+                    {
+#if defined(CTR_NATIVE)
+                        if (isCustomTrack && ctx->pb != NULL)
+                        {
+                            const float worldX =
+                                t->v[j].renderP[0] *
+                                (mesh->extent[0] * 1000.0f) / 4096.0f +
+                                (float)ctx->inst->matrix.t[0];
+                            const float worldY =
+                                t->v[j].renderP[1] *
+                                (mesh->extent[1] * 1000.0f) / 4096.0f +
+                                (float)ctx->inst->matrix.t[1];
+                            const float worldZ =
+                                t->v[j].renderP[2] *
+                                (mesh->extent[2] * 1000.0f) / 4096.0f +
+                                (float)ctx->inst->matrix.t[2];
+
+                            x = worldX - (float)ctx->pb->matrix_Camera.t[0];
+                            y = worldY - (float)ctx->pb->matrix_Camera.t[1];
+                            z = worldZ - (float)ctx->pb->matrix_Camera.t[2];
+                        }
+                        else
+#endif
+                        {
+                            x = t->v[j].renderP[0] + drawOffsetScaled[0];
+                            y = t->v[j].renderP[1] + drawOffsetScaled[1];
+                            z = t->v[j].renderP[2] + drawOffsetScaled[2];
+                        }
+                    }
+
+#if defined(CTR_NATIVE)
+                    if (!isCustomTrack)
+#endif
+                    {
+                        x *= attachedScale[0];
+                        y *= attachedScale[1];
+                        z *= attachedScale[2];
+                    }
+
+                    if (x < -32767.0f) x = -32767.0f; else if (x > 32767.0f) x = 32767.0f;
+                    if (y < -32767.0f) y = -32767.0f; else if (y > 32767.0f) y = 32767.0f;
+                    if (z < -32767.0f) z = -32767.0f; else if (z > 32767.0f) z = 32767.0f;
+
+                    MTC2(RenderBucket_PackXY((s16)x, (s16)y), j * 2);
+                    MTC2((s16)z, j * 2 + 1);
+                }
+
+                if (!validBodyPatchTriangle)
+                    continue;
+            }
+            else
+            {
+                const float *center = mesh->wheels[wheel].center;
+                for (int j = 0; j < 3; ++j)
+                {
+                    float x = t->v[j].p[0];
+                    float y = t->v[j].p[1];
+                    float z = t->v[j].p[2];
+
+                    if (angles[wheel] != 0.0f)
+                    {
+                        const float dy = y * mesh->authPerNorm[1] - center[1];
+                        const float dz = z * mesh->authPerNorm[2] - center[2];
+                        y = (center[1] + dy * cosine[wheel] - dz * sine[wheel]) * mesh->normPerAuth[1];
+                        z = (center[2] + dy * sine[wheel] + dz * cosine[wheel]) * mesh->normPerAuth[2];
+                    }
+
+                    if ((wheel < 2) && (steerAngle != 0.0f))
+                    {
+                        const float dx = x * mesh->authPerNorm[0] - center[0];
+                        const float dz = z * mesh->authPerNorm[2] - center[2];
+                        x = (center[0] + dx * steerCos + dz * steerSin) * mesh->normPerAuth[0];
+                        z = (center[2] - dx * steerSin + dz * steerCos) * mesh->normPerAuth[2];
+                    }
+
+                    x = (x * mesh->userScale + drawOffsetScaled[0]) * attachedScale[0];
+                    y = (y * mesh->userScale + drawOffsetScaled[1]) * attachedScale[1];
+                    z = (z * mesh->userScale + drawOffsetScaled[2]) * attachedScale[2];
+
+                    if (x < -32767.0f) x = -32767.0f; else if (x > 32767.0f) x = 32767.0f;
+                    if (y < -32767.0f) y = -32767.0f; else if (y > 32767.0f) y = 32767.0f;
+                    if (z < -32767.0f) z = -32767.0f; else if (z > 32767.0f) z = 32767.0f;
+
+                    MTC2(RenderBucket_PackXY((s16)x, (s16)y), j * 2);
+                    MTC2((s16)z, j * 2 + 1);
+                }
+            }
+
+            gte_rtpt();
+            projectedDepth[0] = MFC2(17);
+            projectedDepth[1] = MFC2(18);
+            projectedDepth[2] = MFC2(19);
+            CTR_GteStoreSXY3(&projectedSxy[0], &projectedSxy[1], &projectedSxy[2]);
         }
-        RenderBucket_LinkPrimRaw(ot, bind, 0x02000000);
-        ctx->primMem->cursor = (char *)bind + bytes;
+
+        /* Reject near-plane crossings instead of emitting saturated geometry. */
+        if (projectedDepth[0] < 16 || projectedDepth[1] < 16 || projectedDepth[2] < 16) continue;
+
+        int facing;
+#if defined(CTR_NATIVE)
+        if (usedRigidProjectionCache &&
+            projectedCacheEntry[0] != NULL &&
+            projectedCacheEntry[1] != NULL &&
+            projectedCacheEntry[2] != NULL)
+        {
+            /* Rigid OBJ vertices already have their exact subpixel projection
+             * cached once per unique source vertex. Cull directly from those
+             * values instead of executing NCLIP plus three address-map lookups
+             * for every triangle that reuses them. */
+            const float ax = (float)projectedCacheEntry[1]->x16 - (float)projectedCacheEntry[0]->x16;
+            const float ay = (float)projectedCacheEntry[1]->y16 - (float)projectedCacheEntry[0]->y16;
+            const float bx = (float)projectedCacheEntry[2]->x16 - (float)projectedCacheEntry[0]->x16;
+            const float by = (float)projectedCacheEntry[2]->y16 - (float)projectedCacheEntry[0]->y16;
+            const float area = ax * by - ay * bx;
+            facing = (area > 0.0f) - (area < 0.0f);
+        }
+        else
+#endif
+        {
+            gte_ldsxy3(&projectedSxy[0], &projectedSxy[1], &projectedSxy[2]);
+            gte_nclip();
+            gte_stopz(&facing);
+            /* At long range an HD OBJ can project many valid triangles below
+             * one integer PS1 pixel. Preserve the precise local correction for
+             * dynamic wheels/body patches that are not in the rigid cache. */
+            facing = NativeGpu_CorrectSubpixelNclipLocal(
+                &projectedSxy[0], &projectedSxy[1], &projectedSxy[2], facing);
+        }
+        if (facing == 0 || (determinant != 0 && ((facing > 0) == (determinant > 0)))) continue;
+        int rawDepth =
+            (projectedDepth[0] + projectedDepth[1] + projectedDepth[2]) / 3;
+        int depth = rawDepth / 32;
+        u32 *ot = NULL;
+
+#if defined(CTR_NATIVE)
+        if (isCustomTrack)
+        {
+            if (ctx->pb == NULL || ctx->pb->ptrOT == NULL)
+                continue;
+
+            /*
+             * Match CTR's actual level OT convention (DrawLevelOvr1P):
+             * max projected triangle depth >> 6, with 0x400 global slots.
+             * The old >> 8 incorrectly brought the whole track four times
+             * nearer in the painter's order, drawing asphalt over the kart.
+             * Use the farthest triangle vertex just like level geometry.
+             */
+            u32 maxDepth = projectedDepth[0];
+            if (projectedDepth[1] > maxDepth) maxDepth = projectedDepth[1];
+            if (projectedDepth[2] > maxDepth) maxDepth = projectedDepth[2];
+            int globalIndex = (int)(maxDepth >> 6);
+            if (globalIndex < 0) globalIndex = 0;
+            if (globalIndex > 0x3ff) globalIndex = 0x3ff;
+            ot = ctx->pb->ptrOT + globalIndex;
+        }
+        else
+#endif
+        {
+            if (depth < ctx->idpp->depthOffset[0]) depth = ctx->idpp->depthOffset[0];
+            if (depth > ctx->idpp->depthOffset[1]) depth = ctx->idpp->depthOffset[1];
+            if (!ctx->idpp->otRangeNormal) continue;
+            ot = (u32 *)ctx->idpp->otRangeNormal + depth;
+        }
+        if (t->renderTextured)
+        {
+            const size_t bytes = sizeof(DR_PSYX_TEX_GT3);
+            DR_PSYX_TEX_GT3 *packet;
+            POLY_GT3 *p;
+            u8 *colors[3];
+            u8 *uv[3];
+
+            if ((char *)ctx->primMem->cursor + bytes >=
+                (char *)ctx->primMem->guardEnd)
+                return;
+
+            packet = (DR_PSYX_TEX_GT3 *)ctx->primMem->cursor;
+            packet->code[0] =
+                0xb3000000 |
+                ((kartColorTexture != 0 &&
+                  t->renderTexture == mesh->colorBaseTexture ?
+                  kartColorTexture : t->renderTexture) & 0xffffff);
+            packet->code[1] = 256 | (256 << 16);
+            packet->nativeFlags = DR_PSYX_TEX_GT3_FLAG_HIRES_UV;
+
+            p = &packet->poly;
+            /* Every byte consumed by the native B3 parser is overwritten below.
+             * Avoid clearing the whole packet for every visible OBJ triangle. */
+            p->tag = 0;
+            p->clut = 0;
+            p->tpage = 0;
+            p->p1 = 0;
+            p->p2 = 0;
+            p->pad2 = 0;
+            setPolyGT3(p);
+            CtrGpu_WritePackedXY(&p->x0, projectedSxy[0]);
+            CtrGpu_WritePackedXY(&p->x1, projectedSxy[1]);
+            CtrGpu_WritePackedXY(&p->x2, projectedSxy[2]);
+#if defined(CTR_NATIVE)
+            if (usedRigidProjectionCache)
+            {
+                VERTTYPE *xy[3][2] = {
+                    {&p->x0, &p->y0},
+                    {&p->x1, &p->y1},
+                    {&p->x2, &p->y2},
+                };
+
+                for (int j = 0; j < 3; ++j)
+                {
+                    RenderBucket_EncodeProjectionAxis(
+                        projectedCacheEntry[j]->x16,
+                        xy[j][0], &packet->xyFrac[j][0]);
+                    RenderBucket_EncodeProjectionAxis(
+                        projectedCacheEntry[j]->y16,
+                        xy[j][1], &packet->xyFrac[j][1]);
+                    packet->depth[j] = projectedCacheEntry[j]->depth;
+                }
+
+                packet->nativeFlags |= DR_PSYX_TEX_GT3_FLAG_EXACT_METADATA;
+            }
+            else
+            {
+                NativeGTE_CopySXYStore(&p->x0, &projectedSxy[0], projectedSxy[0]);
+                NativeGTE_CopySXYStore(&p->x1, &projectedSxy[1], projectedSxy[1]);
+                NativeGTE_CopySXYStore(&p->x2, &projectedSxy[2], projectedSxy[2]);
+            }
+#endif
+
+            colors[0] = &p->r0;
+            colors[1] = &p->r1;
+            colors[2] = &p->r2;
+            uv[0] = &p->u0;
+            uv[1] = &p->u1;
+            uv[2] = &p->u2;
+
+            for (int j = 0; j < 3; ++j)
+            {
+                memcpy(colors[j], t->v[j].renderColor, 3);
+                memcpy(uv[j], t->v[j].renderUV, 2);
+                packet->uvFrac[j][0] = (int8_t)t->v[j].renderUVFrac[0];
+                packet->uvFrac[j][1] = (int8_t)t->v[j].renderUVFrac[1];
+            }
+
+            if (ctx->idpp->alphaScale != 0)
+            {
+                for (int j = 0; j < 3; ++j)
+                    MTC2((u32)colors[j][0] |
+                         ((u32)colors[j][1] << 8) |
+                         ((u32)colors[j][2] << 16), 20 + j);
+
+                MTC2(ctx->idpp->alphaScale, 8);
+                gte_dpct();
+
+                for (int j = 0; j < 3; ++j)
+                {
+                    u32 color = MFC2(20 + j);
+                    colors[j][0] = (u8)color;
+                    colors[j][1] = (u8)(color >> 8);
+                    colors[j][2] = (u8)(color >> 16);
+                }
+            }
+
+            RenderBucket_LinkPrimRaw(
+                ot, packet,
+                ((u32)(sizeof(*packet) / sizeof(u32) - 1)) << 24);
+            ctx->primMem->cursor = (char *)packet + bytes;
+        }
+        else
+        {
+            const size_t bytes = sizeof(POLY_G3);
+            POLY_G3 *p;
+            u8 *colors[3];
+
+            if ((char *)ctx->primMem->cursor + bytes >=
+                (char *)ctx->primMem->guardEnd)
+                return;
+
+            p = (POLY_G3 *)ctx->primMem->cursor;
+            /* LinkPrimRaw overwrites the OT tag after emission. Keep only the
+             * primitive tag/code and retail padding deterministic here. */
+            p->tag = 0;
+            p->pad1 = 0;
+            p->pad2 = 0;
+            setPolyG3(p);
+            CtrGpu_WritePackedXY(&p->x0, projectedSxy[0]);
+            CtrGpu_WritePackedXY(&p->x1, projectedSxy[1]);
+            CtrGpu_WritePackedXY(&p->x2, projectedSxy[2]);
+#if defined(CTR_NATIVE)
+            if (usedRigidProjectionCache)
+            {
+                NativeGTE_SaveSXYStoreExact(&p->x0, projectedSxy[0],
+                                            projectedCacheEntry[0]->x16,
+                                            projectedCacheEntry[0]->y16,
+                                            projectedCacheEntry[0]->depth);
+                NativeGTE_SaveSXYStoreExact(&p->x1, projectedSxy[1],
+                                            projectedCacheEntry[1]->x16,
+                                            projectedCacheEntry[1]->y16,
+                                            projectedCacheEntry[1]->depth);
+                NativeGTE_SaveSXYStoreExact(&p->x2, projectedSxy[2],
+                                            projectedCacheEntry[2]->x16,
+                                            projectedCacheEntry[2]->y16,
+                                            projectedCacheEntry[2]->depth);
+            }
+            else
+            {
+                NativeGTE_CopySXYStore(&p->x0, &projectedSxy[0], projectedSxy[0]);
+                NativeGTE_CopySXYStore(&p->x1, &projectedSxy[1], projectedSxy[1]);
+                NativeGTE_CopySXYStore(&p->x2, &projectedSxy[2], projectedSxy[2]);
+            }
+#endif
+
+            colors[0] = &p->r0;
+            colors[1] = &p->r1;
+            colors[2] = &p->r2;
+
+            for (int j = 0; j < 3; ++j)
+                memcpy(colors[j], t->v[j].renderColor, 3);
+
+            if (ctx->idpp->alphaScale != 0)
+            {
+                for (int j = 0; j < 3; ++j)
+                    MTC2((u32)colors[j][0] |
+                         ((u32)colors[j][1] << 8) |
+                         ((u32)colors[j][2] << 16), 20 + j);
+
+                MTC2(ctx->idpp->alphaScale, 8);
+                gte_dpct();
+
+                for (int j = 0; j < 3; ++j)
+                {
+                    u32 color = MFC2(20 + j);
+                    colors[j][0] = (u8)color;
+                    colors[j][1] = (u8)(color >> 8);
+                    colors[j][2] = (u8)(color >> 16);
+                }
+            }
+
+            RenderBucket_LinkPrimRaw(ot, p, 0x06000000);
+            ctx->primMem->cursor = (char *)p + bytes;
+        }
     }
 }
+
+#if defined(CTR_NATIVE)
+static void RenderBucket_UpdateVanillaSeatOffset(
+    struct RenderBucketDrawContext *ctx)
+{
+    float seat[3];
+
+    ctx->vanillaSeatOffsetActive = 0;
+    ctx->vanillaSeatOffset[0] = 0;
+    ctx->vanillaSeatOffset[1] = 0;
+    ctx->vanillaSeatOffset[2] = 0;
+
+    /* The kart owns the driver's seating translation. Apply it only when the
+       full fail-safe detach set is ready for this exact retail header/LOD. */
+    if (!VanillaRacerPatch_GetSeatOffset(
+            ctx->inst, ctx->mh, seat))
+        return;
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        if (!isfinite(seat[axis]))
+            return;
+        ctx->vanillaSeatOffset[axis] =
+            (int)lroundf(seat[axis]);
+    }
+
+    ctx->vanillaSeatOffsetActive = 1;
+}
+
+static void RenderBucket_DrawDetachedKart(
+    struct RenderBucketDrawContext *ctx)
+{
+    const struct NativeObjMesh *kart;
+
+    if (!VanillaRacerPatch_CanDetach(ctx->inst, ctx->mh))
+        return;
+
+    kart = VanillaRacerPatch_GetKartMesh(ctx->inst, ctx->mh);
+    if (kart == NULL)
+        return;
+
+    /* Keep CTR's original animated character geometry. The precise per-LOD
+       mask removed only the retail kart primitives, so all that remains to
+       draw natively is the selected replacement kart. */
+    gte_SetRotMatrix(&ctx->idpp->mvp);
+    gte_SetTransMatrix(&ctx->idpp->mvp);
+    RenderBucket_DrawObj(ctx, kart);
+}
+#endif
 
 static void RenderBucket_DispatchDrawFunc(struct RenderBucketDrawContext *ctx)
 {
 #if defined(CTR_NATIVE)
+	if (ctx->mh->unk1 == NATIVE_GLTF_MODEL_MAGIC)
+	{
+		const struct NativeObjMesh *body;
+		const struct NativeObjMesh *kart;
+
+		if (!RenderBucket_RunInstanceSetupCallback(ctx))
+			return;
+
+		body = NativeGltf_GetRenderMesh(ctx->inst);
+		kart = NativeObj_GetKartMeshForInstance(ctx->inst);
+
+		/*
+		 * Skeletal racers are body-only presentation assets. Their selected
+		 * modular kart stays on the original Driver/Instance transform and is
+		 * drawn first, exactly like the existing modular OBJ path.
+		 */
+		if (kart != NULL)
+		{
+			RenderBucket_DrawObj(ctx, kart);
+			gte_SetRotMatrix(&ctx->idpp->mvp);
+			gte_SetTransMatrix(&ctx->idpp->mvp);
+		}
+
+		if (body != NULL)
+			RenderBucket_DrawObj(ctx, body);
+		return;
+	}
+
 	if (ctx->mh->unk1 == NATIVE_OBJ_MODEL_MAGIC)
 	{
-		if (!RenderBucket_RunInstanceSetupCallback(ctx)) return;
-		const struct NativeObjMesh *mesh = NativeObj_GetMesh(ctx->inst->model);
-		if (mesh != NULL) RenderBucket_DrawObj(ctx, mesh);
+		const struct NativeObjMesh *body;
+		const struct NativeObjMesh *kart;
+
+		if (!RenderBucket_RunInstanceSetupCallback(ctx))
+			return;
+
+		body = NativeObj_GetMesh(ctx->inst->model);
+		kart = NativeObj_GetModularKartMeshForInstance(ctx->inst);
+
+		/* Modular custom racers draw the chosen kart independently underneath
+		   their body. Legacy combined OBJ racers simply have kart == NULL. */
+		if (kart != NULL)
+		{
+			RenderBucket_DrawObj(ctx, kart);
+			gte_SetRotMatrix(&ctx->idpp->mvp);
+			gte_SetTransMatrix(&ctx->idpp->mvp);
+		}
+
+		if (body != NULL)
+			RenderBucket_DrawObj(ctx, body);
 		return;
 	}
 #endif
@@ -5655,23 +6624,63 @@ static void RenderBucket_DispatchDrawFunc(struct RenderBucketDrawContext *ctx)
 	switch ((u32)ctx->idpp->unkEC)
 	{
 	case RB_RETAIL_DRAWFUNC_NORMAL:
+#if defined(CTR_NATIVE)
+		RenderBucket_UpdateVanillaSeatOffset(ctx);
+		VanillaRacerSeparation_DebugBegin(ctx->inst, ctx->mh);
+#endif
 		RenderBucket_DrawFunc_Normal(ctx);
+#if defined(CTR_NATIVE)
+		VanillaRacerSeparation_DebugEnd(ctx->inst);
+		RenderBucket_DrawDetachedKart(ctx);
+#endif
 		return;
 
 	case RB_RETAIL_DRAWFUNC_NORMAL_ALT:
+#if defined(CTR_NATIVE)
+		RenderBucket_UpdateVanillaSeatOffset(ctx);
+		VanillaRacerSeparation_DebugBegin(ctx->inst, ctx->mh);
+#endif
 		RenderBucket_DrawFunc_NormalAlt(ctx);
+#if defined(CTR_NATIVE)
+		VanillaRacerSeparation_DebugEnd(ctx->inst);
+		RenderBucket_DrawDetachedKart(ctx);
+#endif
 		return;
 
 	case RB_RETAIL_DRAWFUNC_SPLIT:
+#if defined(CTR_NATIVE)
+		RenderBucket_UpdateVanillaSeatOffset(ctx);
+		VanillaRacerSeparation_DebugBegin(ctx->inst, ctx->mh);
+#endif
 		RenderBucket_DrawFunc_Split(ctx);
+#if defined(CTR_NATIVE)
+		VanillaRacerSeparation_DebugEnd(ctx->inst);
+		RenderBucket_DrawDetachedKart(ctx);
+#endif
 		return;
 
 	case RB_RETAIL_DRAWFUNC_SPECIAL:
+#if defined(CTR_NATIVE)
+		RenderBucket_UpdateVanillaSeatOffset(ctx);
+		VanillaRacerSeparation_DebugBegin(ctx->inst, ctx->mh);
+#endif
 		RenderBucket_DrawFunc_Special(ctx);
+#if defined(CTR_NATIVE)
+		VanillaRacerSeparation_DebugEnd(ctx->inst);
+		RenderBucket_DrawDetachedKart(ctx);
+#endif
 		return;
 
 	case RB_RETAIL_DRAWFUNC_REFLECTION:
+#if defined(CTR_NATIVE)
+		RenderBucket_UpdateVanillaSeatOffset(ctx);
+		VanillaRacerSeparation_DebugBegin(ctx->inst, ctx->mh);
+#endif
 		RenderBucket_DrawFunc_Reflection(ctx);
+#if defined(CTR_NATIVE)
+		VanillaRacerSeparation_DebugEnd(ctx->inst);
+		RenderBucket_DrawDetachedKart(ctx);
+#endif
 		return;
 
 	default:
@@ -5679,6 +6688,17 @@ static void RenderBucket_DispatchDrawFunc(struct RenderBucketDrawContext *ctx)
 		// Do not fall through to normal draw; that masks live retail handler rows.
 		return;
 	}
+}
+
+static void RenderBucket_ResetDrawContext(struct RenderBucketDrawContext *ctx)
+{
+	// stack[] and packedStack[] are decode caches. Valid command streams write
+	// each slot before reading it, and retail scratch memory was not cleared per
+	// instance either. Avoid zeroing ~3 KiB of cache data for every visible
+	// instance; only reset the control/header fields that carry draw state.
+	memset(ctx, 0, offsetof(struct RenderBucketDrawContext, stack));
+	memset(&ctx->bitIndex, 0,
+	       sizeof(*ctx) - offsetof(struct RenderBucketDrawContext, bitIndex));
 }
 
 static int RenderBucket_PrepareDrawContext(struct RenderBucketDrawContext *ctx, struct Instance *inst, struct Instance *instPlayerBase, struct PrimMem *primMem)
@@ -5726,6 +6746,7 @@ static int RenderBucket_PrepareDrawContext(struct RenderBucketDrawContext *ctx, 
 
 #if defined(CTR_NATIVE)
 	if ((mh->unk1 != NATIVE_OBJ_MODEL_MAGIC) &&
+		(mh->unk1 != NATIVE_GLTF_MODEL_MAGIC) &&
 		((mh->ptrCommandList == 0) || (mh->ptrColors == 0)))
 #else
 	if ((mh->ptrCommandList == 0) || (mh->ptrColors == 0))
@@ -5790,9 +6811,15 @@ static int RenderBucket_PrepareDrawContext(struct RenderBucketDrawContext *ctx, 
 
 	ctx->inst = inst;
 #if defined(CTR_NATIVE)
-    ctx->nativeAnimAlpha=NativeWorld_AnimBlend(inst);
-    if (ctx->nativeAnimAlpha < 0)
-        ctx->nativeAnimAlpha=RenderBucket_TurboAnimAlpha(inst, idpp->ptrNextFrame);
+    /* Static/non-interpolated instances do not need a NativeWorld hash lookup.
+       QueueDraw already leaves ptrNextFrame NULL when no visual blend is active. */
+    ctx->nativeAnimAlpha=-1;
+    if (nextFrame != 0)
+    {
+        ctx->nativeAnimAlpha=NativeWorld_AnimBlend(inst);
+        if (ctx->nativeAnimAlpha < 0)
+            ctx->nativeAnimAlpha=RenderBucket_TurboAnimAlpha(inst, idpp->ptrNextFrame);
+    }
 #endif
 	ctx->idpp = idpp;
 	ctx->pb = pb;
@@ -5809,10 +6836,104 @@ static int RenderBucket_PrepareDrawContext(struct RenderBucketDrawContext *ctx, 
 	return 1;
 }
 
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+struct RenderBucketNativeProfile
+{
+	u64 frames;
+	u64 entries;
+	u64 prepared;
+	u64 rejected;
+	u64 resetTicks;
+	u64 prepareTicks;
+	u64 dispatchTicks;
+	u64 objTicks;
+	u64 gltfTicks;
+	u64 retailTicks;
+	u64 objCount;
+	u64 gltfCount;
+	u64 retailCount;
+};
+
+static struct RenderBucketNativeProfile sRenderBucketNativeProfile;
+
+static int RenderBucket_NativeProfileEnabled(void)
+{
+	static int checked;
+	static int enabled;
+
+	if (!checked)
+	{
+		FILE *marker = fopen("debug/renderbucket_profile.enable", "rb");
+		enabled = marker != NULL;
+		if (marker != NULL)
+			fclose(marker);
+		checked = 1;
+	}
+
+	return enabled;
+}
+
+static void RenderBucket_NativeProfileFlush(void)
+{
+	const u64 frequency = SDL_GetPerformanceFrequency();
+	const double toMs = frequency != 0 ? (1000.0 / (double)frequency) : 0.0;
+	const double frameScale = sRenderBucketNativeProfile.frames != 0 ?
+		(1.0 / (double)sRenderBucketNativeProfile.frames) : 0.0;
+
+	Platform_Log(
+		"[RENDERBUCKET PROFILE] frames=%llu entries=%.1f prepared=%.1f rejected=%.1f reset=%.4fms prepare=%.4fms dispatch=%.4fms obj=%.4fms/%llu gltf=%.4fms/%llu retail=%.4fms/%llu\n",
+		(unsigned long long)sRenderBucketNativeProfile.frames,
+		(double)sRenderBucketNativeProfile.entries * frameScale,
+		(double)sRenderBucketNativeProfile.prepared * frameScale,
+		(double)sRenderBucketNativeProfile.rejected * frameScale,
+		(double)sRenderBucketNativeProfile.resetTicks * toMs * frameScale,
+		(double)sRenderBucketNativeProfile.prepareTicks * toMs * frameScale,
+		(double)sRenderBucketNativeProfile.dispatchTicks * toMs * frameScale,
+		(double)sRenderBucketNativeProfile.objTicks * toMs * frameScale,
+		(unsigned long long)sRenderBucketNativeProfile.objCount,
+		(double)sRenderBucketNativeProfile.gltfTicks * toMs * frameScale,
+		(unsigned long long)sRenderBucketNativeProfile.gltfCount,
+		(double)sRenderBucketNativeProfile.retailTicks * toMs * frameScale,
+		(unsigned long long)sRenderBucketNativeProfile.retailCount);
+
+	memset(&sRenderBucketNativeProfile, 0, sizeof(sRenderBucketNativeProfile));
+}
+#endif
+
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+/* Diagnostic ONLY. Each game tick (not each high-Hz present) alternates
+ * model visibility. PS1 physics, AI, collision, particles and camera remain
+ * active: only that driver's model packet preparation is omitted.
+ * Mode 1: alternating ticks, mode 2: all models hidden. Default unchanged. */
+static int RenderBucket_NativeBotVisualAB(void)
+{
+    static int checked,mode;
+    if(!checked)
+    {
+        FILE *f=fopen("debug/perf.bot_visual_ab","rb");
+        checked=1;
+        if(f)
+        {
+            if(fscanf(f,"%d",&mode)!=1 || mode<1 || mode>2)mode=0;
+            fclose(f);
+            if(mode)
+                Platform_Log("[BOT MODEL AB] enabled mode=%d; only stress-test bot model packet generation can be suppressed\n",mode);
+        }
+    }
+    if(mode==0 || !NativePerf_IsStressTestMeasuring() ||
+       !sdata || !sdata->gGT)return 0;
+    return mode==2 || (sdata->frameCounter & 1u)==0;
+}
+#endif
+
 void RenderBucket_Execute(void *param_1, struct PrimMem *param_2)
 {
 	struct RenderBucketEntry *entry = (struct RenderBucketEntry *)param_1;
 	struct RenderBucketExecuteScratch *scratch = RenderBucket_Scratch();
+	struct RenderBucketDrawContext ctx;
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	const int profile = RenderBucket_NativeProfileEnabled();
+#endif
 
 	// NOTE(aalhendi): ASM-verified NTSC-U 926 0x8006aaa8-0x8006ad6c;
 	// native uses the accepted explicit RenderBucketDrawContext scratch/register ABI.
@@ -5820,15 +6941,92 @@ void RenderBucket_Execute(void *param_1, struct PrimMem *param_2)
 	scratch->pushBufferPtr32 = 0;
 	for (; entry->inst != 0; entry++)
 	{
-		struct RenderBucketDrawContext ctx = {0};
-
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+		u64 beginCounter = 0;
+		u64 dispatchCounter = 0;
+		if (profile)
+		{
+			sRenderBucketNativeProfile.entries++;
+			beginCounter = SDL_GetPerformanceCounter();
+		}
+#endif
+		RenderBucket_ResetDrawContext(&ctx);
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+		if (profile)
+		{
+			u64 now = SDL_GetPerformanceCounter();
+			sRenderBucketNativeProfile.resetTicks += now - beginCounter;
+			beginCounter = now;
+		}
+#endif
 		scratch->nextEntryPtr32 = (u32)(uintptr_t)(entry + 1);
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+        const int botModelID=NativePerf_BotIDForInstance(entry->inst);
+        /* Paired visibility test, not a production option: this skips only
+         * 3D model submission, never AI/physics/gameplay or other objects. */
+        if(botModelID>=0 && RenderBucket_NativeBotVisualAB())
+            continue;
+        if(botModelID>=0)
+            NativePerf_BotBegin(botModelID,NATIVE_PERF_BOT_RENDER);
+#endif
 
 		if (RenderBucket_PrepareDrawContext(&ctx, entry->inst, entry->instPlayerBase, param_2) == 0)
 		{
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+			if (profile)
+			{
+				sRenderBucketNativeProfile.prepareTicks += SDL_GetPerformanceCounter() - beginCounter;
+				sRenderBucketNativeProfile.rejected++;
+			}
+#endif
+			#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+            if(botModelID>=0)
+                NativePerf_BotEnd(botModelID,NATIVE_PERF_BOT_RENDER);
+            #endif
 			continue;
 		}
 
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+		if (profile)
+		{
+			u64 now = SDL_GetPerformanceCounter();
+			sRenderBucketNativeProfile.prepareTicks += now - beginCounter;
+			sRenderBucketNativeProfile.prepared++;
+			dispatchCounter = now;
+		}
+#endif
 		RenderBucket_DispatchDrawFunc(&ctx);
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+        if(botModelID>=0)
+            NativePerf_BotEnd(botModelID,NATIVE_PERF_BOT_RENDER);
+		if (profile)
+		{
+			const u64 elapsed = SDL_GetPerformanceCounter() - dispatchCounter;
+			sRenderBucketNativeProfile.dispatchTicks += elapsed;
+			if (ctx.mh->unk1 == NATIVE_OBJ_MODEL_MAGIC)
+			{
+				sRenderBucketNativeProfile.objTicks += elapsed;
+				sRenderBucketNativeProfile.objCount++;
+			}
+			else if (ctx.mh->unk1 == NATIVE_GLTF_MODEL_MAGIC)
+			{
+				sRenderBucketNativeProfile.gltfTicks += elapsed;
+				sRenderBucketNativeProfile.gltfCount++;
+			}
+			else
+			{
+				sRenderBucketNativeProfile.retailTicks += elapsed;
+				sRenderBucketNativeProfile.retailCount++;
+			}
+		}
+#endif
 	}
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	if (profile)
+	{
+		sRenderBucketNativeProfile.frames++;
+		if (sRenderBucketNativeProfile.frames >= 300)
+			RenderBucket_NativeProfileFlush();
+	}
+#endif
 }
