@@ -86,16 +86,16 @@
     </select>
     <p class="caption">Select what this map is designed for. Gameplay compatibility is reviewed separately.</p>
   </div>
-  <p id="modpackMetadata" class="caption metadata-group hidden">A Modpack ZIP contains modpack.ini plus two or more independent folders: racers/id/character.ini, karts/id/kart.ini, wheels/id/wheels.ini or tracks/id/track.ini. Each mod keeps its own identifier.</p>
+  <p id="modpackMetadata" class="caption metadata-group hidden">To BUILD a Modpack here, choose the parent folder containing 2-60 separate mod folders (each with its own character.ini, kart.ini, wheels.ini or track.ini). The builder writes modpack.ini, preserves each module's identity and keeps every mod independent in the game.</p>
   <p id="wheelMetadata" class="caption metadata-group hidden">A standalone modular wheel set for compatible wheeled karts.</p>
 </div>
 <div class="field"><label for="modVersion">Version</label><input id="modVersion" value="1.0" maxlength="28" required></div>
 <div class="field"><label for="modDescription">Description / Mod Notes</label><textarea id="modDescription" minlength="10" maxlength="3000" placeholder="Describe your mod and credit the source of any assets, e.g. Model ripped from Crash Nitro Kart (CNK)." required></textarea><p class="caption">If you used assets from another game or creator, identify the original source here. The moderator can ask for clarification in a review note.</p></div>
 <section id="modPackager" class="forge-packager" aria-labelledby="modPackagerTitle">
   <div class="panel-head"><h3 id="modPackagerTitle">MOD PACKAGER / BUILD ZIP</h3><span class="meta">NATIVE MOD / NO CONSOLE</span></div>
-  <p class="caption">01 / Choose Character, Kart, Wheels or Track above. 02 / Select mod assets or a whole mod folder. 03 / Click BUILD &amp; ATTACH ZIP. The archive is validated locally and only uploaded after you choose SUBMIT FOR REVIEW.</p>
+  <p class="caption">01 / Choose a mod type or Modpack. 02 / Select one mod folder, or for a Modpack select its parent folder containing 2-60 existing mod folders. 03 / Click BUILD &amp; ATTACH ZIP. No upload occurs until you choose SUBMIT FOR REVIEW.</p>
   <div class="inline-grid">
-    <div class="field"><label for="modSourceFolder">Mod folder (recommended)</label><input id="modSourceFolder" type="file" multiple webkitdirectory directory aria-describedby="packagerMessage"><p class="caption">Preserves relative texture folders; no ISO, executables or saves.</p></div>
+    <div class="field"><label for="modSourceFolder">Mod folder / parent Modpack folder</label><input id="modSourceFolder" type="file" multiple webkitdirectory directory aria-describedby="packagerMessage"><p class="caption">For Modpacks, select the one parent folder containing all separate mods. Individual INIs and textures are preserved.</p></div>
     <div class="field"><label for="modSourceFiles">Or choose individual files</label><input id="modSourceFiles" type="file" multiple accept=".obj,.mtl,.png,.jpg,.jpeg,.bmp,.tga,.ini,.cfg,.json,.txt,.md,.wav,.ogg,.cseq,.bin,.dds,.webp,.gif,.xml,.dat,.gltf,.glb,.lev,.vrm"><p class="caption">Native OBJ models or both LEV + VRM for tracks.</p></div>
   </div>
   <div id="packagerDropzone" tabindex="0" class="forge-dropzone">DROP MOD FILES HERE  •  or use either picker above</div>
@@ -131,9 +131,9 @@
 <footer class="footer"><div class="wrap">Crash Forge: Racing / Forge Hub • Creator accounts are linked to GitHub • Public release requires moderation.</div></footer>
 <script src="./mod-taxonomy.js?v=20261009_kart_1"></script>
 <script src="./vendor/jszip-3.10.1.min.js"></script>
-<script src="./forge-package-ids.js?v=20261012_wheel_section_fix"></script>
-<script src="./forge-mod-packager.js?v=20261012_modular_body_default"></script>
+<script src="./forge-package-ids.js?v=20261011_modpack_web_complete_1"></script>
+<script src="./forge-mod-packager.js?v=20261011_modpack_web_complete_1"></script>
 <script src="./forge-mod-visualizer.js?v=20261011_model_preview_1"></script>
-<script type="module" src="./creator-studio.js?v=20261011_model_preview_1"></script>
+<script type="module" src="./creator-studio.js?v=20261011_modpack_web_complete_1"></script>
 </body>
 </html>
