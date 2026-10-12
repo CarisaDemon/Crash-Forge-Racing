@@ -4,14 +4,20 @@
 (function(){
  const types={
   Character:["character.ini","character"],Kart:["kart.ini","kart"],
-  Wheels:["wheels.ini","wheels"],Track:["track.ini","track"],
+  Wheels:["wheels.ini","wheel"],Track:["track.ini","track"],
   Modpack:["modpack.ini","modpack"]
  };
  function modifyIni(text,section,id,type,version){
   const rows=text.replace(/\r\n/g,"\n").split("\n");
   const matcher=/^\s*\[([^\]]+)\]\s*$/;
-  let found=false;
-  for(const line of rows)if(matcher.test(line)&&RegExp.$1.toLowerCase()===section)found=true;
+  // Native CFR wheels use [wheel]; some existing mods use [wheels].
+  // Do not rely on the deprecated, mutable RegExp.$1 capture.
+  const found=rows.some(line=>{
+   const match=line.match(matcher);
+   if(!match)return false;
+   const actual=match[1].trim().toLowerCase();
+   return actual===section||(section==="wheel"&&actual==="wheels");
+  });
   if(!found)throw Error("ZIP lacks native ["+section+"] section.");
   const output=[];let inside=false;let hasMeta=false;
   for(let i=0;i<rows.length;i++){
@@ -43,7 +49,7 @@
    zip.file("modpack.ini",modifyIni(ini,"modpack",id,category,version));
    const childTypes={racers:["character.ini","character","Character"],
                      karts:["kart.ini","kart","Kart"],
-                     wheels:["wheels.ini","wheels","Wheels"],
+                     wheels:["wheels.ini","wheel","Wheels"],
                      tracks:["track.ini","track","Track"]};
    let count=0;
    const used=new Set([id]);
