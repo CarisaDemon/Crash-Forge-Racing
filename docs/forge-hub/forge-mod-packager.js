@@ -36,7 +36,7 @@
     if(!original){
       original="["+section+"]\nname = "+title+"\nenabled = true\n";
       if(kind==="Character"){
-        original+="fallback_retail = crash\nengine = balanced\nhas_wheels = false\n"+
+        original+="fallback_retail = crash\nengine = balanced\n"+
                   "modular_body = true\n"+
                   "\n[model]\nscale = 1.0\n\n[assets]\nasset_name = "+modelName+"\n";
       }else if(kind==="Kart"||kind==="Wheels"){
@@ -54,22 +54,21 @@
       // Add only missing defaults. Explicitly authored values are preserved.
       // The OBJ is a modular character body, never a self-contained kart.
       const lines=original.replace(/\r\n/g,"\n").split("\n");
-      let inside=false,hasBody=false,hasWheels=false;
+      let inside=false,hasBody=false;
+      const clean=[];
       for(const line of lines){
         const header=line.match(/^\s*\[([^\]]+)\]\s*$/);
-        if(header){inside=header[1].toLowerCase()==="character";continue;}
-        if(!inside)continue;
-        if(/^\s*(modular_body|separate_vehicle)\s*=/i.test(line))hasBody=true;
-        if(/^\s*has_wheels\s*=/i.test(line))hasWheels=true;
+        if(header)inside=header[1].toLowerCase()==="character";
+        if(inside&&/^\s*has_wheels\s*=/i.test(line))continue;
+        if(inside&&/^\s*(modular_body|separate_vehicle)\s*=/i.test(line))
+          hasBody=true;
+        clean.push(line);
       }
-      const missing=[];
-      if(!hasBody)missing.push("modular_body = true");
-      if(!hasWheels)missing.push("has_wheels = false");
-      if(missing.length){
-        const start=lines.findIndex(line=>/^\s*\[character\]\s*$/i.test(line));
-        lines.splice(start+1,0,...missing);
-        original=lines.join("\n");
+      if(!hasBody){
+        const start=clean.findIndex(line=>/^\s*\[character\]\s*$/i.test(line));
+        clean.splice(start+1,0,"modular_body = true");
       }
+      original=clean.join("\n");
     }
     let active=false;
     const result=[];
@@ -107,7 +106,129 @@
     }
     return rows;
   }
+  /* Create a Modpack directly from a parent folder containing 2-60 mod folders.
+     Each child stays an individual module, with its own native INI and ID.
+     Prepared category roots (racers/id, karts/id, etc) are also supported. */
+  async function buildModpack({files,title,version,author="",description=""}){
+    if(!window.JSZip)throw Error("Bundled JSZip library is missing.");
+    title=String(title||"").trim();
+    version=String(version||"").trim();
+    description=String(description||"").trim();
+    author=String(author||"").trim();
+    if(title.length<3||title.length>100||/[\r\n[\]]/.test(title))
+      throw Error("Modpack name must contain 3-100 characters.");
+    if(!/^[a-zA-Z0-9._+-]{1,28}$/.test(version))
+      throw Error("Invalid Modpack version.");
+    if(description.length<1||description.length>300||
+       /[\r\n[\]]/.test(description))
+      throw Error("Modpack description needs 1-300 characters.");
+    if(author.length>75||/[\r\n[\]]/.test(author))
+      throw Error("Modpack author is invalid.");
+    const rows=gather(files);
+    const roots={Character:"racers",Kart:"karts",Wheels:"wheels",Track:"tracks"};
+    const native={Character:"character.ini",Kart:"kart.ini",
+                  Wheels:"wheels.ini",Track:"track.ini"};
+    const rootsByIni=Object.fromEntries(
+      Object.keys(native).map(kind=>[native[kind],kind]));
+    const prepared=rows.some(item=>/^(racers|karts|wheels|tracks)\/[^/]+\/(character|kart|wheels|track)\.ini$/i.test(item.name));
+    const sourceGroups=new Map();
+    for(const item of rows){
+      if(item.name.toLowerCase()==="modpack.ini")continue;
+      const parts=item.name.split("/");
+      const min=prepared?3:2;
+      if(parts.length<min)
+        throw Error("Modpack files must be inside independent mod folders.");
+      const source=prepared?parts.slice(0,2).join("/"):parts[0];
+      const member=parts.slice(prepared?2:1).join("/");
+      if(!member||member.startsWith("/")||member==="modpack.ini")
+        throw Error("Invalid Modpack member path.");
+      if(!sourceGroups.has(source))sourceGroups.set(source,[]);
+      sourceGroups.get(source).push({file:item.file,member});
+    }
+    if(sourceGroups.size<2||sourceGroups.size>60)
+      throw Error("Choose 2-60 separate mod folders for the Modpack.");
+    const packId="local_"+slug(title);
+    const seenIds=new Set([packId]);
+    const zip=new window.JSZip();
+    let members=0;
+    for(const [source,group] of sourceGroups){
+      const configs=group.filter(x=>Object.hasOwn(rootsByIni,x.member.toLowerCase()));
+      if(configs.length!==1)
+        throw Error(source+": needs exactly one root character.ini, kart.ini, wheels.ini or track.ini.");
+      const kind=rootsByIni[configs[0].member.toLowerCase()];
+      if(prepared&&source.split("/")[0].toLowerCase()!==roots[kind])
+        throw Error(source+": source category does not match its native INI.");
+      const iniText=await configs[0].file.text();
+      const section=kind==="Wheels"?"(?:wheel|wheels)":KINDS[kind][1];
+      if(!new RegExp("^\\s*\\["+section+"\\]\\s*$","im").test(iniText))
+        throw Error(source+": "+configs[0].member+" has no native section.");
+      const nativeName=iniText.match(/^\s*name\s*=\s*(.+)\s*$/im);
+      const displayName=nativeName?nativeName[1].trim():source.split("/").pop();
+      if(!displayName||displayName.length>100||/[\r\n[\]]/.test(displayName))
+        throw Error(source+": invalid native mod name.");
+      // Read IDs only from [forge_mod], not an unrelated native section.
+      let inForge=false,inheritedId="",declaredType="";
+      for(const line of iniText.replace(/\r\n/g,"\n").split("\n")){
+        const head=line.match(/^\s*\[([^\]]+)\]\s*$/);
+        if(head){inForge=head[1].toLowerCase()==="forge_mod";continue;}
+        if(!inForge)continue;
+        const value=line.match(/^\s*([a-z_]+)\s*=\s*(.*?)\s*$/i);
+        if(!value)continue;
+        if(value[1].toLowerCase()==="id")inheritedId=value[2].trim();
+        if(value[1].toLowerCase()==="type")declaredType=value[2].trim();
+      }
+      if(declaredType&&declaredType.toLowerCase()!==kind.toLowerCase())
+        throw Error(source+": native [forge_mod] category does not match "+kind);
+      const identity=inheritedId||slug(source.split("/").pop());
+      if(!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(identity)||seenIds.has(identity))
+        throw Error("Duplicate or invalid component ID: "+identity);
+      seenIds.add(identity);
+      const target=roots[kind]+"/"+identity+"/";
+      const outputPaths=new Set();
+      const names=group.map(x=>x.member.toLowerCase());
+      if(kind==="Track"){
+        if(names.filter(x=>x.endsWith(".lev")&&!x.includes("/")).length!==1||
+           names.filter(x=>x.endsWith(".vrm")&&!x.includes("/")).length!==1)
+          throw Error(source+": Track needs one .lev and one .vrm.");
+      }else if(!names.some(x=>x.endsWith(".obj")||x.endsWith(".glb")||x.endsWith(".gltf"))){
+        throw Error(source+": character/kart/wheels needs a model.");
+      }
+      for(const row of group){
+        const name=row.member;
+        if(outputPaths.has(name.toLowerCase()))
+          throw Error("Duplicate path in "+source+": "+name);
+        outputPaths.add(name.toLowerCase());
+        if(row===configs[0]){
+          const cleaned=nativeIni(iniText,kind,displayName,version,
+                                 "", "", "");
+          // nativeIni regenerates local metadata; assign the already
+          // validated stable child identity, not the display-name slug.
+          zip.file(target+name,cleaned.replace(
+             /^id = [^\r\n]+$/m,"id = "+identity));
+        }else{
+          zip.file(target+name,await row.file.arrayBuffer(),{binary:true});
+        }
+        members++;
+      }
+    }
+    const manifest="[modpack]\nname = "+title+
+       "\ndescription = "+description+"\ncompatibility = cfr"+
+       "\nauthor = "+author+"\nversion = "+version+"\nenabled = true"+
+       "\n\n[forge_mod]\nid = "+packId+
+       "\nname = "+title+"\ntype = Modpack"+
+       "\nversion = "+version+"\nsource = local\nenabled = true\n";
+    zip.file("modpack.ini",manifest);
+    const bytes=await zip.generateAsync({type:"uint8array",compression:"DEFLATE",
+      compressionOptions:{level:6},streamFiles:false});
+    if(!bytes.length||bytes.byteLength>MAX_ZIP)
+      throw Error("Modpack ZIP exceeds Forge Hub's 50 MiB limit.");
+    const file=new File([bytes],slug(title)+"_modpack.zip",{type:"application/zip"});
+    return {file,fileCount:members+1,componentCount:sourceGroups.size,
+            size:file.size};
+  }
   async function build({files,category,title,version,author="",description=""}){
+    if(category==="Modpack")
+      return buildModpack({files,title,version,author,description});
     if(!window.JSZip)throw Error("Bundled JSZip library is missing.");
     if(!KINDS[category])throw Error("Select Character, Kart, Wheels or Track.");
     title=String(title||"").trim();version=String(version||"").trim();
