@@ -44,7 +44,10 @@
         original+="format = native_lev_vrm\nlev = "+lev+"\nvrm = "+vrm+"\n";
       }
     }
-    if(!new RegExp("^\\s*\\["+section+"\\]\\s*$","im").test(original))
+    // CFR accepts both [wheel] and historical [wheels] wheel definitions.
+    // Preserve the section written by the mod author rather than rewriting it.
+    const nativeSection=kind==="Wheels"?"(?:wheel|wheels)":section;
+    if(!new RegExp("^\\s*\\["+nativeSection+"\\]\\s*$","im").test(original))
       throw Error(ini+" must contain ["+section+"] section.");
     let active=false;
     const result=[];
