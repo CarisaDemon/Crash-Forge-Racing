@@ -896,9 +896,11 @@ function chosenPackagerSources(files, source) {
     packageInfo = null;
     el("modPackage").value = "";
     el("downloadModZip").disabled = true;
+    const isPack = el("modType").value === "Modpack";
     el("packagerMessage").textContent = packagerSources.length ?
-       packagerSources.length + " " + source + " assets selected. Click BUILD & ATTACH ZIP." :
-       "No assets selected.";
+       packagerSources.length + " " + source + " assets selected. "+
+       (isPack ? "The parent folder must contain 2-60 separate mods. " : "")+
+       "Click BUILD & ATTACH ZIP." : "No assets selected.";
     setFileInfo("Build the ZIP before submitting for review.", "NOT BUILT");
     modVisualizer.selectSources(packagerSources, el("modType").value);
     syncControls();
@@ -947,7 +949,9 @@ el("buildModZip").addEventListener("click", async () => {
         packageInfo = {file:pack.file,hash};
         el("downloadModZip").disabled = false;
         el("packagerMessage").textContent =
-            "ZIP READY: " + pack.fileCount + " assets, " +
+            "ZIP READY: " + (pack.componentCount ? pack.componentCount +
+            " independently installable mods / " : "") +
+            pack.fileCount + " assets, " +
             (pack.size/1048576).toFixed(2) + " MiB. " +
             "It is attached for review, but NOT uploaded. Click SUBMIT FOR REVIEW after signing in.";
         setFileInfo(pack.file.name+" — validated native "+el("modType").value+" package",
