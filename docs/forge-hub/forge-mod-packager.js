@@ -37,6 +37,7 @@
       original="["+section+"]\nname = "+title+"\nenabled = true\n";
       if(kind==="Character"){
         original+="fallback_retail = crash\nengine = balanced\nhas_wheels = false\n"+
+                  "modular_body = true\n"+
                   "\n[model]\nscale = 1.0\n\n[assets]\nasset_name = "+modelName+"\n";
       }else if(kind==="Kart"||kind==="Wheels"){
         original+="\n[model]\nasset_name = "+modelName+"\nscale = 1.0\n";
@@ -49,6 +50,27 @@
     const nativeSection=kind==="Wheels"?"(?:wheel|wheels)":section;
     if(!new RegExp("^\\s*\\["+nativeSection+"\\]\\s*$","im").test(original))
       throw Error(ini+" must contain ["+section+"] section.");
+    if(kind==="Character"){
+      // Add only missing defaults. Explicitly authored values are preserved.
+      // The OBJ is a modular character body, never a self-contained kart.
+      const lines=original.replace(/\r\n/g,"\n").split("\n");
+      let inside=false,hasBody=false,hasWheels=false;
+      for(const line of lines){
+        const header=line.match(/^\s*\[([^\]]+)\]\s*$/);
+        if(header){inside=header[1].toLowerCase()==="character";continue;}
+        if(!inside)continue;
+        if(/^\s*(modular_body|separate_vehicle)\s*=/i.test(line))hasBody=true;
+        if(/^\s*has_wheels\s*=/i.test(line))hasWheels=true;
+      }
+      const missing=[];
+      if(!hasBody)missing.push("modular_body = true");
+      if(!hasWheels)missing.push("has_wheels = false");
+      if(missing.length){
+        const start=lines.findIndex(line=>/^\s*\[character\]\s*$/i.test(line));
+        lines.splice(start+1,0,...missing);
+        original=lines.join("\n");
+      }
+    }
     let active=false;
     const result=[];
     for(const line of original.replace(/\r\n/g,"\n").split("\n")){
