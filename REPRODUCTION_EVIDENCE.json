@@ -1,0 +1,76 @@
+{
+  "status": "SOURCE_CORRESPONDENCE_VERIFIED",
+  "verified_utc": "2026-10-21T21:43:48.899918+00:00",
+  "approved_sha256": "2082df57f1ed304e9351c092851a9948262665ea61dda8681218c749555e03ac",
+  "reconstructed_sha256": "1db406572f5ca46f05bab7bfc9e917dbf9101c198cec4b06d96820f4138cb94f",
+  "all_machine_code_and_game_data_exactly_equal": true,
+  "equal_raw_sections": [
+    ".bss",
+    ".data",
+    ".eh_frame",
+    ".idata",
+    ".rdata",
+    ".reloc",
+    ".rsrc",
+    ".text",
+    ".tls"
+  ],
+  "runtime_headers_and_directories_exactly_equal": true,
+  "only_non_debug_section_normalization": {
+    "section": ".edata",
+    "structure": "IMAGE_EXPORT_DIRECTORY",
+    "field": "TimeDateStamp",
+    "relative_field_offset": 4,
+    "field_bytes": 4,
+    "actual_changed_bytes": [
+      4,
+      5
+    ],
+    "original": 1792552616,
+    "candidate": 1792541673,
+    "original_utc": "2026-10-21T03:16:56+00:00",
+    "candidate_utc": "2026-10-21T00:14:33+00:00",
+    "original_export_to_coff_seconds": 1,
+    "candidate_equals_recorded_source_date_epoch": true,
+    "all_other_export_bytes_exactly_equal": true,
+    "definition_evidence": "MinGW winnt.h: IMAGE_EXPORT_DIRECTORY, DWORD Characteristics followed by DWORD TimeDateStamp"
+  },
+  "excluded_non_runtime_metadata": {
+    "coff_timestamp": [
+      1792552617,
+      1792541673
+    ],
+    "pe_checksum": [
+      26733939,
+      26731273
+    ],
+    "size_of_image": [
+      201134080,
+      201150464
+    ],
+    "number_of_symbols": [
+      45248,
+      45248
+    ],
+    "debug_directory": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ]
+  },
+  "candidate_source_unchanged": true,
+  "no_binary_was_modified": true,
+  "scope": "Corresponding program source verified by byte-for-byte code/data equality. Complete PE files differ in build/debug metadata; bit-identical EXE reproduction is not claimed.",
+  "approved_rc3_sha256": "b912d79ce22b6034d1ed68aef4483566f39a32267e9ea7a5a0b7b52c0465c45a",
+  "release_source_manifest_sha256": "a8733c86c9d626551e7f0e6e88ed23181eb7640e3def5c87aeb9e50b51006491",
+  "workflow_preserved": {
+    "commit": "b3fa43bd8d82cfaa985f5419db9867a405583a3c",
+    "git_blob": "13eab665e96d5b29ac653385b11995b66d952c6d",
+    "sha256": "6f8fc719629ef442b4dc75e19a52f9d176e3b91bcbd9eef9588b9ed4c2425d1c"
+  }
+}

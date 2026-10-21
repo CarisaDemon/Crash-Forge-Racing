@@ -48,6 +48,27 @@ void PushBuffer_Init(struct PushBuffer *pb, int id, int total)
 
 	if (total == 2)
 	{
+#if defined(CTR_NATIVE)
+		/* 16:9 2P: two tall camera viewports next to one another.
+		 * 4:3 remains the horizontal (above/below) retail layout.
+		 * Keep the 4-pixel split separator and standard player slots;
+		 * this automatically also covers 2P Battle. */
+		if (Platform_GetWideMode())
+		{
+			pb->rect.x=(id==0) ? 0 : 0x103;
+			pb->rect.y=0;
+			pb->rect.w=0xfd;
+			pb->rect.h=SIZEY_1P;
+			/* Taller-than-wide physical view: a balanced 0x90 lens
+			 * reduces perspective distortion versus the 4P 0x80
+			 * projection. The follow camera is pulled back separately. */
+			pb->distanceToScreen_PREV=0x90;
+			pb->distanceToScreen_CURR=0x90;
+			pb->aspectX=4;
+			pb->aspectY=3;
+			return;
+		}
+#endif
 		if (id == 0)
 		{
 			pb->rect.w = 0x200;
@@ -608,12 +629,13 @@ void PushBuffer_UpdateFrustum(struct PushBuffer *pb)
 	val_X = pb->rect.w;
 	val_X = val_X / 2;
 #if defined(CTR_NATIVE)
-	// Match the horizontal GTE projection scale (3/4 in 16:9). Expand
-	// the world-space frustum too, so geometry at the new sides survives
-	// BSP/frustum culling. Round outward; leave vertical FOV unchanged.
-	if (Platform_GetWideMode())
+	/* The projection changes with the selected physical aspect; world
+	 * frustum must match or the side geometry will be clipped away. */
 	{
-		val_X = (val_X * 4 + 2) / 3;
+		int aspectW=4,aspectH=3;
+		Platform_GetAspectRatioSize(Platform_GetAspectRatioMode(),
+			&aspectW,&aspectH);
+		val_X=(val_X*aspectW*3+aspectH*2)/(aspectH*4);
 	}
 #endif
 

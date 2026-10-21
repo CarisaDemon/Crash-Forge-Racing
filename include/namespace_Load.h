@@ -1,6 +1,13 @@
 #ifndef CTR_NATIVE_NAMESPACE_LOAD_H
 #define CTR_NATIVE_NAMESPACE_LOAD_H
 
+#if defined(CTR_NATIVE)
+/* The fourth human's ULTRA HI model lives alongside its retail MPK,
+ * without changing the fixed three-element PS1 driverModelExtras ABI. */
+struct Model *LOAD_NativeUltraFourthModel(void);
+struct Model *LOAD_NativeUltra2PAiModel(int index);
+#endif
+
 enum BigIndex
 {
 	// 1p, 2p, 4p, relic
@@ -342,7 +349,7 @@ enum LoadType
 struct LoadQueueSlot
 {
 	// 0x0
-	struct BigHeader *ptrBigfileCdPos_UNUSED;
+	struct BigHeader * P32 ptrBigfileCdPos_UNUSED;
 
 	// 0x4
 	u16 flags;
@@ -354,13 +361,13 @@ struct LoadQueueSlot
 	u32 subfileIndex;
 
 	// 0xC
-	void *ptrDestination;
+	void * P32 ptrDestination;
 
 	// 0x10
 	u32 size_UNUSED;
 
 	// 0x14
-	void (*callbackFuncPtr)(struct LoadQueueSlot *);
+	void (* P32 callbackFuncPtr)(struct LoadQueueSlot *);
 };
 
 #define LOAD_QUEUE_CALLBACK_SET_POINTER ((void (*)(struct LoadQueueSlot *)) - 2)

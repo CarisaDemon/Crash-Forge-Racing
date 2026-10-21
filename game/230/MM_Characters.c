@@ -1,5 +1,7 @@
 #include <common.h>
+#include <EngineSoundRegistry.h>
 #if defined(CTR_NATIVE)
+#include <NativeHangout.h>
 #include <NativeRacerVisual.h>
 #include <platform/native_gltf.h>
 #include <platform/native_obj.h>
@@ -124,6 +126,51 @@ struct MMCharacterNativeIcon
 };
 
 static struct MMCharacterNativeIcon *s_characterNativeIcons;
+
+struct MMHangoutCustomizationSnapshot
+{
+	b32 valid;
+	struct NativeRacerLoadout loadout;
+	int numPlyrNextGame;
+	u32 renderFlags;
+	RECT pushBufferRect;
+	SVec3 pushBufferPos;
+	SVec3 pushBufferRot;
+	int distanceToScreenPrev;
+	int distanceToScreenCurr;
+	int cameraMode;
+	MATRIX instMatrix;
+	struct Model *instModel;
+	u32 instFlags;
+	s16 instAnimFrame;
+	s16 instVertSplit;
+	u16 wheelSize;
+	struct PushBuffer *idppPushBuffer[4];
+	Vec3 posCurr;
+	Vec3 posPrev;
+	SVec3Slot rotCurr;
+	SVec3Slot rotPrev;
+	Vec3 velocity;
+	s16 speed;
+	s16 speedApprox;
+	s16 fireSpeed;
+	int xSpeed;
+	int ySpeed;
+	int zSpeed;
+	u8 kartState;
+	s16 wheelRotation;
+	Actions actionsFlagSet;
+	Actions actionsFlagSetPrevFrame;
+	s16 engineSoundVolumeState;
+	s16 engineSoundPitchState;
+	EngineSoundMode engineSoundMode;
+};
+
+static struct MMHangoutCustomizationSnapshot s_hangoutCustomizationSnapshot;
+static int s_hangoutPreviewEngineChoice = 0x7fffffff;
+static int s_hangoutPreviewEnginePack = 0x7fffffff;
+static int s_hangoutPreviewEngineClass = 0x7fffffff;
+static int s_hangoutPreviewEngineKart = 0x7fffffff;
 
 static struct MMCharacterNativeIcon *MM_Characters_RosterGetNativeIcon(int characterID)
 {
@@ -323,66 +370,87 @@ enum NativeLoadoutInputResult
 	NATIVE_LOADOUT_INPUT_READY,
 };
 
+/* Always show these retail engine sounds, including when zero mod packs exist.
+ * Keep this menu independent from PHYSICS and from the selected kart body. */
+enum { MM_CHARACTER_ENGINE_PRESET_COUNT = 6 };
+static const int s_characterEnginePresets[MM_CHARACTER_ENGINE_PRESET_COUNT] = {
+    ENGINE_SOUND_AUTO, ENGINE_SOUND_ACCEL, ENGINE_SOUND_SPEED,
+    ENGINE_SOUND_TURN, ENGINE_SOUND_BALANCED, ENGINE_SOUND_RETAIL
+};
+
+static const char *MM_Characters_EngineSoundName(int sound)
+{
+    switch (sound)
+    {
+    case ENGINE_SOUND_AUTO: return "KART ENGINE";
+    case ENGINE_SOUND_ACCEL: return "ACCEL";
+    case ENGINE_SOUND_SPEED: return "SPEED";
+    case ENGINE_SOUND_TURN: return "TURN";
+    case ENGINE_SOUND_BALANCED: return "BALANCED";
+    case ENGINE_SOUND_RETAIL: return "CHARACTER RETAIL";
+    default: return EngineSoundRegistry_GetName(sound);
+    }
+}
+
 static int MM_Characters_LoadoutFirstStage(void)
 {
 	if (RacerLoadout_IsAdventureLocked())
 		return RACER_SELECT_READY;
 
-	if (VehiclePartRegistry_GetCount(VEHICLE_PART_KART) > 0)
-		return RACER_SELECT_KART;
-
-	if (VehiclePartRegistry_GetCount(VEHICLE_PART_WHEELS) > 0)
-		return RACER_SELECT_WHEELS;
-
-	return RACER_SELECT_READY;
+    /* Character -> Physics -> Kart -> Kart Color -> Wheels -> Engine -> Ready.
+     * Keep physics independent from which body/kart/wheels were chosen. */
+    return RACER_SELECT_PHYSICS;
 }
 
 static int MM_Characters_LoadoutPreviousStage(int playerIndex, int stage)
 {
-	if (stage == RACER_SELECT_READY)
-	{
-		if (VehiclePartRegistry_GetCount(VEHICLE_PART_WHEELS) > 0)
-			return RACER_SELECT_WHEELS;
+    if (stage == RACER_SELECT_READY && !RacerLoadout_IsAdventureLocked())
+        return RACER_SELECT_ENGINE;
+    if (stage == RACER_SELECT_READY || stage == RACER_SELECT_ENGINE) {
+        if (VehiclePartRegistry_GetCount(VEHICLE_PART_WHEELS) > 0 &&
+            !VehiclePartRegistry_HidesWheels(
+                RacerLoadout_GetEffectiveKart(playerIndex)))
+            return RACER_SELECT_WHEELS;
         if (VehiclePartRegistry_GetColorCount(
                 RacerLoadout_GetEffectiveKart(playerIndex)) > 1)
             return RACER_SELECT_KART_COLOR;
         if (VehiclePartRegistry_GetCount(VEHICLE_PART_KART) > 0)
             return RACER_SELECT_KART;
     }
-
-    if (stage == RACER_SELECT_WHEELS)
-    {
+    if (stage == RACER_SELECT_WHEELS) {
         if (VehiclePartRegistry_GetColorCount(
                 RacerLoadout_GetEffectiveKart(playerIndex)) > 1)
             return RACER_SELECT_KART_COLOR;
         if (VehiclePartRegistry_GetCount(VEHICLE_PART_KART) > 0)
             return RACER_SELECT_KART;
     }
-
     if (stage == RACER_SELECT_KART_COLOR)
         return RACER_SELECT_KART;
-
-    return RACER_SELECT_CHARACTER;
+    if (stage == RACER_SELECT_PHYSICS)
+        return RACER_SELECT_CHARACTER;
+    return RACER_SELECT_PHYSICS;
 }
 
 static int MM_Characters_LoadoutNextStage(int playerIndex, int stage)
 {
-    if (stage == RACER_SELECT_KART)
-    {
+    if (stage == RACER_SELECT_PHYSICS) {
+        if (VehiclePartRegistry_GetCount(VEHICLE_PART_KART) > 0)
+            return RACER_SELECT_KART;
+        if (VehiclePartRegistry_GetCount(VEHICLE_PART_WHEELS) > 0)
+            return RACER_SELECT_WHEELS;
+    }
+    if (stage == RACER_SELECT_KART) {
         int kartID = RacerLoadout_GetEffectiveKart(playerIndex);
-        int availableColors = VehiclePartRegistry_GetColorCount(kartID);
-        Platform_Log("[KART SELECT] player=%d kart=%d colors=%d next=%s\n",
-                     playerIndex, kartID, availableColors,
-                     availableColors > 1 ? "COLOR" : "WHEELS/READY");
-        if (availableColors > 1)
+        if (VehiclePartRegistry_GetColorCount(kartID) > 1)
             return RACER_SELECT_KART_COLOR;
     }
-
-    if ((stage == RACER_SELECT_KART ||
-         stage == RACER_SELECT_KART_COLOR) &&
-        VehiclePartRegistry_GetCount(VEHICLE_PART_WHEELS) > 0)
+    if ((stage == RACER_SELECT_KART || stage == RACER_SELECT_KART_COLOR) &&
+        VehiclePartRegistry_GetCount(VEHICLE_PART_WHEELS) > 0 &&
+        !VehiclePartRegistry_HidesWheels(
+            RacerLoadout_GetEffectiveKart(playerIndex)))
         return RACER_SELECT_WHEELS;
-
+    if (stage != RACER_SELECT_ENGINE && !RacerLoadout_IsAdventureLocked())
+        return RACER_SELECT_ENGINE;
     return RACER_SELECT_READY;
 }
 
@@ -429,10 +497,91 @@ static int MM_Characters_LoadoutHandlePartInput(int playerIndex, u32 button)
 {
 	int stage = RacerLoadout_GetSelectionPart(playerIndex);
 
-    if (stage != RACER_SELECT_KART &&
+    if (stage != RACER_SELECT_PHYSICS &&
+        stage != RACER_SELECT_KART &&
         stage != RACER_SELECT_KART_COLOR &&
-        stage != RACER_SELECT_WHEELS)
+        stage != RACER_SELECT_WHEELS &&
+        stage != RACER_SELECT_ENGINE)
         return NATIVE_LOADOUT_INPUT_NONE;
+
+    if (stage == RACER_SELECT_PHYSICS)
+    {
+        int current=RacerLoadout_GetPhysicsClass(playerIndex);
+        if (button & BTN_LEFT)
+        {
+            current--;
+            if (current < RACER_PHYSICS_DEFAULT)current=RACER_PHYSICS_LAST;
+            RacerLoadout_SetPhysicsClass(playerIndex,current);
+            OtherFX_Play(0,1);
+        }
+        else if (button & BTN_RIGHT)
+        {
+            current++;
+            if (current > RACER_PHYSICS_LAST)current=RACER_PHYSICS_DEFAULT;
+            RacerLoadout_SetPhysicsClass(playerIndex,current);
+            OtherFX_Play(0,1);
+        }
+
+        if (button & MM_CHARACTER_SELECT_INPUT_CONFIRM)
+        {
+            const int nextStage=MM_Characters_LoadoutNextStage(playerIndex,stage);
+            RacerLoadout_SetSelectionPart(playerIndex,nextStage);
+            OtherFX_Play(1,1);
+            Platform_Log("[PHYSICS SELECT] player=%d class=%s character=%d\n",
+                playerIndex,
+                RacerLoadout_PhysicsName(RacerLoadout_GetPhysicsClass(playerIndex)),
+                RacerLoadout_GetCharacter(playerIndex));
+            return nextStage==RACER_SELECT_READY ?
+                   NATIVE_LOADOUT_INPUT_READY:NATIVE_LOADOUT_INPUT_ACTIVE;
+        }
+
+        if (button & MM_CHARACTER_SELECT_INPUT_BACK)
+        {
+            RacerLoadout_SetSelectionPart(playerIndex,RACER_SELECT_CHARACTER);
+            OtherFX_Play(2,1);
+        }
+        return NATIVE_LOADOUT_INPUT_ACTIVE;
+    }
+
+    if (stage == RACER_SELECT_ENGINE)
+    {
+        int current = RacerLoadout_GetEngineSound(playerIndex);
+        int packs = EngineSoundRegistry_GetCount();
+        int total = MM_CHARACTER_ENGINE_PRESET_COUNT + packs;
+        if (button & (BTN_LEFT | BTN_RIGHT))
+        {
+            int slot = 0;
+            int direction = (button & BTN_LEFT) ? -1 : 1;
+            for (int i = 0; i < MM_CHARACTER_ENGINE_PRESET_COUNT; ++i)
+                if (s_characterEnginePresets[i] == current)
+                    slot = i;
+            if (current >= 0 && current < packs)
+                slot = MM_CHARACTER_ENGINE_PRESET_COUNT + current;
+            slot = (slot + direction + total) % total;
+            RacerLoadout_SetEngineSound(playerIndex,
+                slot < MM_CHARACTER_ENGINE_PRESET_COUNT ?
+                    s_characterEnginePresets[slot] :
+                    slot - MM_CHARACTER_ENGINE_PRESET_COUNT);
+            OtherFX_Play(0, 1);
+        }
+        if (button & MM_CHARACTER_SELECT_INPUT_CONFIRM)
+        {
+            RacerLoadout_SetSelectionPart(playerIndex, RACER_SELECT_READY);
+            OtherFX_Play(1, 1);
+            Platform_Log("[ENGINE SELECT] player=%d choice=%d pack=%d retailClass=%d\n",
+                  playerIndex, RacerLoadout_GetEngineSound(playerIndex),
+                  RacerLoadout_GetEffectiveEngineSound(playerIndex),
+                  RacerLoadout_GetEffectiveEngineSoundClass(playerIndex));
+            return NATIVE_LOADOUT_INPUT_READY;
+        }
+        if (button & MM_CHARACTER_SELECT_INPUT_BACK)
+        {
+            RacerLoadout_SetSelectionPart(playerIndex,
+                    MM_Characters_LoadoutPreviousStage(playerIndex, stage));
+            OtherFX_Play(2, 1);
+        }
+        return NATIVE_LOADOUT_INPUT_ACTIVE;
+    }
 
     if (stage == RACER_SELECT_KART_COLOR)
     {
@@ -508,6 +657,8 @@ static b32 MM_Characters_LoadoutConfirmCharacter(int playerIndex, int characterI
 	int defaultKartID;
 
 	RacerLoadout_SetCharacter(playerIndex, characterID);
+    RacerLoadout_SetPhysicsClass(playerIndex,RACER_PHYSICS_DEFAULT);
+    RacerLoadout_SetEngineSound(playerIndex,ENGINE_SOUND_AUTO);
 
 	defaultKartSlug = CharacterRegistry_GetKartSlug(characterID);
 	defaultKartID = defaultKartSlug ?
@@ -585,6 +736,9 @@ static void MM_Characters_LoadoutDrawStatus(int playerIndex,
 {
 	char line[96];
 	int stage = RacerLoadout_GetSelectionPart(playerIndex);
+    /* Selectors must never overflow even the 3P/4P preview windows. */
+    const int maxTextWidth = D230.characterSelectWindowWidth > 50
+                            ? D230.characterSelectWindowWidth - 12 : 140;
 
 	if (stage == RACER_SELECT_CHARACTER)
 		return;
@@ -593,24 +747,90 @@ static void MM_Characters_LoadoutDrawStatus(int playerIndex,
 	{
 		snprintf(line, sizeof(line), "READY");
 	}
+    else if (stage == RACER_SELECT_PHYSICS)
+    {
+        const int choice=RacerLoadout_GetPhysicsClass(playerIndex);
+        const char *label=RacerLoadout_PhysicsName(choice);
+        if (maxNameChars<=10)
+        {
+            /* 3P/4P: leave adequate space inside compact character previews. */
+#if defined(CTR_CNK_PHYSICS_PREVIEW_QA)
+            if (choice == RACER_PHYSICS_CNK_PREVIEW)label="CNK";
+            else
+#endif
+            if (choice == RACER_PHYSICS_MAX)label="MAX";
+            else if (choice == RACER_PHYSICS_BALANCED)label="BAL";
+            else if (choice == RACER_PHYSICS_DEFAULT)label="AUTO";
+            else if (choice == RACER_PHYSICS_ACCEL)label="ACC";
+            else if (choice == RACER_PHYSICS_SPEED)label="SPD";
+            snprintf(line,sizeof(line),"%s < %s >",NativeLocalization_Translate("PHYS"),
+                      NativeLocalization_Translate(label));
+        }
+        else if (choice == RACER_PHYSICS_DEFAULT)
+        {
+            int base=CharacterRegistry_GetEngineClass(
+                    RacerLoadout_GetCharacter(playerIndex));
+            const char *baseName = base == BALANCED
+                ? "BAL" : RacerLoadout_PhysicsName(base);
+            snprintf(line,sizeof(line),"%s < %s:%s >",NativeLocalization_Translate("PHYS"),
+                      NativeLocalization_Translate("DEFAULT"),
+                      NativeLocalization_Translate(baseName));
+        }
+        else
+            snprintf(line,sizeof(line),"%s < %s >",NativeLocalization_Translate("PHYSICS"),
+                      NativeLocalization_Translate(label));
+    }
     else if (stage == RACER_SELECT_KART_COLOR)
     {
         int kartID = RacerLoadout_GetEffectiveKart(playerIndex);
         const char *name = VehiclePartRegistry_GetColorName(
             kartID, RacerLoadout_GetKartColor(playerIndex));
-        snprintf(line, sizeof(line), "COLOR  < %.*s >",
-                 maxNameChars, name ? name : "DEFAULT");
+        int visibleChars=maxNameChars;
+        const char *displayName=name?name:"DEFAULT";
+        do
+        {
+            snprintf(line, sizeof(line), "COLOR < %.*s >",
+                     visibleChars, displayName);
+            if (visibleChars <= 2 ||
+                DecalFont_GetLineWidth(line,FONT_SMALL)*80 <= maxTextWidth*100)
+                break;
+            --visibleChars;
+        } while (1);
+    }
+    else if (stage == RACER_SELECT_ENGINE)
+    {
+        int choice = RacerLoadout_GetEngineSound(playerIndex);
+        const char *name = MM_Characters_EngineSoundName(choice);
+        int visibleChars = maxNameChars;
+        do {
+            snprintf(line, sizeof(line), "ENGINE < %.*s >", visibleChars, name);
+            if (visibleChars <= 2 ||
+                DecalFont_GetLineWidth(line,FONT_SMALL)*80 <= maxTextWidth*100)
+                break;
+            --visibleChars;
+        } while (1);
     }
     else
     {
         const char *kind = stage == RACER_SELECT_KART ? "KART" : "WHEELS";
         const char *name = MM_Characters_LoadoutPartName(playerIndex, stage);
-        snprintf(line, sizeof(line), "%s  < %.*s >",
-                 kind, maxNameChars, name ? name : "ORIGINAL");
+        int visibleChars=maxNameChars;
+        const char *displayName=name?name:"ORIGINAL";
+        do
+        {
+            snprintf(line, sizeof(line), "%s < %.*s >",
+                      NativeLocalization_Translate(kind), visibleChars, displayName);
+            if (visibleChars <= 2 ||
+                DecalFont_GetLineWidth(line,FONT_SMALL)*80 <= maxTextWidth*100)
+                break;
+            --visibleChars;
+        } while (1);
     }
 
-	DecalFont_DrawLine(line, centerX, y,
-		FONT_SMALL, JUSTIFY_CENTER | WHITE);
+    /* Small orange (CTR font) selectors: physics/kart/color/wheels/engine/ready.
+     * Only this caption is scaled; names and the rest of the menu are intact. */
+    DecalFont_DrawLineNativeScaled(line, centerX, y + 1,
+                                  FONT_SMALL, JUSTIFY_CENTER | ORANGE, 80);
 }
 
 static b32 MM_Characters_RosterCharacterUnlocked(int characterID)
@@ -901,6 +1121,413 @@ static void MM_Characters_RosterRestoreSelection(void)
 	}
 	MM_Characters_RosterClampCursor();
 }
+
+
+static void MM_Characters_HangoutResetEnginePreview(void)
+{
+	s_hangoutPreviewEngineChoice = 0x7fffffff;
+	s_hangoutPreviewEnginePack = 0x7fffffff;
+	s_hangoutPreviewEngineClass = 0x7fffffff;
+	s_hangoutPreviewEngineKart = 0x7fffffff;
+}
+
+static void MM_Characters_HangoutFreezeDriver(void)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	struct Driver *d;
+
+	if (!s_hangoutCustomizationSnapshot.valid ||
+	    !NativeHangout_IsCustomizationOpen() ||
+	    gGT == NULL ||
+	    gGT->drivers[0] == NULL)
+		return;
+
+	d = gGT->drivers[0];
+
+	/* The world keeps running in Hangout. Pin only the local racer to the exact
+	 * pose it had when Customization opened, while the same Instance is borrowed
+	 * by the menu renderer for the rotating preview. */
+	d->posCurr = s_hangoutCustomizationSnapshot.posCurr;
+	d->posPrev = s_hangoutCustomizationSnapshot.posPrev;
+	d->rotCurr = s_hangoutCustomizationSnapshot.rotCurr;
+	d->rotPrev = s_hangoutCustomizationSnapshot.rotPrev;
+	memset(&d->velocity, 0, sizeof(d->velocity));
+	d->speed = 0;
+	d->speedApprox = 0;
+	d->fireSpeed = 0;
+	d->xSpeed = 0;
+	d->ySpeed = 0;
+	d->zSpeed = 0;
+	d->kartState = KS_NORMAL;
+	d->wheelRotation = 0;
+	/* EngineSound_Player treats an airborne zero-speed kart as free-revving.
+	 * Mark this temporary preview state grounded so it stays at true idle. */
+	d->actionsFlagSetPrevFrame |= ACTION_TOUCH_GROUND;
+}
+
+static void MM_Characters_HangoutStopRetailEngines(struct Driver *d)
+{
+	int engineClass;
+
+	if (d == NULL)
+		return;
+
+	for (engineClass = 0; engineClass < NUM_CLASSES; engineClass++)
+		EngineAudio_Stop((engineClass * 4) + d->driverID);
+}
+
+static void MM_Characters_HangoutUpdateEnginePreview(void)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	struct Driver *d;
+	int choice;
+	int pack;
+	int engineClass;
+	int kart;
+
+	if (!s_hangoutCustomizationSnapshot.valid ||
+	    !NativeHangout_IsCustomizationOpen() ||
+	    gGT == NULL ||
+	    gGT->drivers[0] == NULL)
+		return;
+
+	if (RacerLoadout_GetSelectionPart(0) != RACER_SELECT_ENGINE)
+	{
+		MM_Characters_HangoutResetEnginePreview();
+		return;
+	}
+
+	d = gGT->drivers[0];
+	choice = RacerLoadout_GetEngineSound(0);
+	pack = RacerLoadout_GetEffectiveEngineSound(0);
+	engineClass = RacerLoadout_GetEffectiveEngineSoundClass(0);
+	kart = RacerLoadout_GetEffectiveKart(0);
+
+	if (choice == s_hangoutPreviewEngineChoice &&
+	    pack == s_hangoutPreviewEnginePack &&
+	    engineClass == s_hangoutPreviewEngineClass &&
+	    kart == s_hangoutPreviewEngineKart)
+		return;
+
+	MM_Characters_HangoutStopRetailEngines(d);
+	VehBirth_EngineAudio_AllPlayers();
+
+	/* Start every newly highlighted engine from stationary RPM. The ordinary
+	 * player-audio tick keeps updating it after this one immediate preview. */
+	d->engineSoundMode = ENGINE_SOUND_DYNAMIC;
+	d->engineSoundVolumeState = 0;
+	d->engineSoundPitchState = 0;
+	EngineSound_Player(d);
+
+	s_hangoutPreviewEngineChoice = choice;
+	s_hangoutPreviewEnginePack = pack;
+	s_hangoutPreviewEngineClass = engineClass;
+	s_hangoutPreviewEngineKart = kart;
+
+	Platform_Log(
+		"[HANGOUT CUSTOMIZATION] idle engine preview choice=%d pack=%d class=%d kart=%d\n",
+		choice, pack, engineClass, kart);
+}
+
+static void MM_Characters_HangoutPreviewTick(void)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	struct Driver *d;
+
+	MM_Characters_HangoutFreezeDriver();
+
+	if (!s_hangoutCustomizationSnapshot.valid ||
+	    !NativeHangout_IsCustomizationOpen() ||
+	    gGT == NULL ||
+	    gGT->drivers[0] == NULL)
+		return;
+
+	d = gGT->drivers[0];
+
+	/* This calls the exact gameplay exhaust path, including mod exhaust mounts. */
+	VehEmitter_PreviewExhaust(d);
+	MM_Characters_HangoutUpdateEnginePreview();
+}
+
+static void MM_Characters_HangoutRestoreLoadout(void)
+{
+	const struct NativeRacerLoadout *saved =
+		&s_hangoutCustomizationSnapshot.loadout;
+
+	RacerLoadout_SetCharacter(0, saved->characterID);
+	RacerLoadout_SetKart(0, saved->kartID);
+	RacerLoadout_SetKartColor(0, saved->kartColor);
+	RacerLoadout_SetWheels(0, saved->wheelID);
+	RacerLoadout_SetPhysicsClass(0, saved->physicsClass);
+	RacerLoadout_SetEngineSound(0, saved->engineSoundID);
+	RacerLoadout_SetSelectionPart(0, saved->selectionPart);
+}
+
+void MM_Characters_FinishHangoutCustomization(int apply)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	struct Driver *d;
+	struct Instance *inst;
+	struct InstDrawPerPlayer *idpp;
+	struct Model *model;
+	int i;
+
+	if (!s_hangoutCustomizationSnapshot.valid ||
+	    gGT == NULL ||
+	    gGT->drivers[0] == NULL ||
+	    gGT->drivers[0]->instSelf == NULL)
+	{
+		NativeHangout_SetCustomizationOpen(0);
+		NativeHangout_SetMenuOpen(0);
+		return;
+	}
+
+	d = gGT->drivers[0];
+	inst = d->instSelf;
+
+	/* Stop the selector immediately before restoring any live-world state.
+	 * RECTMENU_Hide() alone only marks NEEDS_TO_CLOSE; RECTMENU_ProcessState()
+	 * would still run MM_Characters_MenuProc() once more later this frame and
+	 * overwrite the restored Hangout viewport/camera with preview values. */
+	if (sdata->ptrActiveMenu == &D230.menuCharacterSelect)
+	{
+		RECTMENU_Hide(&D230.menuCharacterSelect);
+		sdata->ptrActiveMenu = NULL;
+	}
+	sdata->ptrDesiredMenu = NULL;
+
+	if (!apply)
+		MM_Characters_HangoutRestoreLoadout();
+	else
+		RacerLoadout_SetSelectionPart(0, RACER_SELECT_CHARACTER);
+
+	/* Recalculate the live driver's physics constants from the final selection
+	 * without respawning or reloading N. Sanity Beach. */
+	VehBirth_SetConsts(d);
+
+	gGT->numPlyrNextGame =
+		(u8)s_hangoutCustomizationSnapshot.numPlyrNextGame;
+	gGT->renderFlags = s_hangoutCustomizationSnapshot.renderFlags;
+
+	gGT->pushBuffer[0].rect = s_hangoutCustomizationSnapshot.pushBufferRect;
+	gGT->pushBuffer[0].pos = s_hangoutCustomizationSnapshot.pushBufferPos;
+	gGT->pushBuffer[0].rot = s_hangoutCustomizationSnapshot.pushBufferRot;
+	gGT->pushBuffer[0].distanceToScreen_PREV =
+		s_hangoutCustomizationSnapshot.distanceToScreenPrev;
+	gGT->pushBuffer[0].distanceToScreen_CURR =
+		s_hangoutCustomizationSnapshot.distanceToScreenCurr;
+	gGT->cameraDC[0].cameraMode =
+		s_hangoutCustomizationSnapshot.cameraMode;
+
+	inst->matrix = s_hangoutCustomizationSnapshot.instMatrix;
+	inst->flags = s_hangoutCustomizationSnapshot.instFlags;
+	inst->animFrame = s_hangoutCustomizationSnapshot.instAnimFrame;
+	inst->vertSplit = s_hangoutCustomizationSnapshot.instVertSplit;
+
+	idpp = INST_GETIDPP(inst);
+	for (i = 0; i < 4; i++)
+		idpp[i].pushBuffer =
+			s_hangoutCustomizationSnapshot.idppPushBuffer[i];
+
+	if (apply)
+	{
+		model = NativeRacerVisual_ResolveModel(data.characterIDs[0]);
+		inst->model = model;
+		if ((NativeObj_GetMesh(model) != NULL) &&
+		    !CharacterRegistry_IsModularBody(data.characterIDs[0]) &&
+		    !CharacterRegistry_HasWheels(data.characterIDs[0]))
+			d->wheelSize = 0;
+		else
+			d->wheelSize = 0xccc;
+	}
+	else
+	{
+		inst->model = s_hangoutCustomizationSnapshot.instModel;
+		d->wheelSize = s_hangoutCustomizationSnapshot.wheelSize;
+	}
+
+	/* Return the racer to the exact world state it had on entry. No distance is
+	 * gained while browsing, but pre-existing momentum resumes naturally. */
+	d->posCurr = s_hangoutCustomizationSnapshot.posCurr;
+	d->posPrev = s_hangoutCustomizationSnapshot.posPrev;
+	d->rotCurr = s_hangoutCustomizationSnapshot.rotCurr;
+	d->rotPrev = s_hangoutCustomizationSnapshot.rotPrev;
+	d->velocity = s_hangoutCustomizationSnapshot.velocity;
+	d->speed = s_hangoutCustomizationSnapshot.speed;
+	d->speedApprox = s_hangoutCustomizationSnapshot.speedApprox;
+	d->fireSpeed = s_hangoutCustomizationSnapshot.fireSpeed;
+	d->xSpeed = s_hangoutCustomizationSnapshot.xSpeed;
+	d->ySpeed = s_hangoutCustomizationSnapshot.ySpeed;
+	d->zSpeed = s_hangoutCustomizationSnapshot.zSpeed;
+	d->kartState = s_hangoutCustomizationSnapshot.kartState;
+	d->wheelRotation = s_hangoutCustomizationSnapshot.wheelRotation;
+	d->actionsFlagSet = s_hangoutCustomizationSnapshot.actionsFlagSet;
+	d->actionsFlagSetPrevFrame =
+		s_hangoutCustomizationSnapshot.actionsFlagSetPrevFrame;
+
+	if (apply)
+	{
+		d->engineSoundMode = ENGINE_SOUND_DYNAMIC;
+		d->engineSoundVolumeState = 0;
+		d->engineSoundPitchState = 0;
+	}
+	else
+	{
+		d->engineSoundMode =
+			s_hangoutCustomizationSnapshot.engineSoundMode;
+		d->engineSoundVolumeState =
+			s_hangoutCustomizationSnapshot.engineSoundVolumeState;
+		d->engineSoundPitchState =
+			s_hangoutCustomizationSnapshot.engineSoundPitchState;
+	}
+
+	/* Drop whichever preview channel was active and bind the final selection. */
+	MM_Characters_HangoutStopRetailEngines(d);
+	VehBirth_EngineAudio_AllPlayers();
+
+	sdata->characterSelectFlags = 0;
+	RECTMENU_ClearInput();
+	gGT->cooldownFromUnpauseUntilPause = 5;
+
+	NativeHangout_SetCustomizationOpen(0);
+	NativeHangout_SetMenuOpen(0);
+
+	/* A player who was already spawned gets the short customization-complete
+	 * cue. If customization is being used to reconnect a disconnected player,
+	 * skip magtran2 so the spawn/join cue (gatwarp2/gatwarp3) remains the only
+	 * connection sound. */
+	if (apply && !NativeHangout_IsPlayerDisconnected())
+		NativeHangout_PlayCustomizationDoneSfx();
+
+	NativeHangout_FinishDisconnectedCustomization(apply);
+
+	Platform_Log(
+		"[HANGOUT CUSTOMIZATION] %s character=%d kart=%d wheels=%d physics=%d engine=%d\n",
+		apply ? "apply" : "cancel",
+		data.characterIDs[0],
+		RacerLoadout_GetEffectiveKart(0),
+		RacerLoadout_GetEffectiveWheels(0),
+		RacerLoadout_GetPhysicsClass(0),
+		RacerLoadout_GetEngineSound(0));
+
+	memset(&s_hangoutCustomizationSnapshot, 0,
+	       sizeof(s_hangoutCustomizationSnapshot));
+	MM_Characters_HangoutResetEnginePreview();
+}
+
+void MM_Characters_BeginHangoutCustomization(void)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	struct Driver *d;
+	struct Instance *inst;
+	struct InstDrawPerPlayer *idpp;
+	const struct NativeRacerLoadout *loadout;
+	int i;
+
+	if (!NativeHangout_IsActive() ||
+	    NativeHangout_IsCustomizationOpen() ||
+	    gGT == NULL ||
+	    gGT->drivers[0] == NULL ||
+	    gGT->drivers[0]->instSelf == NULL)
+		return;
+
+	d = gGT->drivers[0];
+	inst = d->instSelf;
+	loadout = RacerLoadout_Get(0);
+	if (loadout == NULL)
+		return;
+
+	NativeHangout_PrepareDisconnectedCustomization();
+
+	memset(&s_hangoutCustomizationSnapshot, 0,
+	       sizeof(s_hangoutCustomizationSnapshot));
+	s_hangoutCustomizationSnapshot.valid = 1;
+	s_hangoutCustomizationSnapshot.loadout = *loadout;
+	s_hangoutCustomizationSnapshot.numPlyrNextGame = gGT->numPlyrNextGame;
+	s_hangoutCustomizationSnapshot.renderFlags = gGT->renderFlags;
+	s_hangoutCustomizationSnapshot.pushBufferRect = gGT->pushBuffer[0].rect;
+	s_hangoutCustomizationSnapshot.pushBufferPos = gGT->pushBuffer[0].pos;
+	s_hangoutCustomizationSnapshot.pushBufferRot = gGT->pushBuffer[0].rot;
+	s_hangoutCustomizationSnapshot.distanceToScreenPrev =
+		gGT->pushBuffer[0].distanceToScreen_PREV;
+	s_hangoutCustomizationSnapshot.distanceToScreenCurr =
+		gGT->pushBuffer[0].distanceToScreen_CURR;
+	s_hangoutCustomizationSnapshot.cameraMode = gGT->cameraDC[0].cameraMode;
+	s_hangoutCustomizationSnapshot.instMatrix = inst->matrix;
+	s_hangoutCustomizationSnapshot.instModel = inst->model;
+	s_hangoutCustomizationSnapshot.instFlags = inst->flags;
+	s_hangoutCustomizationSnapshot.instAnimFrame = inst->animFrame;
+	s_hangoutCustomizationSnapshot.instVertSplit = inst->vertSplit;
+	s_hangoutCustomizationSnapshot.wheelSize = d->wheelSize;
+
+	idpp = INST_GETIDPP(inst);
+	for (i = 0; i < 4; i++)
+		s_hangoutCustomizationSnapshot.idppPushBuffer[i] =
+			idpp[i].pushBuffer;
+
+	s_hangoutCustomizationSnapshot.posCurr = d->posCurr;
+	s_hangoutCustomizationSnapshot.posPrev = d->posPrev;
+	s_hangoutCustomizationSnapshot.rotCurr = d->rotCurr;
+	s_hangoutCustomizationSnapshot.rotPrev = d->rotPrev;
+	s_hangoutCustomizationSnapshot.velocity = d->velocity;
+	s_hangoutCustomizationSnapshot.speed = d->speed;
+	s_hangoutCustomizationSnapshot.speedApprox = d->speedApprox;
+	s_hangoutCustomizationSnapshot.fireSpeed = d->fireSpeed;
+	s_hangoutCustomizationSnapshot.xSpeed = d->xSpeed;
+	s_hangoutCustomizationSnapshot.ySpeed = d->ySpeed;
+	s_hangoutCustomizationSnapshot.zSpeed = d->zSpeed;
+	s_hangoutCustomizationSnapshot.kartState = d->kartState;
+	s_hangoutCustomizationSnapshot.wheelRotation = d->wheelRotation;
+	s_hangoutCustomizationSnapshot.actionsFlagSet = d->actionsFlagSet;
+	s_hangoutCustomizationSnapshot.actionsFlagSetPrevFrame =
+		d->actionsFlagSetPrevFrame;
+	s_hangoutCustomizationSnapshot.engineSoundMode = d->engineSoundMode;
+	s_hangoutCustomizationSnapshot.engineSoundVolumeState =
+		d->engineSoundVolumeState;
+	s_hangoutCustomizationSnapshot.engineSoundPitchState =
+		d->engineSoundPitchState;
+
+	VehiclePartRegistry_Init();
+	gGT->numPlyrNextGame = 1;
+	sdata->characterSelectFlags = 0;
+	D230.characterSelectTransitionFrame = MM_CHARACTER_SELECT_TRANSITION_FRAMES;
+	D230.characterSelectMenuState = ENTERING_MENU;
+	D230.characterSelectExitsForward = 0;
+
+	RacerLoadout_SetSelectionPart(0, RACER_SELECT_CHARACTER);
+	MM_Characters_SetMenuLayout();
+	MM_Characters_RosterRestoreSelection();
+
+	D230.characterSelectPlayerState.currentCharacterID[0] =
+		data.characterIDs[0];
+	D230.characterSelectPlayerState.desiredCharacterID[0] =
+		data.characterIDs[0];
+	D230.characterSelectModelMoveTimer[0] = 0;
+	D230.characterSelectPlayerState.angle[0] =
+		MM_CHARACTER_SELECT_ANGLE_OFFSET;
+
+	MM_Characters_HangoutResetEnginePreview();
+	NativeHangout_SetCustomizationOpen(1);
+	RECTMENU_ClearInput();
+	sdata->buttonTapPerPlayer[0] = 0;
+
+	/* This path comes from an already-closed Hangout pause menu. Retail direct
+	 * character-select jumps activate the menu immediately rather than routing
+	 * through ptrDesiredMenu, whose promotion only runs when another menu is
+	 * already active. */
+	sdata->ptrDesiredMenu = NULL;
+	RECTMENU_Show(&D230.menuCharacterSelect);
+	D230.menuCharacterSelect.state &= ~ONLY_DRAW_TITLE;
+
+	Platform_Log(
+		"[HANGOUT CUSTOMIZATION] open character=%d kart=%d wheels=%d physics=%d engine=%d\n",
+		data.characterIDs[0],
+		RacerLoadout_GetEffectiveKart(0),
+		RacerLoadout_GetEffectiveWheels(0),
+		RacerLoadout_GetPhysicsClass(0),
+		RacerLoadout_GetEngineSound(0));
+}
+
 static void MM_Characters_Roster2PRestoreSelection(void)
 {
 	int firstVisibleIndex =
@@ -1710,9 +2337,15 @@ static void MM_Characters_RosterMenuProc(
 {
 	u32 button = sdata->buttonTapPerPlayer[0];
 	b32 playerSelected = (sdata->characterSelectFlags & 1) != 0;
+#if defined(CTR_NATIVE)
+	b32 hangoutTransition = NativeHangout_IsCustomizationTransitionActive();
+	if (hangoutTransition)
+		button = 0;
+#endif
 
 #if defined(CTR_NATIVE)
-	if ((D230.characterSelectMenuState == IN_MENU) &&
+	if (!hangoutTransition &&
+	    (D230.characterSelectMenuState == IN_MENU) &&
 		!playerSelected &&
 		(RacerLoadout_GetSelectionPart(0) == RACER_SELECT_CHARACTER))
 	{
@@ -1790,6 +2423,10 @@ static void MM_Characters_RosterMenuProc(
 
 	if (D230.characterSelectMenuState == IN_MENU)
 	{
+#if defined(CTR_NATIVE)
+		if (hangoutTransition)
+			goto hangout_customization_draw_only;
+#endif
 		if (!playerSelected)
 		{
 			int loadoutResult =
@@ -1798,8 +2435,15 @@ static void MM_Characters_RosterMenuProc(
 			if (loadoutResult == NATIVE_LOADOUT_INPUT_READY)
 			{
 				sdata->characterSelectFlags |= 1;
-				D230.characterSelectExitsForward = 1;
-				D230.characterSelectMenuState = EXITING_MENU;
+#if defined(CTR_NATIVE)
+				if (NativeHangout_IsCustomizationOpen())
+					NativeHangout_RequestCustomizationExitTransition(1);
+				else
+#endif
+				{
+					D230.characterSelectExitsForward = 1;
+					D230.characterSelectMenuState = EXITING_MENU;
+				}
 			}
 			else if (loadoutResult == NATIVE_LOADOUT_INPUT_NONE)
 			{
@@ -1824,15 +2468,29 @@ static void MM_Characters_RosterMenuProc(
 					if (ready)
 					{
 						sdata->characterSelectFlags |= 1;
-						D230.characterSelectExitsForward = 1;
-						D230.characterSelectMenuState = EXITING_MENU;
+#if defined(CTR_NATIVE)
+						if (NativeHangout_IsCustomizationOpen())
+							NativeHangout_RequestCustomizationExitTransition(1);
+						else
+#endif
+						{
+							D230.characterSelectExitsForward = 1;
+							D230.characterSelectMenuState = EXITING_MENU;
+						}
 					}
 				}
 
 				if ((button & MM_CHARACTER_SELECT_INPUT_BACK) != 0)
 				{
-					D230.characterSelectExitsForward = 0;
-					D230.characterSelectMenuState = EXITING_MENU;
+#if defined(CTR_NATIVE)
+					if (NativeHangout_IsCustomizationOpen())
+						NativeHangout_RequestCustomizationExitTransition(0);
+					else
+#endif
+					{
+						D230.characterSelectExitsForward = 0;
+						D230.characterSelectMenuState = EXITING_MENU;
+					}
 					OtherFX_Play(2, 1);
 				}
 			}
@@ -1845,6 +2503,9 @@ static void MM_Characters_RosterMenuProc(
 		}
 	}
 
+#if defined(CTR_NATIVE)
+hangout_customization_draw_only:
+#endif
 	sdata->buttonTapPerPlayer[0] = 0;
 
 	int pageCharacterCount =
@@ -3476,6 +4137,15 @@ void MM_Characters_MenuProc(struct RectMenu *unused)
 		// if more than 12 frames
 		if (D230.characterSelectTransitionFrame > MM_CHARACTER_SELECT_TRANSITION_FRAMES)
 		{
+#if defined(CTR_NATIVE)
+			if (NativeHangout_IsCustomizationOpen())
+			{
+				NativeHangout_RequestCustomizationExitTransition(
+					D230.characterSelectExitsForward != 0);
+				return;
+			}
+#endif
+
 			// Make a backup of the characters
 			// you selected in character selection screen
 			MM_Characters_BackupIDs();
@@ -3509,6 +4179,8 @@ void MM_Characters_MenuProc(struct RectMenu *unused)
 	if (gGT->numPlyrNextGame == 1)
 	{
 		MM_Characters_RosterMenuProc(gGT, ot);
+		if (NativeHangout_IsCustomizationOpen())
+			MM_Characters_HangoutPreviewTick();
 		return;
 	}
 	else if (gGT->numPlyrNextGame == 2)

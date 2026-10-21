@@ -8,7 +8,7 @@ void LevInstDef_UnPack(struct mesh_info *ptr_mesh_info)
 	int numQuadBlock;
 	struct QuadBlock *ptrQuadBlockArray;
 	struct QuadBlock *qbCurr;
-	struct InstDef **visInstSrc;
+	struct InstDef * P32 *visInstSrc;
 	struct Level *level1;
 
 	numQuadBlock = ptr_mesh_info->numQuadBlock;
@@ -22,7 +22,7 @@ void LevInstDef_UnPack(struct mesh_info *ptr_mesh_info)
 		if ((qbCurr->pvs != 0) && (qbCurr->pvs->visInstSrc != 0))
 		{
 			// loop through all instance pointers visible on quadblock
-			for (visInstSrc = (struct InstDef **)qbCurr->pvs->visInstSrc; visInstSrc[0] != NULL; visInstSrc++)
+			for (visInstSrc = (struct InstDef * P32 *)qbCurr->pvs->visInstSrc; visInstSrc[0] != NULL; visInstSrc++)
 			{
 				//ND BUG: This operation is not idempotent. The outer for loop means we will do this operation multiple times
 				//on the same pointer, so we keep switching it from an InstDef pointer to an Instance pointer and back again.
@@ -55,7 +55,7 @@ void LevInstDef_RePack(struct mesh_info *ptr_mesh_info, b32 boolAdvHub)
 	int numQuadBlock;
 	struct QuadBlock *ptrQuadBlockArray;
 	struct QuadBlock *qbCurr;
-	struct Instance **visInstSrc;
+	struct Instance * P32 *visInstSrc;
 	struct Level *level1;
 	struct Thread *th;
 
@@ -82,7 +82,7 @@ void LevInstDef_RePack(struct mesh_info *ptr_mesh_info, b32 boolAdvHub)
 	if (level1->ptrInstDefPtrArray != 0)
 	{
 		// loop through all instDef pointers in the LEV
-		for (visInstSrc = (struct Instance **)level1->ptrInstDefPtrArray; visInstSrc[0] != NULL; visInstSrc++)
+		for (visInstSrc = (struct Instance * P32 *)level1->ptrInstDefPtrArray; visInstSrc[0] != NULL; visInstSrc++)
 		{
 			struct Instance *inst = visInstSrc[0];
 			struct InstDef *instDef = inst->instDef;

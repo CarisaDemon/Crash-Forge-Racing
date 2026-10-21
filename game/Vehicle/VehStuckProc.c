@@ -1,5 +1,6 @@
 #include <common.h>
 #if defined(CTR_NATIVE)
+#include <NativeHangout.h>
 #include <platform/native_obj.h>
 #endif
 
@@ -1882,8 +1883,11 @@ void VehStuckProc_Warp_Init(struct Thread *th, struct Driver *d)
 	d->KartStates.Warp.heightOffset = 0;
 	d->KartStates.Warp.quadHeight = d->quadBlockHeight;
 
-	// Warp sound?
-	OtherFX_Play(VEH_WARP_SOUND_ID, 1);
+	// Retail warp SFX is replaced by the synchronized Hangout online warp cue.
+#if defined(CTR_NATIVE)
+	if (!NativeHangout_ShouldSuppressRetailWarpSfx())
+#endif
+		OtherFX_Play(VEH_WARP_SOUND_ID, 1);
 
 	OtherFX_Stop1((int)d->driverAudioPtrs[1]);
 	d->driverAudioPtrs[1] = 0;
@@ -1894,9 +1898,13 @@ void VehStuckProc_Warp_Init(struct Thread *th, struct Driver *d)
 
 	u8 playerID = d->driverID;
 
-	int engine = CharacterRegistry_GetEngineClass(data.characterIDs[playerID]);
+	/* Stop the selected retail sound, not the independent physics class. */
+	int engine = RacerLoadout_GetEffectiveEngineSoundClass(playerID);
 
 	EngineAudio_Stop((engine * VEH_WARP_ENGINE_AUDIO_STRIDE) + playerID);
+#ifdef CTR_NATIVE
+	NativeAudio_EngineStop(playerID);
+#endif
 
 	// CameraDC, freecam mode
 	sdata->gGT->cameraDC[playerID].cameraMode = CAMERA_MODE_FREECAM;

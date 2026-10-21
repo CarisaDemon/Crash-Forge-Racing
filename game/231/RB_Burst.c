@@ -238,7 +238,7 @@ void RB_Burst_CollLevInst(struct ScratchpadStruct *sps, void *hitObject)
 			return;
 		}
 
-		meta->LInC(inst, sps->Union.ThBuckColl.thread, sps);
+		FN32(meta->LInC)(inst, sps->Union.ThBuckColl.thread, sps);
 		return;
 	}
 

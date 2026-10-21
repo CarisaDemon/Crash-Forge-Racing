@@ -4,6 +4,43 @@
 #include <RacerLoadout.h>
 #include <platform/native_gltf.h>
 #include <platform/native_obj.h>
+#include <platform/native_custom_tracks.h>
+#endif
+
+#if defined(CTR_NATIVE)
+static s16 GhostReplay_NativeEffectiveLevelID(struct GameTracker *gGT)
+{
+	int customLevelID = NativeCustomTracks_SelectedOriginalLevelID();
+	return (customLevelID >= 0) ? (s16)customLevelID : gGT->levelID;
+}
+
+static int GhostReplay_NativeRangeInMempack(const void *ptr, size_t bytes)
+{
+	const struct PlatformMempackArena *arena = Platform_GetMempackArena();
+	const u8 *p = (const u8 *)ptr;
+	const u8 *base;
+	const u8 *end;
+
+	if (!arena || !arena->base || !arena->endOfMemory || !ptr)
+		return 0;
+	base = (const u8 *)arena->base;
+	end = (const u8 *)arena->endOfMemory;
+	if (p < base || p > end)
+		return 0;
+	return bytes <= (size_t)(end - p);
+}
+
+static int GhostReplay_NativeCustomHeaderValid(const struct GhostHeader *gh)
+{
+	int size;
+	if (!GhostReplay_NativeRangeInMempack(gh, sizeof(*gh)))
+		return 0;
+	size = gh->size;
+	if (size < 0 || size > GHOST_RECORD_BUFFER_SIZE - (int)sizeof(*gh))
+		return 0;
+	return GhostReplay_NativeRangeInMempack(
+		gh, sizeof(*gh) + (size_t)size);
+}
 #endif
 
 internal s16 Ghost_LerpRot12(s16 curr, s16 next, u16 t)
@@ -370,10 +407,49 @@ void GhostReplay_Init1(void)
 		}
 		else
 		{
-			s32 timeTrialFlags = sdata->gameProgress.highScoreTracks[gGT->levelID].timeTrialFlags;
-			void **pointers = ST1_GETPOINTERS(gGT->level1->ptrSpawnType1);
+#if defined(CTR_NATIVE)
+			s16 ghostLevelID = GhostReplay_NativeEffectiveLevelID(gGT);
+#else
+			s16 ghostLevelID = gGT->levelID;
+#endif
+			s32 timeTrialFlags = sdata->gameProgress.highScoreTracks[ghostLevelID].timeTrialFlags;
+			void **pointers = NULL;
 
-			gh = ((timeTrialFlags & TT_NTROPY_BEATEN) != 0) ? pointers[ST1_NOXIDE] : pointers[ST1_NTROPY];
+#if defined(CTR_NATIVE)
+			if (NativeCustomTracks_IsSelected())
+			{
+				/* Custom LEVs are allowed to omit the retail N. Tropy/Oxide
+				 * headers. Validate both the ST1 pointer table and the selected
+				 * ghost header before dereferencing either one. Human ghosts are
+				 * independent and continue through the normal path above. */
+				if (gGT->level1 && gGT->level1->ptrSpawnType1)
+				{
+					void **candidate = ST1_GETPOINTERS(gGT->level1->ptrSpawnType1);
+					if (GhostReplay_NativeRangeInMempack(
+						candidate, sizeof(void *) * (ST1_NOXIDE + 1)))
+						pointers = candidate;
+				}
+				gh = pointers ?
+					(((timeTrialFlags & TT_NTROPY_BEATEN) != 0) ?
+					 pointers[ST1_NOXIDE] : pointers[ST1_NTROPY]) : NULL;
+
+				if (!GhostReplay_NativeCustomHeaderValid(gh))
+				{
+					memset(tape, 0, sizeof(*tape));
+					tape->constDEADC0ED = 0xDEADC0ED;
+					Platform_LogWarn(
+						"[CUSTOM GHOST] no valid retail rival ghost for track=%d; human ghost remains enabled\n",
+						(int)ghostLevelID);
+					continue;
+				}
+			}
+			else
+#endif
+			{
+				pointers = ST1_GETPOINTERS(gGT->level1->ptrSpawnType1);
+				gh = ((timeTrialFlags & TT_NTROPY_BEATEN) != 0) ?
+					pointers[ST1_NOXIDE] : pointers[ST1_NTROPY];
+			}
 		}
 
 		recordBuffer = GHOSTHEADER_GETRECORDBUFFER(gh);
@@ -446,6 +522,11 @@ void GhostReplay_Init1(void)
 void GhostReplay_Init2(void)
 {
 	struct GameTracker *gGT = sdata->gGT;
+#if defined(CTR_NATIVE)
+	s16 timeTrialLevelID = GhostReplay_NativeEffectiveLevelID(gGT);
+#else
+	s16 timeTrialLevelID = gGT->levelID;
+#endif
 
 	for (struct Thread *thread = gGT->threadBuckets[GHOST].thread; thread != NULL; thread = thread->siblingThread)
 	{
@@ -476,7 +557,7 @@ void GhostReplay_Init2(void)
 				continue;
 			}
 
-			s32 timeTrialFlags = sdata->gameProgress.highScoreTracks[gGT->levelID].timeTrialFlags;
+			s32 timeTrialFlags = sdata->gameProgress.highScoreTracks[timeTrialLevelID].timeTrialFlags;
 			if ((timeTrialFlags & TT_NTROPY_OPEN) == 0)
 			{
 				continue;
@@ -497,7 +578,7 @@ void GhostReplay_Init2(void)
 		s32 characterIndex = ghostID + 1;
 		if (ghostID != 0)
 		{
-			s32 timeTrialFlags = sdata->gameProgress.highScoreTracks[gGT->levelID].timeTrialFlags;
+			s32 timeTrialFlags = sdata->gameProgress.highScoreTracks[timeTrialLevelID].timeTrialFlags;
 			if ((timeTrialFlags & TT_NTROPY_BEATEN) != 0)
 			{
 				characterIndex = ghostID + 2;

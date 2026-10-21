@@ -260,7 +260,98 @@ static int MM_NativeTitleExitConfirmUpdate(struct RectMenu *mainMenu)
 	RECTMENU_ClearInput();
 	return 1;
 }
+
+/* The title overlay stays loaded under Mods, Options and nested menus.
+ * Version/build/date must only be visible on the unmodified root page. */
+int MM_NativeTitleRootVisible(void)
+{
+	const struct RectMenu *menu = &D230.menuMainMenu;
+	return (sdata->gGT != NULL) &&
+	       ((sdata->gGT->gameMode1 & MAIN_MENU) != 0) &&
+	       LOAD_IsOpen_MainMenu() &&
+	       (D230.titleMenuState == TITLE_MENU_STATE_IN_MENU) &&
+	       (sdata->ptrActiveMenu == menu) &&
+	       ((menu->state & (DRAW_NEXT_MENU_IN_HIERARCHY |
+	                        ONLY_DRAW_TITLE | INVISIBLE)) == 0) &&
+	       (s_titleExitConfirmState == NATIVE_TITLE_EXIT_CONFIRM_CLOSED) &&
+	       !MainFreeze_TitleOptionsIsOpen();
+}
 #endif
+#ifdef CTR_NATIVE
+/*
+ * High refresh / Unlimited calls the menu code many times for every 30-Hz
+ * transition frame. Retail's one-shot swish was previously fired on EVERY
+ * host render at the exact same framesLeft == 4, with OtherFX flags 0
+ * (duplicates allowed). This stacked many SPU voices, repeatedly decoded
+ * the effect and starved CSEQ notes when moving between menus.
+ *
+ * Keep one gate per stable transition-meta pointer. Rearm as soon as the
+ * transition leaves frame 4; every new incoming/outgoing transition can
+ * still sound its own swish. Unlike a global cooldown this does not
+ * accidentally suppress another submenu transition.
+ */
+#define NATIVE_MENU_SWISH_GATE_COUNT 24
+struct NativeMenuSwishGate
+{
+	const struct TransitionMeta *meta;
+	int firedAtMarker;
+	int suppressedDuplicates;
+};
+static struct NativeMenuSwishGate s_nativeMenuSwishGates[NATIVE_MENU_SWISH_GATE_COUNT];
+static int s_nativeMenuSwishNextSlot;
+static int s_nativeMenuSwishLogCount;
+
+static void MM_NativeTransitionSwish(const struct TransitionMeta *meta, int framesLeft)
+{
+	struct NativeMenuSwishGate *gate = NULL;
+
+	for (int i = 0; i < NATIVE_MENU_SWISH_GATE_COUNT; ++i)
+	{
+		if (s_nativeMenuSwishGates[i].meta == meta)
+		{
+			gate = &s_nativeMenuSwishGates[i];
+			break;
+		}
+	}
+	if (gate == NULL)
+	{
+		gate = &s_nativeMenuSwishGates[s_nativeMenuSwishNextSlot];
+		s_nativeMenuSwishNextSlot =
+			(s_nativeMenuSwishNextSlot + 1) % NATIVE_MENU_SWISH_GATE_COUNT;
+		gate->meta = meta;
+		gate->firedAtMarker = 0;
+		gate->suppressedDuplicates = 0;
+	}
+
+	if (framesLeft == MM_TRANSITION_SWISH_FRAME)
+	{
+		if (!gate->firedAtMarker)
+		{
+			gate->firedAtMarker = 1;
+			OtherFX_Play(MM_TRANSITION_SWISH_SFX, 0);
+		}
+		else
+		{
+			gate->suppressedDuplicates++;
+		}
+	}
+	else if (gate->firedAtMarker)
+	{
+#if defined(CTR_INTERNAL)
+		if (gate->suppressedDuplicates > 0 &&
+		    s_nativeMenuSwishLogCount < 40)
+		{
+			Platform_Log("[MENU SWOOSH] one sound fired, %d repeated host-frame triggers suppressed\n",
+			             gate->suppressedDuplicates);
+			s_nativeMenuSwishLogCount++;
+		}
+#endif
+		gate->firedAtMarker = 0;
+		gate->suppressedDuplicates = 0;
+	}
+}
+#endif
+
 // NOTE(aalhendi): ASM-verified against retail 230 0x800abaf0-0x800abcac.
 u8 MM_TransitionInOut(struct TransitionMeta *meta, int framesPassed, int numFrames)
 {
@@ -273,10 +364,14 @@ u8 MM_TransitionInOut(struct TransitionMeta *meta, int framesPassed, int numFram
 		s16 start = meta->headStart;
 		s16 framesLeft = ((s16)framesPassed - start);
 
-		if ((framesLeft == MM_TRANSITION_SWISH_FRAME) && (transitionIndex == 0))
+		if (transitionIndex == 0)
 		{
-			// Play "swoosh" sound for menu transition
-			OtherFX_Play(MM_TRANSITION_SWISH_SFX, 0);
+#if defined(CTR_NATIVE)
+			MM_NativeTransitionSwish(meta, framesLeft);
+#else
+			if (framesLeft == MM_TRANSITION_SWISH_FRAME)
+				OtherFX_Play(MM_TRANSITION_SWISH_SFX, 0);
+#endif
 		}
 
 		if (framesLeft < 1)
@@ -339,6 +434,13 @@ void MM_MenuProc_Main(struct RectMenu *mainMenu)
 
 #ifdef CTR_NATIVE
 	MM_SetupTitleOptionsRow(mainMenu);
+    /* Prompt once at the very first title menu, after the CTR intro.
+     * Existing profiles without game_language_selected are upgraded.
+     * Never disrupt unattended stress tests (the path above returns). */
+    if(!Platform_HasGameLanguage() &&
+       D230.titleMenuState == TITLE_MENU_STATE_IN_MENU &&
+       !MainFreeze_TitleOptionsIsOpen())
+        MainFreeze_OpenLanguageSetup(mainMenu);
 	if (MainFreeze_TitleOptionsIsOpen())
 	{
 		gGT->demoCountdownTimer = TITLE_DEMO_IDLE_FRAMES;
@@ -367,7 +469,12 @@ void MM_MenuProc_Main(struct RectMenu *mainMenu)
 
 		if (
 		    // main menu, "title" exists, and timer >= 230
-		    (D230.titleMenuState == TITLE_MENU_STATE_IN_MENU) && (D230.titleObj != NULL) && (TITLE_INTRO_TM_DRAW_MIN_FRAME < D230.titleIntroFrame))
+		    (D230.titleMenuState == TITLE_MENU_STATE_IN_MENU) && (D230.titleObj != NULL) && (TITLE_INTRO_TM_DRAW_MIN_FRAME < D230.titleIntroFrame)
+#if defined(CTR_NATIVE)
+		    /* The retail logo is hidden under Mods; do not leave its TM floating. */
+		    && ((mainMenu->state & INVISIBLE) == 0)
+#endif
+		    )
 		{
 			DecalFont_DrawLineOT(sdata->lngStrings[LNG_TM], MM_TITLE_TM_X, MM_TITLE_TM_Y, FONT_SMALL, ORANGE,
 			                     &gGT->backBuffer->otMem.uiOT[MM_TITLE_TM_OT_INDEX]);

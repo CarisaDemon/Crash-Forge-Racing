@@ -1,5 +1,7 @@
 #include <common.h>
-
+#if defined(CTR_NATIVE)
+#include <platform/native_input.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800251ac-0x80025208.
 void GAMEPAD_Init(struct GamepadSystem *gGamepads)
@@ -705,6 +707,11 @@ void GAMEPAD_ProcessMotors(struct GamepadSystem *gGS)
 {
 	int totalPower = 0;
 	struct GameTracker *gGT = sdata->gGT;
+#if defined(CTR_NATIVE)
+	/* PS1 motor envelopes are counted at 30 Hz, not display FPS. */
+	const int motorTicks = Platform_GetHighRefreshMode() ?
+		Platform_GetLegacy30HzTicks() : 1;
+#endif
 
 	for (int i = 0; i < gGS->numGamepadsConnected; i++)
 	{
@@ -801,15 +808,33 @@ void GAMEPAD_ProcessMotors(struct GamepadSystem *gGS)
 
 			if (pad->shockFrameFreq != 0)
 			{
+#if defined(CTR_NATIVE)
+				pad->shockFrameFreq =
+					pad->shockFrameFreq > motorTicks ?
+					pad->shockFrameFreq - motorTicks : 0;
+#else
 				pad->shockFrameFreq--;
+#endif
 			}
 			if (pad->shockFrameForce1 != 0)
 			{
+#if defined(CTR_NATIVE)
+				pad->shockFrameForce1 =
+					pad->shockFrameForce1 > motorTicks ?
+					pad->shockFrameForce1 - motorTicks : 0;
+#else
 				pad->shockFrameForce1--;
+#endif
 			}
 			if (pad->shockFrameForce2 != 0)
 			{
+#if defined(CTR_NATIVE)
+				pad->shockFrameForce2 =
+					pad->shockFrameForce2 > motorTicks ?
+					pad->shockFrameForce2 - motorTicks : 0;
+#else
 				pad->shockFrameForce2--;
+#endif
 			}
 		}
 
@@ -888,6 +913,18 @@ void GAMEPAD_ProcessMotors(struct GamepadSystem *gGS)
 
 		pad->motorSubmit[0] = pad->motorDesired[0];
 		pad->motorSubmit[1] = pad->motorDesired[1];
+#if defined(CTR_NATIVE)
+		/* Native libpad only called PadSetAct during its PS1 handshake.
+		 * SDL controllers need actual computed motor packets each gameplay
+		 * update. The bridge deduplicates/throttles in real host milliseconds. */
+		if ((gGT->gameMode1 & (P1_VIBRATE << i)) != 0)
+		{
+			pad->motorSubmit[0] = 0;
+			pad->motorSubmit[1] = 0;
+		}
+		Platform_InputPadVibrate(pad->gamepadID, &pad->motorSubmit[0],
+		                         sizeof(pad->motorSubmit));
+#endif
 	}
 }
 

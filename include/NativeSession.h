@@ -23,6 +23,7 @@ void NativeSession_SetLocalPlayerName(const char *name);
 const char *NativeSession_GetLocalPlayerName(void);
 
 void NativeSession_ConfigureFromArgs(int argc, char **argv);
+int NativeSession_NoModsActive(void);
 
 #endif
 

@@ -74,7 +74,7 @@ struct GhostPacket
 	SVec3 pos;
 	SVec3 rot;
 
-	u8 *bufferPacket;
+	u8 * P32 bufferPacket;
 
 	// 0x10 -- size of packet
 };

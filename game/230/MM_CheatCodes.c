@@ -202,7 +202,7 @@ void MM_ParseCheatCodes(void)
 
 		if (D230.cheats[cheatIndex].handler != NULL)
 		{
-			D230.cheats[cheatIndex].handler();
+			FN32(D230.cheats[cheatIndex].handler)();
 		}
 	}
 

@@ -9,6 +9,7 @@
 #include <macros.h>
 
 #include "platform/native_audio.h"
+#include <platform/native_menu_music_clock.h>
 #include "platform/native_glad.h"
 #include "platform/native_gpu.h"
 #include "platform/native_input.h"
@@ -50,6 +51,7 @@ internal void Platform_UpdateCursorVisibility(void);
 global_variable int s_hostAltKeyState = 0;
 global_variable int s_platformInitialized = 0;
 global_variable int s_videoWideMode = 0;
+global_variable int s_videoAspectMode = PLATFORM_ASPECT_4_3;
 global_variable int s_platformBeginScene = 0;
 global_variable int s_pinnedVramDisplayFrames = 0;
 global_variable int s_pinnedVramDisplayCustomRect = 0;
@@ -120,13 +122,30 @@ typedef struct NativeResolutionPreset
 } NativeResolutionPreset;
 
 global_variable const NativeResolutionPreset s_nativeResolutionPresets[] = {
-	{800, 600},
-	{1280, 720},
-	{1600, 900},
-	{1920, 1080},
-	{2560, 1440},
-	{3840, 2160},
+	{800, 600}, {1024, 768},
+	{1280, 720}, {1280, 800}, {1280, 1024},
+	{1600, 900}, {1680, 1050},
+	{1920, 1080}, {1920, 1200},
+	{2560, 1080}, {2560, 1440},
+	{3440, 1440}, {3840, 1600}, {3840, 2160},
+	{5120, 1440},
 };
+
+/* Index zero/one maintain backward compatibility with aspect_wide=0/1.
+ * All ratios describe the OUTPUT, independent from pixel resolution. */
+typedef struct NativeAspectRatioEntry {
+	int w,h;
+	const char *label;
+} NativeAspectRatioEntry;
+static const NativeAspectRatioEntry s_nativeAspectModes[] = {
+	{4,3,"4:3"},
+	{16,9,"16:9"},
+	{16,10,"16:10"},
+	{21,9,"21:9"},
+	{32,9,"32:9"},
+	{5,4,"5:4"},
+};
+CTR_STATIC_ASSERT(PLATFORM_ASPECT_RATIO_COUNT==6);
 
 #define NATIVE_RESOLUTION_PRESET_COUNT ((int)(sizeof(s_nativeResolutionPresets) / sizeof(s_nativeResolutionPresets[0])))
 
@@ -134,6 +153,7 @@ typedef struct NativeUserSettings
 {
 	int loaded;
 	int wideMode;
+	int aspectMode;
 	int highRefresh;
 	int fpsLimitMode;
 	int subpixel;
@@ -148,6 +168,10 @@ typedef struct NativeUserSettings
 	int volMusic;
 	int volVoice;
 	int stereo;
+    int hearOtherRacers;
+    int gameLanguage;
+    int gameLanguageSelected;
+    int voiceFrequency;
 	int vibrationMask;
 	char playerNames[4][32];
 } NativeUserSettings;
@@ -155,6 +179,7 @@ typedef struct NativeUserSettings
 global_variable NativeUserSettings s_nativeUserSettings = {
 	.loaded = 0,
 	.wideMode = 0,
+	.aspectMode = PLATFORM_ASPECT_4_3,
 	.highRefresh = 1,
 	.fpsLimitMode = PLATFORM_FPS_LIMIT_DISPLAY_HZ,
 	.subpixel = 1,
@@ -169,6 +194,10 @@ global_variable NativeUserSettings s_nativeUserSettings = {
 	.volMusic = 175,
 	.volVoice = 255,
 	.stereo = 1,
+    .hearOtherRacers = 1,
+    .gameLanguage = 0,
+    .gameLanguageSelected = 0,
+    .voiceFrequency = 1, /* voice chatty, retail is mode 0 */
 	.vibrationMask = 0,
 };
 
@@ -222,7 +251,10 @@ internal void Platform_CopyPlayerNameSanitized(
 
 internal void Platform_SettingsSanitize(void)
 {
-	s_nativeUserSettings.wideMode = s_nativeUserSettings.wideMode != 0;
+	s_nativeUserSettings.aspectMode=Platform_SettingsClamp(
+		s_nativeUserSettings.aspectMode,0,PLATFORM_ASPECT_RATIO_COUNT-1);
+	const NativeAspectRatioEntry *aspect=&s_nativeAspectModes[s_nativeUserSettings.aspectMode];
+	s_nativeUserSettings.wideMode=(aspect->w*3>aspect->h*4);
 	s_nativeUserSettings.highRefresh = 1;
 	s_nativeUserSettings.fpsLimitMode = Platform_SettingsClamp(
 		s_nativeUserSettings.fpsLimitMode, 0, PLATFORM_FPS_LIMIT_COUNT - 1);
@@ -233,6 +265,14 @@ internal void Platform_SettingsSanitize(void)
 	s_nativeUserSettings.characterDetail = Platform_SettingsClamp(s_nativeUserSettings.characterDetail, 0, 3);
 	s_nativeUserSettings.fullscreen = s_nativeUserSettings.fullscreen != 0;
 	s_nativeUserSettings.stereo = s_nativeUserSettings.stereo != 0;
+    s_nativeUserSettings.hearOtherRacers =
+        s_nativeUserSettings.hearOtherRacers != 0;
+    s_nativeUserSettings.gameLanguage =
+        Platform_SettingsClamp(s_nativeUserSettings.gameLanguage, 0, 5);
+    s_nativeUserSettings.gameLanguageSelected =
+        s_nativeUserSettings.gameLanguageSelected != 0;
+    s_nativeUserSettings.voiceFrequency =
+        Platform_SettingsClamp(s_nativeUserSettings.voiceFrequency, 0, 2);
 	s_nativeUserSettings.vibrationMask &= 0xF00;
 	s_nativeUserSettings.windowWidth = Platform_SettingsClamp(s_nativeUserSettings.windowWidth, 320, 7680);
 	s_nativeUserSettings.windowHeight = Platform_SettingsClamp(s_nativeUserSettings.windowHeight, 240, 4320);
@@ -271,6 +311,7 @@ internal void Platform_SettingsWrite(void)
 
 	fprintf(config, "version=1\n");
 	fprintf(config, "aspect_wide=%d\n", s_nativeUserSettings.wideMode);
+	fprintf(config, "aspect_mode=%d\n", s_nativeUserSettings.aspectMode);
 	fprintf(config, "high_refresh=1\n");
 	fprintf(config, "fps_limit_mode=%d\n", s_nativeUserSettings.fpsLimitMode);
 	fprintf(config, "subpixel=%d\n", s_nativeUserSettings.subpixel);
@@ -285,6 +326,12 @@ internal void Platform_SettingsWrite(void)
 	fprintf(config, "music_volume=%d\n", s_nativeUserSettings.volMusic);
 	fprintf(config, "voice_volume=%d\n", s_nativeUserSettings.volVoice);
 	fprintf(config, "stereo=%d\n", s_nativeUserSettings.stereo);
+    fprintf(config, "hear_other_racers=%d\n",
+            s_nativeUserSettings.hearOtherRacers);
+    fprintf(config, "game_language=%d\n", s_nativeUserSettings.gameLanguage);
+    fprintf(config, "game_language_selected=%d\n",
+            s_nativeUserSettings.gameLanguageSelected);
+    fprintf(config, "voice_frequency=%d\n", s_nativeUserSettings.voiceFrequency);
 	fprintf(config, "vibration_disabled_mask=%d\n", s_nativeUserSettings.vibrationMask);
 	for (int i = 0; i < 4; i++)
 		fprintf(config, "player_name_%d=%s\n", i + 1, s_nativeUserSettings.playerNames[i]);
@@ -296,12 +343,15 @@ internal void Platform_SettingsLoad(int defaultWidth, int defaultHeight)
 	FILE *config;
 	char line[160];
 	int foundSettingsFile = 0;
+	int foundAspectMode = 0;
 
 	if (s_nativeUserSettings.loaded) return;
 
 	s_nativeUserSettings.windowWidth = defaultWidth;
 	s_nativeUserSettings.windowHeight = defaultHeight;
 	s_nativeUserSettings.wideMode = defaultWidth * 3 > defaultHeight * 4;
+	s_nativeUserSettings.aspectMode =
+		s_nativeUserSettings.wideMode ? PLATFORM_ASPECT_16_9 : PLATFORM_ASPECT_4_3;
 	for (int i = 0; i < 4; i++)
 	{
 		snprintf(
@@ -340,6 +390,11 @@ internal void Platform_SettingsLoad(int defaultWidth, int defaultHeight)
 			if (sscanf(line, "%63[^=]=%d", key, &value) != 2) continue;
 
 			if (strcmp(key, "aspect_wide") == 0) s_nativeUserSettings.wideMode = value;
+			else if (strcmp(key, "aspect_mode") == 0)
+			{
+				s_nativeUserSettings.aspectMode = value;
+				foundAspectMode = 1;
+			}
 			else if (strcmp(key, "high_refresh") == 0) s_nativeUserSettings.highRefresh = value;
 			else if (strcmp(key, "fps_limit_mode") == 0) s_nativeUserSettings.fpsLimitMode = value;
 			else if (strcmp(key, "subpixel") == 0) s_nativeUserSettings.subpixel = value;
@@ -354,6 +409,14 @@ internal void Platform_SettingsLoad(int defaultWidth, int defaultHeight)
 			else if (strcmp(key, "music_volume") == 0) s_nativeUserSettings.volMusic = value;
 			else if (strcmp(key, "voice_volume") == 0) s_nativeUserSettings.volVoice = value;
 			else if (strcmp(key, "stereo") == 0) s_nativeUserSettings.stereo = value;
+            else if (strcmp(key,"hear_other_racers")==0)
+                s_nativeUserSettings.hearOtherRacers = value;
+            else if (strcmp(key,"game_language")==0)
+                s_nativeUserSettings.gameLanguage = value;
+            else if (strcmp(key,"game_language_selected")==0)
+                s_nativeUserSettings.gameLanguageSelected = value;
+            else if (strcmp(key,"voice_frequency")==0)
+                s_nativeUserSettings.voiceFrequency = value;
 			else if (strcmp(key, "vibration_disabled_mask") == 0) s_nativeUserSettings.vibrationMask = value;
 		}
 		fclose(config);
@@ -385,6 +448,10 @@ internal void Platform_SettingsLoad(int defaultWidth, int defaultHeight)
 		}
 	}
 
+	if (!foundAspectMode)
+		s_nativeUserSettings.aspectMode=s_nativeUserSettings.wideMode ?
+			PLATFORM_ASPECT_16_9 : PLATFORM_ASPECT_4_3;
+
 	s_nativeUserSettings.loaded = 1;
 	Platform_SettingsSanitize();
 
@@ -397,8 +464,10 @@ internal void Platform_SettingsLoad(int defaultWidth, int defaultHeight)
 	g_cfg_bilinearFiltering = s_nativeUserSettings.bilinearFiltering;
 	g_cfg_psxDithering = s_nativeUserSettings.dithering;
 	s_perfOverlayEnabled = s_nativeUserSettings.perfOverlay;
-	s_videoWideMode = s_nativeUserSettings.wideMode;
+	s_videoAspectMode=s_nativeUserSettings.aspectMode;
+	s_videoWideMode=s_nativeUserSettings.wideMode;
 	NativeSession_SetLocalPlayerName(s_nativeUserSettings.playerNames[0]);
+	NativeLocalization_SetLanguage(s_nativeUserSettings.gameLanguage);
 
 	if (!foundSettingsFile) Platform_SettingsWrite();
 }
@@ -709,6 +778,46 @@ void Platform_SaveAudioMode(int enabled)
 	Platform_SettingsWrite();
 }
 
+int Platform_GetGameLanguage(void)
+{
+    return s_nativeUserSettings.gameLanguage;
+}
+
+int Platform_HasGameLanguage(void)
+{
+    return s_nativeUserSettings.gameLanguageSelected != 0;
+}
+
+void Platform_SetGameLanguage(int lang)
+{
+    if (lang < 0 || lang > 5) lang = 0;
+    s_nativeUserSettings.gameLanguage = lang;
+    s_nativeUserSettings.gameLanguageSelected = 1;
+    NativeLocalization_SetLanguage(lang);
+    Platform_SettingsWrite();
+    Platform_Log("[LANGUAGE] selected=%d saved=1\n", lang);
+}
+
+int Platform_GetVoiceFrequency(void)
+{
+    return s_nativeUserSettings.voiceFrequency;
+}
+
+int Platform_GetHearOtherRacers(void)
+{
+    return s_nativeUserSettings.hearOtherRacers != 0;
+}
+
+void Platform_SetHearOtherRacers(int enabled)
+{
+    int value=enabled != 0;
+    if (s_nativeUserSettings.hearOtherRacers == value) return;
+    s_nativeUserSettings.hearOtherRacers=value;
+    Platform_SettingsWrite();
+    NativeAudio_EngineSetHearOtherRacers(value);
+    Platform_Log("[OPPONENT AUDIO SETTING] hear_other_racers=%d\n",value);
+}
+
 int Platform_GetSavedVibrationMask(void)
 {
 	return s_nativeUserSettings.vibrationMask & 0xF00;
@@ -885,14 +994,47 @@ int Platform_GetWideMode(void)
 	return s_videoWideMode;
 }
 
+int Platform_GetAspectRatioMode(void)
+{
+	return s_videoAspectMode;
+}
+
+void Platform_GetAspectRatioSize(int mode,int *width,int *height)
+{
+	if(mode<0 || mode>=PLATFORM_ASPECT_RATIO_COUNT)
+		mode=PLATFORM_ASPECT_4_3;
+	if(width!=NULL)*width=s_nativeAspectModes[mode].w;
+	if(height!=NULL)*height=s_nativeAspectModes[mode].h;
+}
+
+const char *Platform_GetAspectRatioLabel(int mode)
+{
+	if(mode<0 || mode>=PLATFORM_ASPECT_RATIO_COUNT)
+		mode=PLATFORM_ASPECT_4_3;
+	return s_nativeAspectModes[mode].label;
+}
+
+void Platform_SetAspectRatioMode(int mode)
+{
+	if(mode<0)mode=PLATFORM_ASPECT_RATIO_COUNT-1;
+	if(mode>=PLATFORM_ASPECT_RATIO_COUNT)mode=0;
+	if(mode==s_videoAspectMode)return;
+	s_videoAspectMode=mode;
+	const NativeAspectRatioEntry *aspect=&s_nativeAspectModes[mode];
+	s_videoWideMode=(aspect->w*3>aspect->h*4);
+	s_nativeUserSettings.wideMode=s_videoWideMode;
+	s_nativeUserSettings.aspectMode=mode;
+	NativeRenderer_SetDisplayAspectSize(aspect->w,aspect->h);
+	Platform_SettingsWrite();
+	Platform_Log("[GRAPHICS APPLY] aspect=%s, splitWide=%d\n",
+	             aspect->label,s_videoWideMode);
+}
+
 void Platform_SetWideMode(int enabled)
 {
-	enabled = enabled != 0;
-	if (enabled == s_videoWideMode) { return; }
-	s_videoWideMode = enabled;
-	s_nativeUserSettings.wideMode = enabled;
-	NativeRenderer_SetDisplayAspect(enabled);
-	Platform_SettingsWrite();
+	/* Compatibility for older menu paths; new UI uses exact aspect modes. */
+	Platform_SetAspectRatioMode(enabled ?
+		PLATFORM_ASPECT_16_9 : PLATFORM_ASPECT_4_3);
 }
 
 internal int Platform_QueryDisplayRefreshFPS(void)
@@ -1249,7 +1391,9 @@ void Platform_Init(const char *title, int width, int height)
 		return;
 	}
 
-	NativeRenderer_SetDisplayAspect(s_videoWideMode);
+	NativeRenderer_SetDisplayAspectSize(
+		s_nativeAspectModes[s_videoAspectMode].w,
+		s_nativeAspectModes[s_videoAspectMode].h);
 	if (s_nativeUserSettings.fullscreen)
 		Platform_SetFullscreenMode(1);
 	Platform_RefreshHighRefreshTarget();
@@ -1301,6 +1445,7 @@ void Platform_Shutdown(void)
 	}
 
 	NativeGpu_LogSubpixelStats();
+	NativeMenuMusicClock_Shutdown();
 	NativeAudio_Shutdown();
 	NativeRenderer_Shutdown();
 
@@ -1630,6 +1775,40 @@ void Platform_PollHostEvents(void)
 			if (NativeHangout_HandleHostKey(key, down, event.key.repeat))
 				break;
 
+#if defined(CTR_CNK_TORNADO_QA)
+			/* QA only: Ctrl+Alt+Shift+T (also Ctrl+Shift+T). Never use
+			 * any F keys. Use actual keyboard state for SDL modifier timing. */
+			if (key == SDL_SCANCODE_T && down != 0 &&
+			    event.key.repeat == 0)
+			{
+				const bool *held = SDL_GetKeyboardState(NULL);
+				const int ctrl = ((event.key.mod & SDL_KMOD_CTRL) != 0) ||
+				    (held != NULL && (held[SDL_SCANCODE_LCTRL] || held[SDL_SCANCODE_RCTRL]));
+				const int shift = ((event.key.mod & SDL_KMOD_SHIFT) != 0) ||
+				    (held != NULL && (held[SDL_SCANCODE_LSHIFT] || held[SDL_SCANCODE_RSHIFT]));
+				if (ctrl && shift)
+				{
+					struct GameTracker *gt = sdata ? sdata->gGT : NULL;
+					if (gt != NULL && gt->drivers[0] != NULL &&
+					    (gt->gameMode1 & BATTLE_MODE) == 0)
+					{
+						struct Driver *d = gt->drivers[0];
+						d->heldItemID = HELD_ITEM_CNK_TORNADO;
+						d->numHeldItems = 0;
+						d->itemRollTimer = 0;
+						d->noItemTimer = 0;
+						Platform_LogWarn("[CNK TORNADO QA] EQUIPPED P1 item=0x%X via Ctrl+Alt+Shift+T/Ctrl+Shift+T mode=0x%X (press item button)\n",
+						    d->heldItemID, gt->gameMode1);
+					}
+					else
+					{
+						Platform_LogWarn("[CNK TORNADO QA] Ctrl+Shift+T received, but an Arcade race must be active\n");
+					}
+					break;
+				}
+			}
+#endif
+
 			if (key == SDL_SCANCODE_RETURN)
 				break;
 
@@ -1660,12 +1839,44 @@ void Platform_PollHostEvents(void)
 					Platform_LogWarn("[Hangout] LOCAL requested (Ctrl+Alt+Shift+H)\n");
 					break;
 				}
+				if (key == SDL_SCANCODE_U)
+				{
+					if (NativeHangout_IsActive())
+					{
+						NativeHangout_RequestRaceTest();
+						Platform_LogWarn("[Hangout] race countdown QA requested (Ctrl+Alt+Shift+U)\n");
+					}
+					break;
+				}
+				if (key == SDL_SCANCODE_O)
+				{
+					if (NativeHangout_IsActive())
+					{
+						NativeHangout_DisconnectPlayer();
+						Platform_LogWarn("[Hangout] P1 disconnect requested (Ctrl+Alt+Shift+O)\n");
+					}
+					break;
+				}
 				if (key == SDL_SCANCODE_X)
 				{
 					NativeHangout_RequestExit();
 					Platform_LogWarn("[Hangout] exit requested (Ctrl+Alt+Shift+X)\n");
 					break;
 				}
+			}
+#endif
+
+#if defined(CTR_PC_RENDER_QA)
+			/* Build de prueba Modo PC: Ctrl+Alt+Shift+P alterna PC / clasico. */
+			if ((key == SDL_SCANCODE_P) &&
+			    (down != 0) &&
+			    (event.key.repeat == 0) &&
+			    ((event.key.mod & SDL_KMOD_CTRL) != 0) &&
+			    ((event.key.mod & SDL_KMOD_ALT) != 0) &&
+			    ((event.key.mod & SDL_KMOD_SHIFT) != 0))
+			{
+				NativePcRender_Toggle();
+				break;
 			}
 #endif
 
@@ -1703,10 +1914,13 @@ void Platform_PollHostEvents(void)
 
 			if ((key == SDL_SCANCODE_J) && (down != 0) && (event.key.repeat == 0))
 			{
-				s_debugFreecamEnabled = !s_debugFreecamEnabled;
-				s_debugFreecamCaptured = 0;
-				s_debugFreecamCameraID = -1;
-				Platform_LogWarn("[CTR Native] Debug freecam %s (J, visual-only)\n", s_debugFreecamEnabled ? "ON" : "OFF");
+				if (NativeHangout_IsPlayerDisconnected())
+				{
+					Platform_LogWarn("[Hangout] freecam locked ON while P1 is disconnected\n");
+					break;
+				}
+				Platform_SetDebugFreecamEnabled(!Platform_DebugFreecamIsEnabled());
+				Platform_LogWarn("[CTR Native] Debug freecam %s (J, visual-only)\n", Platform_DebugFreecamIsEnabled() ? "ON" : "OFF");
 				break;
 			}
 
@@ -1744,6 +1958,19 @@ void Platform_PollHostEvents(void)
 int Platform_DebugFreecamIsEnabled(void)
 {
 	return s_debugFreecamEnabled != 0;
+}
+
+void Platform_SetDebugFreecamEnabled(int enabled)
+{
+	enabled = enabled != 0;
+	if (s_debugFreecamEnabled == enabled)
+		return;
+
+	s_debugFreecamEnabled = enabled;
+	s_debugFreecamCaptured = 0;
+	s_debugFreecamCameraID = -1;
+	Platform_LogWarn("[CTR Native] Debug freecam %s (programmatic)\n",
+	                 enabled ? "ON" : "OFF");
 }
 
 int Platform_DebugFreecamConsumesKey(int key)
@@ -1949,8 +2176,35 @@ internal void Native_WaitUntilVBlankTarget(void)
 	}
 }
 
+/* HOWL/CSEQ is advanced from the game VBlank callback, not the SDL
+ * device callback. A long main-thread menu operation means new CSEQ notes
+ * cannot be scheduled in time even if the PCM device is running fine.
+ * Keep bounded diagnostics for reproducible stalls without enabling the
+ * enormous per-frame performance CSV. */
+#if defined(CTR_INTERNAL)
+static u64 s_nativeLastAudioVblankCounter;
+static int s_nativeAudioVblankGapLogs;
+#endif
+
 internal void Native_EmitVBlank(void)
 {
+#if defined(CTR_INTERNAL)
+	const u64 now = SDL_GetPerformanceCounter();
+	const u64 freq = SDL_GetPerformanceFrequency();
+	if (s_nativeLastAudioVblankCounter != 0 && freq > 0 &&
+	    now > s_nativeLastAudioVblankCounter &&
+	    now - s_nativeLastAudioVblankCounter > freq / 20 &&
+	    s_nativeAudioVblankGapLogs < 30)
+	{
+		const double ms = (double)(now - s_nativeLastAudioVblankCounter) *
+		                  1000.0 / (double)freq;
+		Platform_Log("[AUDIO CLOCK] CSEQ VBlank delayed %.1f ms on main thread (event %d/30)\n",
+		             ms, s_nativeAudioVblankGapLogs + 1);
+		s_nativeAudioVblankGapLogs++;
+	}
+	s_nativeLastAudioVblankCounter = now;
+#endif
+
 	NativeRCnt_EmitVBlank();
 
 	if (vsync_callback != NULL)

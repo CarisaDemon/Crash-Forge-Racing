@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <platform/native_custom_tracks.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80039fa8-0x8003a2b4
 void MainGameEnd_SoloRaceGetReward(int subtractTimeCrateBonus)
@@ -53,14 +56,27 @@ void MainGameEnd_SoloRaceGetReward(int subtractTimeCrateBonus)
 
 	gGT->gameModeEnd |= 4;
 
-	struct HighScoreTrack *track = &sdata->gameProgress.highScoreTracks[gGT->levelID];
+#if defined(CTR_NATIVE)
+	// CF:R: one JSON line per finished Time Trial for the online leaderboard.
+	NativeTimeTrialLog_Record(gGT, player);
+#endif
+
+	s16 timeTrialLevelID = gGT->levelID;
+#if defined(CTR_NATIVE)
+	{
+		int customLevelID = NativeCustomTracks_SelectedOriginalLevelID();
+		if (customLevelID >= 0)
+			timeTrialLevelID = (s16)customLevelID;
+	}
+#endif
+	struct HighScoreTrack *track = &sdata->gameProgress.highScoreTracks[timeTrialLevelID];
 	int playerTime = player->timeElapsedInRace;
 
 	if (((track->timeTrialFlags >> data.bitIndex_timeTrialFlags_saveData.nTropyOpen) & 1) == 0)
 	{
 		if ((track->timeTrialFlags & 1) == 0)
 		{
-			if (data.metaDataLEV[gGT->levelID].timeTrial <= playerTime)
+			if (data.metaDataLEV[timeTrialLevelID].timeTrial <= playerTime)
 			{
 				goto CheckOxideAllTracks;
 			}

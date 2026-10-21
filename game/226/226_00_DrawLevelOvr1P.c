@@ -94,7 +94,7 @@ enum DrawLevelOvr1PGridSlotMode
 
 static const u32 DRAW_LEVEL_OVR1P_SLOT_WORD_PRESERVE = 0xffffffff;
 static int sDrawLevelOvr1P_FullDynamicInheritedOtIndex;
-static struct QuadBlock **sDrawLevelOvr1P_RenderedOverflowBase;
+static struct QuadBlock * P32 *sDrawLevelOvr1P_RenderedOverflowBase;
 static u8 *sDrawLevelOvr1P_ClipRecordStart;
 static u32 sDrawLevelOvr1P_PrimReserveBias;
 static u32 sDrawLevelOvr1P_MosaicReloadSpanOverride;
@@ -8804,18 +8804,18 @@ static int DrawLevelOvr1P_Emit4x1ListSelectedFace(struct PushBuffer *pb, struct 
 	return Ovr226_800a3c70_Ground4x1SelectorNearGate(pb, primMem, projected, block, faceIndex);
 }
 
-static void DrawLevelOvr1P_SetRenderedListCursor(struct QuadBlock **renderedList)
+static void DrawLevelOvr1P_SetRenderedListCursor(struct QuadBlock * P32 *renderedList)
 {
 	DrawLevelOvr1P_Scratch()->renderedOverflowPtr32 = (u32)(uintptr_t)renderedList;
 }
 
-static void DrawLevelOvr1P_SetRenderedOverflowBase(struct QuadBlock **renderedList)
+static void DrawLevelOvr1P_SetRenderedOverflowBase(struct QuadBlock * P32 *renderedList)
 {
 	sDrawLevelOvr1P_RenderedOverflowBase = renderedList;
 }
 
 static void DrawLevelOvr1P_SetViewportScratchContext(struct PushBuffer *pb, const int *visFaceList, u8 *clipStart, u8 *clipCursor,
-                                                     struct QuadBlock **renderedOverflowBase)
+                                                     struct QuadBlock * P32 *renderedOverflowBase)
 {
 	DrawLevelOvr1P_SetRenderedListCursor(renderedOverflowBase);
 	DrawLevelOvr1P_SetClipRecordCursor(clipCursor);
@@ -8827,7 +8827,7 @@ static void DrawLevelOvr1P_SetViewportScratchContext(struct PushBuffer *pb, cons
 
 static void DrawLevelOvr_ClearRenderedOverflowBase(int playerIndex)
 {
-	struct QuadBlock **renderedOverflowBase = (struct QuadBlock **)data.ptrRenderedQuadblockDestination_forEachPlayer[playerIndex];
+	struct QuadBlock * P32 *renderedOverflowBase = (struct QuadBlock * P32 *)data.ptrRenderedQuadblockDestination_forEachPlayer[playerIndex];
 
 	if (renderedOverflowBase != NULL)
 	{
@@ -8845,7 +8845,7 @@ static int DrawLevelOvr_ConsumeClipRecordsForViewport(struct PushBuffer *pb, str
 	return consume(pb, primMem, clipCursor, playerIndex);
 }
 
-static struct QuadBlock **DrawLevelOvr1P_GetRenderedOverflowBase(void)
+static struct QuadBlock * P32 *DrawLevelOvr1P_GetRenderedOverflowBase(void)
 {
 	if (sDrawLevelOvr1P_RenderedOverflowBase != NULL)
 	{
@@ -8855,14 +8855,14 @@ static struct QuadBlock **DrawLevelOvr1P_GetRenderedOverflowBase(void)
 	return sdata_static.quadBlocksRendered;
 }
 
-static struct QuadBlock **DrawLevelOvr1P_GetRenderedListCursor(void)
+static struct QuadBlock * P32 *DrawLevelOvr1P_GetRenderedListCursor(void)
 {
-	return (struct QuadBlock **)(uintptr_t)DrawLevelOvr1P_Scratch()->renderedOverflowPtr32;
+	return (struct QuadBlock * P32 *)(uintptr_t)DrawLevelOvr1P_Scratch()->renderedOverflowPtr32;
 }
 
 static void DrawLevelOvr1P_AppendRenderedQuadBlock(struct QuadBlock *block)
 {
-	struct QuadBlock **renderedList = DrawLevelOvr1P_GetRenderedListCursor();
+	struct QuadBlock * P32 *renderedList = DrawLevelOvr1P_GetRenderedListCursor();
 
 	if (renderedList == NULL)
 	{
@@ -8875,7 +8875,7 @@ static void DrawLevelOvr1P_AppendRenderedQuadBlock(struct QuadBlock *block)
 
 static void DrawLevelOvr1P_TerminateRenderedListCursor(void)
 {
-	struct QuadBlock **renderedList = DrawLevelOvr1P_GetRenderedListCursor();
+	struct QuadBlock * P32 *renderedList = DrawLevelOvr1P_GetRenderedListCursor();
 
 	if (renderedList != NULL)
 	{
@@ -10031,7 +10031,7 @@ static int DrawLevelOvr1P_NonWaterRenderedSelectorNearGate(struct PushBuffer *pb
 	}
 }
 
-static int DrawLevelOvr1P_DrawNonWaterRenderedList(struct QuadBlock **renderedList, struct PushBuffer *pb, struct mesh_info *mesh, struct PrimMem *primMem,
+static int DrawLevelOvr1P_DrawNonWaterRenderedList(struct QuadBlock * P32 *renderedList, struct PushBuffer *pb, struct mesh_info *mesh, struct PrimMem *primMem,
                                                    int role)
 {
 	struct LevVertex *vertices = mesh->ptrVertexArray;
@@ -10304,7 +10304,7 @@ static int DrawLevelOvr1P_DrawBspListQuadBlocks(struct VisMemBspListNode *slot, 
 	return 1;
 }
 
-static struct QuadBlock **DrawLevelOvr1P_GetRenderedListForRole(struct DrawLevelOvr1PRenderList *renderList, int role)
+static struct QuadBlock * P32 *DrawLevelOvr1P_GetRenderedListForRole(struct DrawLevelOvr1PRenderList *renderList, int role)
 {
 	switch (role)
 	{
@@ -10334,7 +10334,7 @@ static struct QuadBlock **DrawLevelOvr1P_GetRenderedListForRole(struct DrawLevel
 
 static void DrawLevelOvr1P_ClearRenderedListForRole(struct DrawLevelOvr1PRenderList *renderList, int role)
 {
-	struct QuadBlock **renderedList = DrawLevelOvr1P_GetRenderedListForRole(renderList, role);
+	struct QuadBlock * P32 *renderedList = DrawLevelOvr1P_GetRenderedListForRole(renderList, role);
 
 	if (renderedList != NULL)
 	{
@@ -11464,7 +11464,7 @@ static int DrawLevelOvr1P_DrawRenderedWaterQuadBlockWithDefaultHandler(struct Pu
 	                                                           NULL);
 }
 
-static int Ovr226_800a2904_DrawWaterRenderedListWithDefaultHandler(struct QuadBlock **renderedList, struct PushBuffer *pb, struct mesh_info *mesh,
+static int Ovr226_800a2904_DrawWaterRenderedListWithDefaultHandler(struct QuadBlock * P32 *renderedList, struct PushBuffer *pb, struct mesh_info *mesh,
                                                                    struct PrimMem *primMem, DrawLevelOvrRetailLabel defaultHandlerAddress)
 {
 	WATER_PERF_BEGIN();
@@ -11502,12 +11502,12 @@ static int Ovr226_800a2904_DrawWaterRenderedListWithDefaultHandler(struct QuadBl
 	}
 }
 
-static int Ovr226_800a2904_DrawWaterRenderedList(struct QuadBlock **renderedList, struct PushBuffer *pb, struct mesh_info *mesh, struct PrimMem *primMem)
+static int Ovr226_800a2904_DrawWaterRenderedList(struct QuadBlock * P32 *renderedList, struct PushBuffer *pb, struct mesh_info *mesh, struct PrimMem *primMem)
 {
 	return Ovr226_800a2904_DrawWaterRenderedListWithDefaultHandler(renderedList, pb, mesh, primMem, DRAW_LEVEL_OVR_RETAIL_LABEL_WATER_RENDERED_WRAPPER_SLOT5);
 }
 
-static int DrawLevelOvr1P_DrawRenderedQuadBlocks(struct QuadBlock **renderedList, struct PushBuffer *pb, struct mesh_info *mesh, struct PrimMem *primMem,
+static int DrawLevelOvr1P_DrawRenderedQuadBlocks(struct QuadBlock * P32 *renderedList, struct PushBuffer *pb, struct mesh_info *mesh, struct PrimMem *primMem,
                                                  int role)
 {
 	if (renderedList == NULL)
@@ -11608,7 +11608,7 @@ static int Ovr226_800a0e78_DispatchBucketHandler(u32 handlerAddress, void *bucke
 
 	if (bucket->kind == DRAW_LEVEL_OVR1P_BUCKET_QUADBLOCKS_RENDERED)
 	{
-		return DrawLevelOvr1P_DrawRenderedQuadBlocks((struct QuadBlock **)bucketValue, pb, mesh, primMem, bucket->role);
+		return DrawLevelOvr1P_DrawRenderedQuadBlocks((struct QuadBlock * P32 *)bucketValue, pb, mesh, primMem, bucket->role);
 	}
 
 	if (bucket->role == DRAW_LEVEL_OVR1P_BUCKET_FULL_DYNAMIC_LIST)

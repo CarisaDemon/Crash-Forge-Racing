@@ -284,10 +284,10 @@ CTR_STATIC_ASSERT(MM_CUP_SELECT_FLASH_COLOR_BIT == 4);
 struct Title
 {
 	// 0x0
-	struct Thread *t;
+	struct Thread * P32 t;
 
 	// 0x4
-	struct Instance *i[TITLE_INSTANCE_COUNT];
+	struct Instance * P32 i[TITLE_INSTANCE_COUNT];
 
 	// 0x1c
 	SVec3 cameraPosOffset;
@@ -678,7 +678,7 @@ struct MainMenuCheatCode
 #endif
 	s32 buttonCount;
 	u32 buttons[MM_CHEAT_BUTTON_HISTORY_COUNT];
-	void (*handler)(void);
+	void (* P32 handler)(void);
 };
 
 #if BUILD == JpnRetail
@@ -907,9 +907,9 @@ struct OverlayDATA_230
 	// 800b8260 - JpnRetail
 	// array of menu pointers
 #if BUILD == EurRetail
-	struct RectMenu *arrayMenuPtrs[MM_MENU_RESET_COUNT];
+	struct RectMenu * P32 arrayMenuPtrs[MM_MENU_RESET_COUNT];
 #else
-	struct RectMenu *arrayMenuPtrs[MM_MENU_RESET_COUNT];
+	struct RectMenu * P32 arrayMenuPtrs[MM_MENU_RESET_COUNT];
 #endif
 
 #if BUILD == JpnRetail
@@ -1029,7 +1029,7 @@ struct OverlayDATA_230
 	// pointer
 	// 800b4d78 - UsaRetail
 	// 800b5554 - EurRetail
-	SVec2 *characterSelectWindowPosByLayout[6];
+	SVec2 * P32 characterSelectWindowPosByLayout[6];
 
 	// 800B4D90 - UsaRetail
 	// 800b556c - EurRetail
@@ -1053,7 +1053,7 @@ struct OverlayDATA_230
 
 	// 800b509C - UsaRetail
 	// 800b5878 - EurRetail
-	struct CharacterSelectMeta *characterSelectMetaByLayout[6];
+	struct CharacterSelectMeta * P32 characterSelectMetaByLayout[6];
 
 	// 800b50B4 - UsaRetail
 	// 800b5890 - EurRetail
@@ -1091,7 +1091,7 @@ struct OverlayDATA_230
 
 	// 800B5350 - UsaRetail
 	// 800b5b2c - EurRetail
-	struct TransitionMeta *characterSelectTransitionByPlayerCount[4];
+	struct TransitionMeta * P32 characterSelectTransitionByPlayerCount[4];
 
 	// 800B5360 - UsaRetail
 	// 800b5b3c - EurRetail
@@ -1100,7 +1100,7 @@ struct OverlayDATA_230
 	// 800b5374 - UsaRetail
 	// 800b5b50 - EurRetail
 	// points to s_1, s_2, s_3, s_4
-	char *playerNumberStrings[4];
+	char * P32 playerNumberStrings[4];
 
 	// 800b5384
 	u8 characterSelectFallbackDirection1[CHARACTER_SELECT_DIRECTION_COUNT];
@@ -1272,7 +1272,7 @@ struct OverlayDATA_230
 	// 800b583c - UsaRetail
 	// 800b607c - EurRetail
 	// 800b98e0 - JpnRetail
-	struct RectMenu *battleMenuArray[5];
+	struct RectMenu * P32 battleMenuArray[5];
 
 	// 800b5850 - UsaRetail
 	// 800b6090 - EurRetail
@@ -1346,7 +1346,7 @@ struct OverlayDATA_230
 	// 800b59a0 - UsaRetail
 	// 800b6244 - EurRetail
 	// 800b9a4c - JpnRetail
-	struct Title *titleObj;
+	struct Title * P32 titleObj;
 
 	// ============== Track Select DYN ====================
 
@@ -1408,7 +1408,7 @@ struct OverlayDATA_230
 
 	// 800b5a0c - UsaRetail
 	// 800b62b0 - EurRetail
-	SVec2 *activeCharacterSelectWindowPos;
+	SVec2 * P32 activeCharacterSelectWindowPos;
 
 	// 800b5a10 - UsaRetail
 	// 800b62b4 - EurRetail
@@ -1421,7 +1421,7 @@ struct OverlayDATA_230
 
 	// 800b5a18 - UsaRetail
 	// 800b62bc - EurRetail
-	struct CharacterSelectMeta *activeCharacterSelectMeta;
+	struct CharacterSelectMeta * P32 activeCharacterSelectMeta;
 
 	// 800b5a1c - UsaRetail
 	// 800b62c0 - EurRetail
@@ -1459,7 +1459,7 @@ struct OverlayDATA_230
 	// 800b5a34 - UsaRetail
 	// 800b62dc - EurRetail
 	// 800b9ae0 - JpnRetail
-	struct TitleCameraPathFrame *titleIntroCameraPath;
+	struct TitleCameraPathFrame * P32 titleIntroCameraPath;
 
 	// 800b5a38 - UsaRetail
 	// 800b62e0 - EurRetail
@@ -1469,7 +1469,7 @@ struct OverlayDATA_230
 	// 800b5a3c - UsaRetail
 	// 800b62e4 - EurRetail
 	// 800b9ae8 - JpnRetail
-	struct TransitionMeta *characterSelectTransitionMeta;
+	struct TransitionMeta * P32 characterSelectTransitionMeta;
 
 	// 800b5a40 - UsaRetail
 	// 800b62e8 - EurRetail
@@ -1558,14 +1558,14 @@ struct OVR_230_VideoBSS
 
 	// 30,31...
 	// 800b67fc
-	uint32_t *in_Buf[2];
+	uint32_t * P32 in_Buf[2];
 
 	s32 dctOutSliceSize;
 
 	char pad800b6808[4];
 
 	// 800b680c
-	uint32_t *out_Buf[4];
+	uint32_t * P32 out_Buf[4];
 
 	// 800b681c
 	RECT slice;
@@ -1580,7 +1580,7 @@ struct OVR_230_VideoBSS
 	CdlLOC cdLocation3;
 
 	// 800b6830
-	CdlLOC *ptrCdLoc;
+	CdlLOC * P32 ptrCdLoc;
 };
 
 CTR_STATIC_ASSERT(sizeof(struct OVR_230_VideoBSS) == 0x88);

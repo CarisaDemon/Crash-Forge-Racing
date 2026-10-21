@@ -1,5 +1,11 @@
 #include <common.h>
 
+#if defined(CTR_NATIVE)
+/* One copy of the transition swoosh no longer has the artificial loudness
+ * of dozens of overlapping host-frame triggers at Unlimited FPS. */
+static int s_nativeMenuSwishGainLogCount;
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8002843c-0x80028468
 int CountSounds(void)
 {
@@ -76,6 +82,37 @@ int OtherFX_Play_LowLevel(u32 soundID, u8 boolAntiSpam, u32 flags)
 	}
 
 	howl_InitChannelAttr_OtherFX(ptrOtherFX, &channelAttr, volume, LR, distortion);
+
+#if defined(CTR_NATIVE)
+	/* Native-only restoration of menu swoosh loudness.
+	 * Effect 0x65 previously got launched dozens of times per animation
+	 * because host frames repeated the same 30-Hz transition tick.
+	 * Now MM_TransitionInOut fires it only once, so boost just that
+	 * single voice (5x gain, clamped to the SPU 0x3fff ceiling).
+	 * Respect the user's FX volume and stereo pan; do not boost
+	 * music, other SFX, or this sample in actual gameplay. */
+	if (id == 0x65 && gGT != NULL && (gGT->gameMode1 & MAIN_MENU))
+	{
+		enum { NATIVE_MENU_SWISH_GAIN = 5, NATIVE_SPU_VOLUME_LIMIT = 0x3fff };
+		const int oldLeft = channelAttr.audioL;
+		const int oldRight = channelAttr.audioR;
+		int left = oldLeft * NATIVE_MENU_SWISH_GAIN;
+		int right = oldRight * NATIVE_MENU_SWISH_GAIN;
+
+		if (left > NATIVE_SPU_VOLUME_LIMIT)
+			left = NATIVE_SPU_VOLUME_LIMIT;
+		if (right > NATIVE_SPU_VOLUME_LIMIT)
+			right = NATIVE_SPU_VOLUME_LIMIT;
+		channelAttr.audioL = (s16)left;
+		channelAttr.audioR = (s16)right;
+
+#if defined(CTR_INTERNAL)
+		if (s_nativeMenuSwishGainLogCount++ < 8)
+			Platform_Log("[MENU SWOOSH] gain=5x baseLR=%d/%d boostedLR=%d/%d fxVolume=%d\n",
+			             oldLeft, oldRight, left, right, sdata->vol_FX);
+#endif
+	}
+#endif
 
 	channelAttr.reverb = echo;
 

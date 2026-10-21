@@ -140,6 +140,14 @@ global_variable s32 s_rebindCaptureKind = PLATFORM_INPUT_DEVICE_NONE;
 global_variable s32 s_rebindCaptureRuntimeId = -1;
 global_variable s32 s_rebindCaptureArmed = 0;
 
+/* SDL haptics use milliseconds rather than the game's unlocked frame rate.
+ * Cache submitted motors per player to avoid a host API call at 200+ FPS. */
+global_variable u16 s_rumbleLastLow[NATIVE_INPUT_MAX_CONTROLLERS];
+global_variable u16 s_rumbleLastHigh[NATIVE_INPUT_MAX_CONTROLLERS];
+global_variable u64 s_rumbleLastUpdate[NATIVE_INPUT_MAX_CONTROLLERS];
+global_variable u64 s_rumblePreviewUntil[NATIVE_INPUT_MAX_CONTROLLERS];
+global_variable int s_rumbleUnsupportedReported[NATIVE_INPUT_MAX_CONTROLLERS];
+
 #define NATIVE_INPUT_REBIND_AXIS_THRESHOLD 16000
 
 global_variable const char *s_inputActionNames[PLATFORM_INPUT_ACTION_COUNT] =
@@ -1134,6 +1142,22 @@ internal const char *NativeInput_GamepadAxisDisplayName(
 	}
 }
 
+/* Decode each signed stick half-axis into an actual physical direction.
+ * Used by every binding view; arbitrary remaps remain clearly described. */
+internal const char *NativeInput_GamepadDirectionalAxisName(
+	SDL_GamepadAxis axis,
+	int inverse)
+{
+	switch (axis)
+	{
+	case SDL_GAMEPAD_AXIS_LEFTX:  return inverse ? "L-LEFT" : "L-RIGHT";
+	case SDL_GAMEPAD_AXIS_LEFTY:  return inverse ? "L-UP" : "L-DOWN";
+	case SDL_GAMEPAD_AXIS_RIGHTX: return inverse ? "R-LEFT" : "R-RIGHT";
+	case SDL_GAMEPAD_AXIS_RIGHTY: return inverse ? "R-UP" : "R-DOWN";
+	default: return NULL;
+	}
+}
+
 int Platform_InputFormatBindingName(
 	int deviceKind,
 	int binding,
@@ -1168,9 +1192,19 @@ int Platform_InputFormatBindingName(
 			~(NATIVE_INPUT_MAP_FLAG_AXIS | NATIVE_INPUT_MAP_FLAG_INVERSE);
 
 		if ((binding & NATIVE_INPUT_MAP_FLAG_AXIS) != 0)
+		{
+			name = NativeInput_GamepadDirectionalAxisName(
+				(SDL_GamepadAxis)raw,
+				(binding & NATIVE_INPUT_MAP_FLAG_INVERSE) != 0);
+			if (name != NULL)
+			{
+				snprintf(out, (size_t)outSize, "%s", name);
+				return 1;
+			}
 			name = NativeInput_GamepadAxisDisplayName(
 				PLATFORM_INPUT_GLYPH_GENERIC,
 				(SDL_GamepadAxis)raw);
+		}
 		else
 			name = NativeInput_GamepadButtonDisplayName(
 				PLATFORM_INPUT_GLYPH_GENERIC,
@@ -1255,6 +1289,14 @@ int Platform_InputFormatPlayerBindingName(
 		int raw =
 			binding &
 			~(NATIVE_INPUT_MAP_FLAG_AXIS | NATIVE_INPUT_MAP_FLAG_INVERSE);
+		name = NativeInput_GamepadDirectionalAxisName(
+			(SDL_GamepadAxis)raw,
+			(binding & NATIVE_INPUT_MAP_FLAG_INVERSE) != 0);
+		if (name != NULL)
+		{
+			snprintf(out, (size_t)outSize, "%s", name);
+			return 1;
+		}
 		name = NativeInput_GamepadAxisDisplayName(style, (SDL_GamepadAxis)raw);
 	}
 	else
@@ -1646,6 +1688,13 @@ internal void NativeInput_SwapControllerSlots(s32 slotA, s32 slotB)
 	s_controllerToSlotMapping[slotA] = s_controllerToSlotMapping[slotB];
 	s_controllerToSlotMapping[slotB] = mapping;
 
+	/* Device ownership changed; never reuse the previous player's haptics. */
+	s_rumbleLastLow[slotA] = s_rumbleLastLow[slotB] = 0;
+	s_rumbleLastHigh[slotA] = s_rumbleLastHigh[slotB] = 0;
+	s_rumbleLastUpdate[slotA] = s_rumbleLastUpdate[slotB] = 0;
+	s_rumblePreviewUntil[slotA] = s_rumblePreviewUntil[slotB] = 0;
+	s_rumbleUnsupportedReported[slotA] = s_rumbleUnsupportedReported[slotB] = 0;
+
 	if (s_lastActiveControllerSlot == slotA)
 	{
 		s_lastActiveControllerSlot = slotB;
@@ -1870,8 +1919,14 @@ internal void NativeInput_CloseController(s32 slot)
 	controller = &s_controllers[slot];
 	if (controller->controller != NULL)
 	{
+		SDL_RumbleGamepad(controller->controller, 0, 0, 0);
 		SDL_CloseGamepad(controller->controller);
 	}
+	s_rumbleLastLow[slot] = 0;
+	s_rumbleLastHigh[slot] = 0;
+	s_rumbleLastUpdate[slot] = 0;
+	s_rumblePreviewUntil[slot] = 0;
+	s_rumbleUnsupportedReported[slot] = 0;
 
 	controller->controller = NULL;
 	controller->instanceId = -1;
@@ -2697,47 +2752,112 @@ void Platform_InputPadVibrate(int port, unsigned char *table, int len)
 	struct NativeInputController *controller;
 	u16 freqHigh;
 	u16 freqLow;
+	u64 now;
+	int changed;
 
 	if (NativeInput_UseMultitapBus() != 0)
 	{
 		if (physicalSlot != 0)
-		{
 			return;
-		}
 		slot = tap;
 	}
 	else
 	{
 		if (tap != 0)
-		{
 			return;
-		}
 		slot = physicalSlot;
 	}
 
-	if ((slot < 0) || (slot >= NATIVE_INPUT_MAX_CONTROLLERS) || (table == NULL) || (len <= 0))
-	{
+	if (slot < 0 || slot >= NATIVE_INPUT_MAX_CONTROLLERS ||
+	    table == NULL || len <= 0)
 		return;
-	}
+
+	/* Only the gamepad physically assigned to this player may vibrate. */
+	if (s_playerDeviceKind[slot] != PLATFORM_INPUT_DEVICE_GAMEPAD)
+		return;
 
 	controller = &s_controllers[slot];
-	if (controller->controller == NULL)
-	{
+	if (controller->controller == NULL ||
+	    !SDL_GamepadConnected(controller->controller))
 		return;
-	}
 
-	freqHigh = table[0] * 255;
-	freqLow = len > 1 ? table[1] * 255 : 0;
+	now = SDL_GetTicks();
 
-	if ((freqLow != 0) && (freqLow < 4096))
-	{
+	/* Let the user feel the ON confirmation pulse without being cancelled
+	 * by the normal idle motor update on the next high-refresh frame. */
+	if (now < s_rumblePreviewUntil[slot])
+		return;
+
+	/* Original CTR DualShock: motor 0 = fast on/off, motor 1 = strength. */
+	freqHigh = (u16)(table[0] * 255);
+	freqLow = len > 1 ? (u16)(table[1] * 255) : 0;
+	if (freqLow != 0 && freqLow < 4096)
 		freqLow = 4096;
-	}
-
-	if ((freqHigh != 0) && (freqHigh < 4096))
-	{
+	if (freqHigh != 0 && freqHigh < 4096)
 		freqHigh = 4096;
+
+	changed = freqLow != s_rumbleLastLow[slot] ||
+	          freqHigh != s_rumbleLastHigh[slot];
+
+	/* Send OFF immediately; cap active host updates to 50 Hz and refresh
+	 * sustained motors before SDL's 160 ms pulse expires. */
+	if (!changed &&
+	    (freqLow == 0 && freqHigh == 0))
+		return;
+	if (!changed && now - s_rumbleLastUpdate[slot] < 100)
+		return;
+	if (changed && (freqLow != 0 || freqHigh != 0) &&
+	    now - s_rumbleLastUpdate[slot] < 20)
+		return;
+
+	if (SDL_RumbleGamepad(controller->controller, freqLow, freqHigh,
+	                     (freqLow != 0 || freqHigh != 0) ? 160 : 0))
+	{
+		s_rumbleLastLow[slot] = freqLow;
+		s_rumbleLastHigh[slot] = freqHigh;
+		s_rumbleLastUpdate[slot] = now;
+	}
+	else if (!s_rumbleUnsupportedReported[slot])
+	{
+		fprintf(stderr, "[CTR Native] Controller %d does not support SDL rumble: %s\n",
+		        (int)slot + 1, SDL_GetError());
+		s_rumbleUnsupportedReported[slot] = 1;
+	}
+}
+
+/* Called when VIBRATION switches in the per-player Controls menu. */
+int Platform_InputPreviewVibration(int playerIndex, int enabled)
+{
+	struct NativeInputController *controller;
+	u64 now;
+
+	if (!NativeInput_IsValidControllerSlot(playerIndex) ||
+	    s_playerDeviceKind[playerIndex] != PLATFORM_INPUT_DEVICE_GAMEPAD)
+		return 0;
+
+	controller = &s_controllers[playerIndex];
+	if (controller->controller == NULL ||
+	    !SDL_GamepadConnected(controller->controller))
+		return 0;
+
+	s_rumblePreviewUntil[playerIndex] = 0;
+	s_rumbleLastLow[playerIndex] = 0;
+	s_rumbleLastHigh[playerIndex] = 0;
+	s_rumbleLastUpdate[playerIndex] = 0;
+
+	if (!enabled)
+		return SDL_RumbleGamepad(controller->controller, 0, 0, 0);
+
+	/* 300 ms dual-motor confirmation, separate from gameplay motor timing. */
+	if (!SDL_RumbleGamepad(controller->controller, 20000, 42000, 300))
+	{
+		fprintf(stderr, "[CTR Native] Controller %d vibration preview failed: %s\n",
+		        playerIndex + 1, SDL_GetError());
+		s_rumbleUnsupportedReported[playerIndex] = 1;
+		return 0;
 	}
 
-	SDL_RumbleGamepad(controller->controller, freqLow, freqHigh, 200);
+	now = SDL_GetTicks();
+	s_rumblePreviewUntil[playerIndex] = now + 300;
+	return 1;
 }

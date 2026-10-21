@@ -80,7 +80,7 @@ void PROC_DestroySelf(struct Thread *t)
 	// this is usuallly PROC_DestroyInstance
 	if (t->funcThDestroy != 0)
 	{
-		t->funcThDestroy(t);
+		FN32(t->funcThDestroy)(t);
 	}
 
 	// used by RB_Follower
@@ -595,7 +595,7 @@ internal struct Thread *ThTick_RunThreadNative(struct ThTickNativeContext *conte
 	context->currentThread = thread;
 	if (setjmp(context->env) == 0)
 	{
-		thread->funcThTick(thread);
+		FN32(thread->funcThTick)(thread);
 	}
 
 	return context->currentThread;
@@ -651,7 +651,7 @@ void ThTick_RunBucket(struct Thread *thread)
                 NativePerf_BotEnd(botProfileID,NATIVE_PERF_BOT_AI);
 #endif
 #else
-			t->funcThTick(t);
+			FN32(t->funcThTick)(t);
 #endif
 		}
 

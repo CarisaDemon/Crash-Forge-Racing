@@ -4,6 +4,7 @@
 #if defined(CTR_NATIVE)
 
 #include <platform/native_assets.h>
+#include <platform/native_audio.h>
 #include <platform/native_renderer.h>
 #include <SDL3/SDL.h>
 #include <stdio.h>
@@ -16,6 +17,8 @@
 #define NATIVE_HUD_RESERVES_NORMAL_MAX 3840
 #define NATIVE_HUD_RESERVES_COUNTER_GAP 5
 #define NATIVE_HUD_CNK_SIDE_OFFSET 52
+/* Additional virtual HUD px downwards in HIGH, shared by CNK 2D and CNK 3D. */
+#define NATIVE_HUD_CNK_HIGH_DROP 20
 #define NATIVE_HUD_CNK_SIDE_OFFSET_SPLIT 36
 #define NATIVE_HUD_CNK_GAUGE_ATLAS_W 252
 #define NATIVE_HUD_CNK_GAUGE_ATLAS_H 64
@@ -57,11 +60,17 @@ struct NativeHUDSettings
 	int saffiHUD;
 	int reservesBar;
 	int driftMeter;
+	int cnkMeterHeight;
 };
 
-static struct NativeHUDSettings s_nativeHUDSettings = {0, 0, 0, NATIVE_HUD_DRIFT_OFF};
+static struct NativeHUDSettings s_nativeHUDSettings = {0, 0, 0, NATIVE_HUD_DRIFT_OFF, -1};
 static TextureID s_nativeHUDCNKGaugeTexture;
 static int s_nativeHUDCNKGaugeLoadAttempted;
+/* One audible cue per charge (up to three), not per whole slide.
+ * The physics counter advances at every L1/R1 boost opportunity and is
+ * independent for each local driver, also in split-screen Battle. */
+static u8 s_nativeHUDCNKChargeStarted[4];
+static u8 s_nativeHUDCNKChargeAttempt[4];
 
 static int NativeHUD_Clamp(int value, int minValue, int maxValue)
 {
@@ -77,7 +86,9 @@ static void NativeHUD_SanitizeSettings(void)
 	s_nativeHUDSettings.driftMeter =
 		NativeHUD_Clamp(s_nativeHUDSettings.driftMeter,
 		               NATIVE_HUD_DRIFT_OFF,
-		               NATIVE_HUD_DRIFT_CNK_CENTERED);
+		               NATIVE_HUD_DRIFT_CNK_3D);
+	s_nativeHUDSettings.cnkMeterHeight =
+		NativeHUD_Clamp(s_nativeHUDSettings.cnkMeterHeight, -1, 1);
 }
 
 static void NativeHUD_LoadSettings(void)
@@ -104,12 +115,21 @@ static void NativeHUD_LoadSettings(void)
 				s_nativeHUDSettings.reservesBar = value;
 			else if (strcmp(key, "drift_meter") == 0)
 				s_nativeHUDSettings.driftMeter = value;
+			else if (strcmp(key, "cnk_meter_height") == 0)
+				s_nativeHUDSettings.cnkMeterHeight = value;
 		}
 		fclose(f);
 	}
 
 	s_nativeHUDSettings.loaded = 1;
 	NativeHUD_SanitizeSettings();
+	/* Predecode in HUD init; NEVER read a file on first powerslide. */
+	{
+		char cuePath[1024];
+		if (NativeAssets_BuildPath(
+				"audio/cnk/kartbrv3.ogg",cuePath,sizeof(cuePath)))
+			NativeAudio_CNKChargePreload(cuePath);
+	}
 }
 
 static void NativeHUD_SaveSettings(void)
@@ -130,6 +150,7 @@ static void NativeHUD_SaveSettings(void)
 	fprintf(f, "saffi_hud=%d\n", s_nativeHUDSettings.saffiHUD);
 	fprintf(f, "reserves_bar=%d\n", s_nativeHUDSettings.reservesBar);
 	fprintf(f, "drift_meter=%d\n", s_nativeHUDSettings.driftMeter);
+	fprintf(f, "cnk_meter_height=%d\n", s_nativeHUDSettings.cnkMeterHeight);
 	fclose(f);
 }
 
@@ -176,7 +197,26 @@ void NativeHUD_SetDriftMeterMode(int mode)
 {
 	NativeHUD_LoadSettings();
 	s_nativeHUDSettings.driftMeter =
-		NativeHUD_Clamp(mode, NATIVE_HUD_DRIFT_OFF, NATIVE_HUD_DRIFT_CNK_CENTERED);
+		NativeHUD_Clamp(mode, NATIVE_HUD_DRIFT_OFF, NATIVE_HUD_DRIFT_CNK_3D);
+	NativeHUD_SaveSettings();
+}
+
+int NativeHUD_GetCNKMeterHeight(void)
+{
+	NativeHUD_LoadSettings();
+	if (s_nativeHUDSettings.cnkMeterHeight >= 0)
+		return s_nativeHUDSettings.cnkMeterHeight;
+	/* No saved preference: leave the existing CNK 2D at viewport centre
+	 * and preserve CNK 3D's low preview as its default. */
+	return NativeHUD_GetDriftMeterMode() == NATIVE_HUD_DRIFT_CNK_3D
+		? NATIVE_HUD_CNK_HEIGHT_LOW : NATIVE_HUD_CNK_HEIGHT_HIGH;
+}
+
+void NativeHUD_SetCNKMeterHeight(int height)
+{
+	NativeHUD_LoadSettings();
+	s_nativeHUDSettings.cnkMeterHeight =
+		NativeHUD_Clamp(height, NATIVE_HUD_CNK_HEIGHT_HIGH, NATIVE_HUD_CNK_HEIGHT_LOW);
 	NativeHUD_SaveSettings();
 }
 
@@ -634,10 +674,10 @@ static void NativeHUD_DrawCNKSlideMeter(
 		gaugeCenterX += sideOffset;
 	}
 
-	/* Y is centered in the player's viewport; X behavior stays unchanged. */
-	gaugeY =
-		viewport->y +
-		(viewport->h / 2) -
+	/* HIGH is now 20 virtual px lower; LOW remains unchanged. */
+	gaugeY = viewport->y +
+		((NativeHUD_GetCNKMeterHeight() == NATIVE_HUD_CNK_HEIGHT_HIGH)
+		 ? viewport->h / 2 + NATIVE_HUD_CNK_HIGH_DROP : (viewport->h * 3) / 4) -
 		(drawH / 2);
 
 	NativeHUD_DrawCNKGaugeFrame(
@@ -648,6 +688,8 @@ static void NativeHUD_DrawCNKSlideMeter(
 		drawH,
 		mirrorX);
 }
+
+#include "NativeHUDCNK3D.inc"
 
 static int NativeHUD_SaffiScaleValue(int value, int scale)
 {
@@ -983,9 +1025,47 @@ void NativeHUD_RenderPlayerExtras(struct Driver *driver)
 	drawSaffi = NativeHUD_GetSaffiEnabled();
 
 	if (driftMode == NATIVE_HUD_DRIFT_OFF && !drawReserves && !drawSaffi)
+	{
+		if (driver->driverID>=0 && driver->driverID<4)
+		{
+			s_nativeHUDCNKChargeStarted[driver->driverID]=0;
+			s_nativeHUDCNKChargeAttempt[driver->driverID]=0;
+		}
 		return;
+	}
 
 	NativeHUD_GetPlayerData(driver, &hud);
+
+	/* User requested sound at START of charging, NOT the full threshold.
+	 * Same progress = maxRoom-slideRoom used by both CNK HUDs. */
+	if (driver->driverID>=0 && driver->driverID<4)
+	{
+		const int local=driver->driverID;
+		const int cnkMode = driftMode==NATIVE_HUD_DRIFT_CNK_CENTERED ||
+			                driftMode==NATIVE_HUD_DRIFT_CNK_3D;
+		const int sliding = cnkMode && hud.isDrifting;
+		const int charging = sliding &&
+			hud.slideMaxRoom>0 && hud.slideRoom<hud.slideMaxRoom;
+		/* The 3 independent charge cycles in a single drift are keyed
+		 * to the actual physics boost-attempt counter. Meter room may
+		 * fluctuate at 30..Unlimited FPS, but that cannot retrigger.
+		 * A new attempt CAN play the cue even before the prior 1 s
+		 * sample has fully finished. */
+		const int attempt=(int)driver->KartStates.Drifting.numBoostsAttempted;
+		if (!sliding)
+		{
+			s_nativeHUDCNKChargeStarted[local]=0;
+			s_nativeHUDCNKChargeAttempt[local]=0;
+		}
+		else if (charging && attempt>=0 && attempt<3 &&
+			     (!s_nativeHUDCNKChargeStarted[local] ||
+			      s_nativeHUDCNKChargeAttempt[local]!=attempt))
+		{
+			s_nativeHUDCNKChargeStarted[local]=1;
+			s_nativeHUDCNKChargeAttempt[local]=(u8)attempt;
+			NativeAudio_CNKChargePlay(local);
+		}
+	}
 
 	/* The UI OT is prepend-based: primitives submitted earlier render later,
 	 * therefore visually on top. Submit meters/reserves before Saffi so any
@@ -995,6 +1075,8 @@ void NativeHUD_RenderPlayerExtras(struct Driver *driver)
 		NativeHUD_DrawCenteredCTRSlideMeter(driver, &hud);
 	else if (driftMode == NATIVE_HUD_DRIFT_CNK_CENTERED)
 		NativeHUD_DrawCNKSlideMeter(driver, &hud);
+	else if (driftMode == NATIVE_HUD_DRIFT_CNK_3D)
+		NativeHUD_DrawCNK3DSlideMeter(driver, &hud);
 
 	if (drawReserves)
 		NativeHUD_DrawReservesBar(

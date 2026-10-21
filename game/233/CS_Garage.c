@@ -78,20 +78,25 @@ void CS_Garage_ZoomOut(s16 zoomState)
 		Audio_SetState_Safe(AUDIO_GARAGE);
 
 #ifdef CTR_NATIVE
-		/* Retail keeps the main-menu CSEQ flowing through Adventure Garage.
-		 * Only replace it when an explicit level-40 override exists; otherwise
-		 * leave the current music untouched for faithful retail continuity.
-		 * Keep this trigger source-agnostic so native CSEQ overrides can share
-		 * the same level resolver later. */
-		if (NativeCustomMusic_HasLevelTrack(ADVENTURE_GARAGE) &&
-			NativeCustomMusic_TryStartLevel(ADVENTURE_GARAGE))
+		/* In retail the menu theme may continue into Adventure Garage,
+		 * so preserve it when no garage-specific replacement exists.
+		 * With a level-40 OGG override, however, the old external CSEQ
+		 * menu song must be STOPPED before starting the OGG. Merely
+		 * changing song-0's volume to zero did not stop every native
+		 * CSEQ pool and caused both soundtracks to play together. */
+		if (NativeCustomMusic_HasLevelTrack(ADVENTURE_GARAGE))
 		{
-			if (sdata->cseqBoolPlay != 0 &&
-				sdata->cseqHighestIndex == 0)
+			CseqMusic_StopAll();
+			Music_End();
+			if (NativeCustomMusic_TryStartLevel(ADVENTURE_GARAGE))
 			{
-				/* Preserve CSEQ state/clock but silence it while the custom
-				 * level-40 track is audible. */
-				CseqMusic_ChangeVolume(0, 0, 0);
+				Platform_Log("[GARAGE MUSIC] level 40 OGG started; prior menu CSEQ stopped\n");
+			}
+			else
+			{
+				/* An invalid/missing replacement must never cause the
+				 * previous CSEQ and a half-started OGG to overlap. */
+				Platform_LogWarn("[GARAGE MUSIC] override failed; leaving garage music silent\n");
 			}
 		}
 #endif

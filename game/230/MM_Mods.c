@@ -4,6 +4,8 @@
 #include <VanillaRacerPatch.h>
 #include <platform/native_assets.h>
 #include <platform/native_mod_packages.h>
+#include <platform/native_custom_tracks.h>
+#include <platform/native_music_selection.h>
 #include <platform/native_perf.h>
 #include <platform/native_gltf.h>
 #include <platform/native_obj.h>
@@ -17,6 +19,9 @@
 
 #if defined(CTR_NATIVE)
 
+#define NATIVE_MODS_MUSIC_OGG 1
+#define NATIVE_MODS_MUSIC_CSEQ 2
+#define NATIVE_MODS_TRACK_CATEGORY 3
 #define NATIVE_MODS_BUTTON_W 64
 #define NATIVE_MODS_BUTTON_H 20
 #define NATIVE_MODS_BUTTON_X (512 - 6 - NATIVE_MODS_BUTTON_W)
@@ -27,24 +32,43 @@
  * Keep launcher focus/navigation/input intact; restore to 1 next build. */
 #define NATIVE_TEST_LAUNCHER_VISIBLE 0
 
-#define NATIVE_MODS_PANEL_X 270
-#define NATIVE_MODS_PANEL_Y 6
-#define NATIVE_MODS_PANEL_W 236
-#define NATIVE_MODS_PANEL_H 204
+/* Mods keeps its established dual-pane layout, mirrored horizontally:
+ * categories at left, details at right. Both panels leave a clear top band
+ * for the global BACK chrome (y=14..34) so it is never hidden beneath
+ * panel rectangles or category highlights. */
+#define NATIVE_MODS_NAV_X 6
+#define NATIVE_MODS_NAV_Y 38
+#define NATIVE_MODS_NAV_W 236
+#define NATIVE_MODS_NAV_H 172
+#define NATIVE_MODS_NAV_CENTER_X (NATIVE_MODS_NAV_X + NATIVE_MODS_NAV_W / 2)
+#define NATIVE_MODS_NAV_CONTENT_X (NATIVE_MODS_NAV_X + 8)
+#define NATIVE_MODS_NAV_CONTENT_W (NATIVE_MODS_NAV_W - 16)
+#define NATIVE_MODS_NAV_TITLE_Y 42
+#define NATIVE_MODS_NAV_LIST_Y 61
+
+#define NATIVE_MODS_PANEL_X 248
+#define NATIVE_MODS_PANEL_Y 38
+#define NATIVE_MODS_PANEL_W 258
+#define NATIVE_MODS_PANEL_H 172
 #define NATIVE_MODS_PANEL_CENTER_X (NATIVE_MODS_PANEL_X + NATIVE_MODS_PANEL_W / 2)
-#define NATIVE_MODS_CONTENT_X (NATIVE_MODS_PANEL_X + 8)
-#define NATIVE_MODS_CONTENT_W (NATIVE_MODS_PANEL_W - 16)
-#define NATIVE_MODS_TITLE_Y 14
-#define NATIVE_MODS_LIST_Y 40
-#define NATIVE_MODS_FOOTER_Y 190
-#define NATIVE_MODS_ROW_LINE_H 11
-#define NATIVE_MODS_ROW_GAP 3
+#define NATIVE_MODS_CONTENT_X (NATIVE_MODS_PANEL_X + 9)
+#define NATIVE_MODS_CONTENT_W (NATIVE_MODS_PANEL_W - 18)
+#define NATIVE_MODS_TITLE_Y 42
+#define NATIVE_MODS_LIST_Y 60
+#define NATIVE_MODS_FOOTER_Y 198
+#define NATIVE_MODS_ROW_LINE_H 10
+#define NATIVE_MODS_ROW_GAP 1
 #define NATIVE_MODS_SLIDE 512
 #define NATIVE_MODS_TRANSITION_FRAMES 12
+/* Six two-line rows still fit above the fixed footer in the worst case. */
 #define NATIVE_MODS_CHARACTER_ROWS 5
 #define NATIVE_MODS_INSTALLED_ROWS 5
 #define NATIVE_MODS_WHEEL_ROWS 5
 #define NATIVE_MODS_KART_ROWS 5
+#define NATIVE_MODS_TRACK_ROWS 5
+#define NATIVE_MODS_MUSIC_ROWS 5
+#define NATIVE_MODS_MAX_TRACKS 64
+#define NATIVE_MODS_MAX_MUSIC 64
 #define NATIVE_MODS_MAX_INSTALLED 128
 #define NATIVE_MODS_MAX_WHEELS 32
 #define NATIVE_MODS_MAX_KARTS 64
@@ -58,6 +82,8 @@ enum NativeModsView
     NATIVE_MODS_VIEW_WHEELS,
     NATIVE_MODS_VIEW_TRACKS,
     NATIVE_MODS_VIEW_GENERAL,
+    NATIVE_MODS_VIEW_OGG_MUSIC,
+    NATIVE_MODS_VIEW_CSEQ_MUSIC,
 };
 
 enum NativeModsState
@@ -69,12 +95,24 @@ enum NativeModsState
     NATIVE_MODS_CLOSING,
 };
 static const char *s_nativeModsRootNames[] = {
-    "INSTALLED MODS",
     "CHARACTERS",
     "KARTS",
     "WHEELS",
     "TRACKS",
+    "OGG MUSIC",
+    "CSEQ MUSIC",
     "GENERAL"
+};
+/* Do not rely on adjacent enum values: Installed Mods is deliberately
+ * removed from the public navigation, not from the racer registry. */
+static const int s_nativeModsRootViews[] = {
+    NATIVE_MODS_VIEW_CHARACTERS,
+    NATIVE_MODS_VIEW_KARTS,
+    NATIVE_MODS_VIEW_WHEELS,
+    NATIVE_MODS_VIEW_TRACKS,
+    NATIVE_MODS_VIEW_OGG_MUSIC,
+    NATIVE_MODS_VIEW_CSEQ_MUSIC,
+    NATIVE_MODS_VIEW_GENERAL
 };
 
 #define NATIVE_MODS_ROOT_COUNT ((int)(sizeof(s_nativeModsRootNames) / sizeof(s_nativeModsRootNames[0])))
@@ -108,6 +146,26 @@ struct NativeKartMod
     int enabled;
 };
 
+/* Management records are separate from the native track/audio playback
+ * registries. Disabled packs must remain in the UI for re-enabling. */
+struct NativeManagedPack
+{
+    char slug[64];
+    char displayName[80];
+    char iniPath[1536];
+    int enabled;
+    int kind;
+    int songCount;
+    int formatOK;
+};
+static struct NativeManagedPack s_nativeTrackPacks[NATIVE_MODS_MAX_TRACKS];
+static int s_nativeTrackPackCount;
+static struct NativeManagedPack s_nativeMusicPacks[NATIVE_MODS_MAX_MUSIC];
+static int s_nativeMusicPackCount;
+static int s_nativeTrackPage, s_nativeTrackRow;
+static int s_nativeOggPage, s_nativeOggRow;
+static int s_nativeCseqPage, s_nativeCseqRow;
+
 static struct NativeInstalledMod s_nativeInstalledMods[NATIVE_MODS_MAX_INSTALLED];
 static int s_nativeInstalledModCount;
 static int s_nativeInstalledRow;
@@ -126,6 +184,7 @@ static int s_nativeWheelSelectionApplied;
 
 static int s_nativeModsState;
 static int s_nativeModsView;
+static int s_nativeModsContentFocus;
 static int s_nativeModsNextView;
 static int s_nativeModsRow;
 static int s_nativeModsCharacterRow;
@@ -141,6 +200,11 @@ static int s_nativeModsTitleHidden;
 static u16 s_nativeModsSavedState;
 static int s_nativeModsTransitionFrame;
 static int s_nativeModsTransitionDirection;
+/* Mouse hover cannot steal selection while the pointer is stationary.
+ * Keyboard/controller input remains authoritative until the mouse moves. */
+static int s_nativeModsMouseLastX = -1;
+static int s_nativeModsMouseLastY = -1;
+static int s_nativeModsMouseMoved;
 
 static struct TransitionMeta s_nativeModsTransitionMeta[2] = {
     {0, 0, 0, 0, 0},
@@ -151,6 +215,22 @@ static int MM_Mods_PointInRect(int x, int y, const RECT *r)
 {
     return (x >= r->x) && (x < r->x + r->w) &&
            (y >= r->y) && (y < r->y + r->h);
+}
+
+/* Called once, before drawing the open browser. Previously every draw
+ * pass hovered the same row forever, undoing any pad/keyboard navigation. */
+static void MM_Mods_UpdateMouseHover(void)
+{
+    int x = -1, y = -1;
+    const int valid = RECTMENU_NativeTouchGet(&x, &y);
+    s_nativeModsMouseMoved =
+        valid && (x != s_nativeModsMouseLastX ||
+                  y != s_nativeModsMouseLastY) &&
+        (sdata->AnyPlayerTap == 0);
+    /* Keep coordinates even when a keyboard press temporarily disables
+     * mouse ownership. Re-arming at the exact same pixel isn't movement. */
+    s_nativeModsMouseLastX = x;
+    s_nativeModsMouseLastY = y;
 }
 
 static void MM_Mods_CopyTextFit(char *dst, size_t dstSize,
@@ -286,7 +366,7 @@ static int MM_Mods_RowHeight(int lineCount)
     if (lineCount < 1)
         lineCount = 1;
 
-    return lineCount * NATIVE_MODS_ROW_LINE_H + 5;
+    return lineCount * NATIVE_MODS_ROW_LINE_H + 3;
 }
 
 static void MM_Mods_SetLauncherMenuLock(struct RectMenu *mainMenu,
@@ -489,7 +569,7 @@ static void MM_Mods_DrawPanelTitle(int offsetX, const char *title)
     MM_Mods_DrawCenteredFit(title,
                             NATIVE_MODS_PANEL_CENTER_X + offsetX,
                             NATIVE_MODS_TITLE_Y,
-                            FONT_BIG, ORANGE,
+                            FONT_SMALL, ORANGE,
                             NATIVE_MODS_CONTENT_W - 8);
 }
 
@@ -506,59 +586,64 @@ static void MM_Mods_DrawPanelBackground(int offsetX)
     /* Called last so it is rendered first, behind all menu text. */
     RECTMENU_DrawInnerRect(&panel, 4, gGT->backBuffer->otMem.uiOT);
 }
+static void MM_Mods_DrawNavBackground(int offsetX)
+{
+    RECT nav = {
+        (s16)(NATIVE_MODS_NAV_X + offsetX),
+        NATIVE_MODS_NAV_Y, NATIVE_MODS_NAV_W, NATIVE_MODS_NAV_H
+    };
+    RECTMENU_DrawInnerRect(&nav, 4, sdata->gGT->backBuffer->otMem.uiOT);
+}
+
+/* Category navigation is in the left pane, details in the right pane.
+ * Pointer movement previews a category; clicks transfer keyboard focus
+ * to details, and a stationary mouse cannot steal controller focus. */
 static void MM_Mods_DrawRoot(int offsetX, int interactive)
 {
     struct GameTracker *gGT = sdata->gGT;
     u32 *ot = gGT->backBuffer->otMem.uiOT;
-    int mouseX = -1;
-    int mouseY = -1;
-    int y = NATIVE_MODS_LIST_Y;
-
-    MM_Mods_DrawPanelTitle(offsetX, "MODS");
+    int mouseX = -1, mouseY = -1;
+    int y = NATIVE_MODS_NAV_LIST_Y;
     RECTMENU_NativeTouchGet(&mouseX, &mouseY);
+
+    MM_Mods_DrawCenteredFit("MODS",
+        NATIVE_MODS_NAV_CENTER_X + offsetX, NATIVE_MODS_NAV_TITLE_Y,
+        FONT_SMALL, ORANGE, NATIVE_MODS_NAV_CONTENT_W - 8);
 
     for (int i = 0; i < NATIVE_MODS_ROOT_COUNT; i++)
     {
         RECT rowRect = {
-            (s16)(NATIVE_MODS_CONTENT_X + offsetX),
-            (s16)(y - 3),
-            NATIVE_MODS_CONTENT_W,
-            18
+            (s16)(NATIVE_MODS_NAV_CONTENT_X + offsetX),
+            (s16)(y - 2), NATIVE_MODS_NAV_CONTENT_W, 16
         };
+        const int inside = interactive &&
+            MM_Mods_PointInRect(mouseX, mouseY, &rowRect);
+        const int clicked = inside &&
+            RECTMENU_NativeTouchConsumeRect(&rowRect);
 
-        if (interactive && MM_Mods_PointInRect(mouseX, mouseY, &rowRect))
+        if ((inside && s_nativeModsMouseMoved) || clicked)
+        {
             s_nativeModsRow = i;
+            s_nativeModsView = s_nativeModsRootViews[i];
+            s_nativeModsContentFocus = clicked ? 1 : 0;
+        }
 
         MM_Mods_DrawCenteredFit(s_nativeModsRootNames[i],
-                                NATIVE_MODS_PANEL_CENTER_X + offsetX,
-                                y,
-                                FONT_SMALL, WHITE,
-                                NATIVE_MODS_CONTENT_W - 12);
-
+            NATIVE_MODS_NAV_CENTER_X + offsetX, y,
+            FONT_SMALL, WHITE, NATIVE_MODS_NAV_CONTENT_W - 12);
         if (s_nativeModsRow == i)
             CTR_Box_DrawClearBox(&rowRect, &sdata->menuRowHighlight_Normal,
                                  TRANS_50_DECAL, ot);
-
-        if (interactive && (s_nativeModsRow == i) &&
-            RECTMENU_NativeTouchConsumeRect(&rowRect))
-        {
-            s_nativeModsView = NATIVE_MODS_VIEW_INSTALLED + i;
-            s_nativeModsRow = 0;
-            RECTMENU_ClearInput();
-            break;
-        }
-
-        y += 23;
+        y += 19;
     }
 
-    MM_Mods_DrawCenteredFit("SELECT A CATEGORY",
-                            NATIVE_MODS_PANEL_CENTER_X + offsetX,
-                            NATIVE_MODS_FOOTER_Y,
-                            FONT_SMALL, ORANGE,
-                            NATIVE_MODS_CONTENT_W - 8);
-
-    MM_Mods_DrawPanelBackground(offsetX);
+    MM_Mods_DrawCenteredFit(
+        s_nativeModsContentFocus ? "BACK: CATEGORIES" : "SELECT CATEGORY",
+        NATIVE_MODS_NAV_CENTER_X + offsetX, NATIVE_MODS_FOOTER_Y,
+        FONT_SMALL, ORANGE, NATIVE_MODS_NAV_CONTENT_W - 8);
+    MM_Mods_DrawNavBackground(offsetX);
 }
+
 static char *MM_Mods_Trim(char *text)
 {
     char *end;
@@ -897,6 +982,222 @@ static void MM_Mods_ReadInstalledMod(const char *folderName, const char *iniPath
     s_nativeInstalledModCount++;
 }
 
+/* music.ini is a per-pack module:
+ * [forge_mod] id=web_id / type=Music
+ * [music] name=... / format=ogg|cseq / enabled=true
+ * Songs are allowed in the module root or tracks/ or music/.
+ * Level-by-level soundtrack assignment is intentionally left to Settings.
+ */
+static int MM_Mods_HasExtension(const char *name, const char *extension)
+{
+    size_t len = strlen(name), suffix = strlen(extension);
+    return len > suffix &&
+           MM_Mods_EqualsIgnoreCase(name + len - suffix, extension);
+}
+
+static int MM_Mods_CountMusicFiles(const char *folder, int kind, int depth)
+{
+    DIR *dir = opendir(folder);
+    struct dirent *ent;
+    int count = 0;
+    if (!dir) return 0;
+
+    while ((ent = readdir(dir)) != NULL && count < 999)
+    {
+        char path[1600];
+        struct stat st;
+        const char *name = ent->d_name;
+        if (!strcmp(name, ".") || !strcmp(name, ".."))
+            continue;
+        if (snprintf(path, sizeof(path), "%s/%s", folder, name)
+            >= (int)sizeof(path) || stat(path, &st) != 0)
+            continue;
+
+        if (S_ISREG(st.st_mode))
+        {
+            if ((kind == NATIVE_MODS_MUSIC_OGG &&
+                 MM_Mods_HasExtension(name, ".ogg")) ||
+                (kind == NATIVE_MODS_MUSIC_CSEQ &&
+                 MM_Mods_HasExtension(name, ".cseq")))
+                ++count;
+        }
+        else if (depth > 0 && S_ISDIR(st.st_mode) &&
+                 (MM_Mods_EqualsIgnoreCase(name, "music") ||
+                  MM_Mods_EqualsIgnoreCase(name, "tracks") ||
+                  MM_Mods_EqualsIgnoreCase(name, "songs")))
+            count += MM_Mods_CountMusicFiles(path, kind, depth - 1);
+    }
+    closedir(dir);
+    return count;
+}
+
+static int MM_Mods_ManagedCompare(const void *left, const void *right)
+{
+    const struct NativeManagedPack *a = left, *b = right;
+    const unsigned char *x = (const unsigned char *)a->displayName;
+    const unsigned char *y = (const unsigned char *)b->displayName;
+    while (*x && *y)
+    {
+        int diff = tolower(*x) - tolower(*y);
+        if (diff) return diff;
+        ++x; ++y;
+    }
+    return (int)*x - (int)*y;
+}
+
+static void MM_Mods_AddManagedPack(const char *folder, const char *slug,
+                                   const char *filename, int track)
+{
+    struct NativeManagedPack *pack;
+    FILE *f;
+    char ini[1536], line[512], section[48] = "";
+    char declaredFormat[32] = "";
+    int ogg, cseq;
+
+    if (track)
+    {
+        if (s_nativeTrackPackCount >= NATIVE_MODS_MAX_TRACKS) return;
+        pack = &s_nativeTrackPacks[s_nativeTrackPackCount];
+    }
+    else
+    {
+        if (s_nativeMusicPackCount >= NATIVE_MODS_MAX_MUSIC) return;
+        pack = &s_nativeMusicPacks[s_nativeMusicPackCount];
+    }
+
+    if (snprintf(ini, sizeof(ini), "%s/%s", folder, filename)
+        >= (int)sizeof(ini))
+        return;
+    f = fopen(ini, "rb");
+    if (!f) return;
+    memset(pack, 0, sizeof(*pack));
+    snprintf(pack->slug, sizeof(pack->slug), "%s", slug);
+    snprintf(pack->displayName, sizeof(pack->displayName), "%s", slug);
+    snprintf(pack->iniPath, sizeof(pack->iniPath), "%s", ini);
+    pack->enabled = 1;
+
+    while (fgets(line, sizeof(line), f))
+    {
+        char *s = MM_Mods_Trim(line), *eq;
+        if (!*s || *s == ';' || *s == '#') continue;
+        if (*s == '[')
+        {
+            char *e = strchr(s, ']');
+            if (!e) continue;
+            *e = 0;
+            snprintf(section, sizeof(section), "%s", MM_Mods_Trim(s + 1));
+            continue;
+        }
+        if (!MM_Mods_EqualsIgnoreCase(section, track ? "track" : "music"))
+            continue;
+        eq = strchr(s, '=');
+        if (!eq) continue;
+        *eq++ = 0;
+        s = MM_Mods_Trim(s);
+        eq = MM_Mods_Trim(eq);
+        if (MM_Mods_EqualsIgnoreCase(s, "name") ||
+            MM_Mods_EqualsIgnoreCase(s, "display_name"))
+            snprintf(pack->displayName, sizeof(pack->displayName), "%s", eq);
+        else if (MM_Mods_EqualsIgnoreCase(s, "enabled"))
+            pack->enabled = MM_Mods_ParseBool(eq, pack->enabled);
+        else if (MM_Mods_EqualsIgnoreCase(s, "format") ||
+                 MM_Mods_EqualsIgnoreCase(s, "source") ||
+                 MM_Mods_EqualsIgnoreCase(s, "kind"))
+            snprintf(declaredFormat, sizeof(declaredFormat), "%s", eq);
+    }
+    fclose(f);
+
+    if (track)
+    {
+        pack->formatOK =
+            MM_Mods_EqualsIgnoreCase(declaredFormat, "native_lev_vrm");
+        pack->kind = NATIVE_MODS_TRACK_CATEGORY;
+        ++s_nativeTrackPackCount;
+        return;
+    }
+
+    ogg = MM_Mods_CountMusicFiles(folder, NATIVE_MODS_MUSIC_OGG, 2);
+    cseq = MM_Mods_CountMusicFiles(folder, NATIVE_MODS_MUSIC_CSEQ, 2);
+    if (MM_Mods_EqualsIgnoreCase(declaredFormat, "ogg"))
+        pack->kind = NATIVE_MODS_MUSIC_OGG;
+    else if (MM_Mods_EqualsIgnoreCase(declaredFormat, "cseq"))
+        pack->kind = NATIVE_MODS_MUSIC_CSEQ;
+    else if (ogg > 0 && cseq == 0)
+        pack->kind = NATIVE_MODS_MUSIC_OGG;
+    else if (cseq > 0 && ogg == 0)
+        pack->kind = NATIVE_MODS_MUSIC_CSEQ;
+    else
+        return; /* Explicit format required when the module is ambiguous. */
+
+    pack->songCount =
+        pack->kind == NATIVE_MODS_MUSIC_OGG ? ogg : cseq;
+    pack->formatOK = pack->songCount > 0;
+    ++s_nativeMusicPackCount;
+}
+
+static void MM_Mods_ScanManagedDirectory(const char *rel, int legacyTracks)
+{
+    char root[1024];
+    DIR *dir;
+    struct dirent *ent;
+
+    if (!NativeAssets_BuildPath(rel, root, sizeof(root)) ||
+        (dir = opendir(root)) == NULL)
+        return;
+
+    while ((ent = readdir(dir)) != NULL)
+    {
+        char path[1200];
+        const char *slug = ent->d_name;
+        if (!strcmp(slug, ".") || !strcmp(slug, ".."))
+            continue;
+        if (snprintf(path, sizeof(path), "%s/%s", root, slug)
+            >= (int)sizeof(path) ||
+            !MM_Mods_IsDirectory(path))
+            continue;
+
+        if (legacyTracks)
+        {
+            /* Legacy track and music folders do not require a forge_mod
+             * web ID. Keep them manageable without relocating content. */
+            if (legacyTracks == 1)
+                MM_Mods_AddManagedPack(path, slug, "track.ini", 1);
+            else
+                MM_Mods_AddManagedPack(path, slug, "music.ini", 0);
+            continue;
+        }
+
+        /* New modular folders use an independent immutable web ID. */
+        if (NativeModPackage_IsValid(slug, "Track"))
+            MM_Mods_AddManagedPack(path, slug, "track.ini", 1);
+        if (NativeModPackage_IsValid(slug, "Music"))
+            MM_Mods_AddManagedPack(path, slug, "music.ini", 0);
+    }
+    closedir(dir);
+}
+
+static void MM_Mods_ScanManagedPacks(void)
+{
+    s_nativeTrackPackCount = 0;
+    s_nativeMusicPackCount = 0;
+    if (NativeSession_NoModsActive())
+        return;
+    MM_Mods_ScanManagedDirectory("mods", 0);
+    MM_Mods_ScanManagedDirectory("mods/tracks", 1);
+    MM_Mods_ScanManagedDirectory("mods/music", 2);
+    MM_Mods_ScanManagedDirectory("MUSIC_CUSTOM", 2);
+    if (s_nativeTrackPackCount > 1)
+        qsort(s_nativeTrackPacks, (size_t)s_nativeTrackPackCount,
+              sizeof(s_nativeTrackPacks[0]), MM_Mods_ManagedCompare);
+    if (s_nativeMusicPackCount > 1)
+        qsort(s_nativeMusicPacks, (size_t)s_nativeMusicPackCount,
+              sizeof(s_nativeMusicPacks[0]), MM_Mods_ManagedCompare);
+
+    /* Refresh only lightweight UI manifests here. Full LEV/VRM
+     * validation is cached at boot and updated only by explicit actions,
+     * not by opening Mods or toggling unrelated categories. */
+}
+
 static void MM_Mods_ScanInstalled(void)
 {
     char modsDir[1024];
@@ -906,6 +1207,9 @@ static void MM_Mods_ScanInstalled(void)
     s_nativeInstalledModCount = 0;
     s_nativeWheelModCount = 0;
     s_nativeKartModCount = 0;
+
+    if (NativeSession_NoModsActive())
+        return;
 
     if (NativeAssets_BuildPath("mods/racers", modsDir, sizeof(modsDir)))
     {
@@ -1060,6 +1364,8 @@ static void MM_Mods_ScanInstalled(void)
     if (s_nativeKartRow < 0) s_nativeKartRow = 0;
     if (s_nativeWheelPage < 0) s_nativeWheelPage = 0;
     if (s_nativeWheelRow < 0) s_nativeWheelRow = 0;
+
+    MM_Mods_ScanManagedPacks();
 }
 
 static int MM_Mods_WriteEnabled(const char *path, const char *sectionName, int enabled)
@@ -1432,10 +1738,15 @@ static int MM_Mods_DrawWrappedRow(int offsetX, int y,
     rowRect.w = NATIVE_MODS_CONTENT_W;
     rowRect.h = (s16)rowHeight;
 
-    *hovered = interactive &&
-               MM_Mods_PointInRect(mouseX, mouseY, &rowRect);
-    *clicked = interactive && *hovered &&
-               RECTMENU_NativeTouchConsumeRect(&rowRect);
+    {
+        const int inside = interactive &&
+            MM_Mods_PointInRect(mouseX, mouseY, &rowRect);
+        *hovered = inside && s_nativeModsMouseMoved;
+        /* Clicks remain valid even when the cursor is stationary. */
+        *clicked = inside && RECTMENU_NativeTouchConsumeRect(&rowRect);
+        if (*clicked)
+            s_nativeModsContentFocus = 1;
+    }
 
     DecalFont_DrawLine(line1,
                        NATIVE_MODS_CONTENT_X + 7 + offsetX, y,
@@ -1525,6 +1836,7 @@ static void MM_Mods_DrawInstalled(int offsetX, int interactive)
 
         if (clicked)
         {
+            s_nativeInstalledRow = i;
             MM_Mods_ToggleInstalled(absoluteIndex);
             RECTMENU_ClearInput();
             MM_Mods_DrawPanelBackground(offsetX);
@@ -1536,7 +1848,8 @@ static void MM_Mods_DrawInstalled(int offsetX, int interactive)
 
     if (s_nativeInstalledModCount > 0)
     {
-        snprintf(footer, sizeof(footer), "CROSS: TOGGLE   PAGE %d/%d",
+        snprintf(footer, sizeof(footer), "%s  %s %d/%d", NativeLocalization_Translate("TOGGLE"),
+                  NativeLocalization_Translate("PAGE"),
                  s_nativeInstalledPage + 1, pageCount);
         MM_Mods_DrawCenteredFit(footer,
                                 NATIVE_MODS_PANEL_CENTER_X + offsetX,
@@ -1546,7 +1859,7 @@ static void MM_Mods_DrawInstalled(int offsetX, int interactive)
     }
     else
     {
-        MM_Mods_DrawCenteredFit("ADD MODS TO ASSETS/MODS/RACERS",
+        MM_Mods_DrawCenteredFit("ADD CHARACTER MOD",
                                 NATIVE_MODS_PANEL_CENTER_X + offsetX,
                                 NATIVE_MODS_FOOTER_Y,
                                 FONT_SMALL, ORANGE,
@@ -1588,7 +1901,7 @@ static void MM_Mods_DrawCharacters(int offsetX, int interactive)
                                 92,
                                 FONT_SMALL, WHITE,
                                 NATIVE_MODS_CONTENT_W - 10);
-        MM_Mods_DrawCenteredFit("ADD MODS TO ASSETS/MODS/RACERS",
+        MM_Mods_DrawCenteredFit("ADD CHARACTER MOD",
                                 NATIVE_MODS_PANEL_CENTER_X + offsetX,
                                 NATIVE_MODS_FOOTER_Y,
                                 FONT_SMALL, ORANGE,
@@ -1619,6 +1932,7 @@ static void MM_Mods_DrawCharacters(int offsetX, int interactive)
 
         if (clicked)
         {
+            s_nativeModsCharacterRow = i;
             MM_Mods_ToggleInstalled(absoluteIndex);
             RECTMENU_ClearInput();
             MM_Mods_DrawPanelBackground(offsetX);
@@ -1632,9 +1946,9 @@ static void MM_Mods_DrawCharacters(int offsetX, int interactive)
         struct NativeInstalledMod *selected =
             &s_nativeInstalledMods[start + s_nativeModsCharacterRow];
 
-        snprintf(footer, sizeof(footer), "%s | W:%s | PAGE %d/%d",
-                 MM_Mods_EngineName(selected->engineClass),
-                 selected->hasWheels ? "YES" : "NO",
+        snprintf(footer, sizeof(footer), "%s %s %d/%d",
+                  NativeLocalization_Translate("BODY"),
+                  NativeLocalization_Translate(MM_Mods_EngineName(selected->engineClass)),
                  s_nativeModsCharacterPage + 1,
                  pageCount);
         MM_Mods_DrawCenteredFit(footer,
@@ -1679,7 +1993,7 @@ static void MM_Mods_DrawKarts(int offsetX, int interactive)
                                 NATIVE_MODS_PANEL_CENTER_X + offsetX,
                                 92, FONT_SMALL, WHITE,
                                 NATIVE_MODS_CONTENT_W - 10);
-        MM_Mods_DrawCenteredFit("ADD KART.INI TO ASSETS/MODS/KARTS",
+        MM_Mods_DrawCenteredFit("ADD KART.INI PACK",
                                 NATIVE_MODS_PANEL_CENTER_X + offsetX,
                                 NATIVE_MODS_FOOTER_Y, FONT_SMALL, ORANGE,
                                 NATIVE_MODS_CONTENT_W - 8);
@@ -1702,6 +2016,7 @@ static void MM_Mods_DrawKarts(int offsetX, int interactive)
             s_nativeKartRow = i;
         if (clicked)
         {
+            s_nativeKartRow = i;
             MM_Mods_SelectKart(absoluteIndex);
             RECTMENU_ClearInput();
             MM_Mods_DrawPanelBackground(offsetX);
@@ -1720,10 +2035,11 @@ static void MM_Mods_DrawKarts(int offsetX, int interactive)
             VehiclePartRegistry_GetColorCount(id) : 0;
 
         if (colors > 1)
-            snprintf(footer, sizeof(footer), "%d COLORS | PAGE %d/%d",
-                     colors, s_nativeKartPage + 1, pageCount);
+            snprintf(footer, sizeof(footer), "%d %s  %d/%d",
+                      colors, NativeLocalization_Translate("COLORS"), s_nativeKartPage + 1, pageCount);
         else
-            snprintf(footer, sizeof(footer), "CROSS: TOGGLE | PAGE %d/%d",
+            snprintf(footer, sizeof(footer), "%s  %s %d/%d", NativeLocalization_Translate("TOGGLE"),
+                  NativeLocalization_Translate("PAGE"),
                      s_nativeKartPage + 1, pageCount);
         MM_Mods_DrawCenteredFit(
             footer, NATIVE_MODS_PANEL_CENTER_X + offsetX,
@@ -1767,7 +2083,7 @@ static void MM_Mods_DrawWheels(int offsetX, int interactive)
                                 92,
                                 FONT_SMALL, WHITE,
                                 NATIVE_MODS_CONTENT_W - 10);
-        MM_Mods_DrawCenteredFit("ADD A WHEELS.INI PACK",
+        MM_Mods_DrawCenteredFit("ADD WHEELS.INI",
                                 NATIVE_MODS_PANEL_CENTER_X + offsetX,
                                 NATIVE_MODS_FOOTER_Y,
                                 FONT_SMALL, ORANGE,
@@ -1795,6 +2111,7 @@ static void MM_Mods_DrawWheels(int offsetX, int interactive)
 
         if (clicked)
         {
+            s_nativeWheelRow = i;
             MM_Mods_SelectWheel(absoluteIndex);
             RECTMENU_ClearInput();
             MM_Mods_DrawPanelBackground(offsetX);
@@ -1805,7 +2122,8 @@ static void MM_Mods_DrawWheels(int offsetX, int interactive)
     }
 
     snprintf(footer, sizeof(footer),
-             "CROSS: TOGGLE   PAGE %d/%d",
+             "%s  %s %d/%d", NativeLocalization_Translate("TOGGLE"),
+                  NativeLocalization_Translate("PAGE"),
              s_nativeWheelPage + 1, pageCount);
     MM_Mods_DrawCenteredFit(footer,
                             NATIVE_MODS_PANEL_CENTER_X + offsetX,
@@ -1816,12 +2134,220 @@ static void MM_Mods_DrawWheels(int offsetX, int interactive)
     MM_Mods_DrawPanelBackground(offsetX);
 }
 
+/* Track and music packs share the same compact, paginated detail pane.
+ * Music toggles affect package availability only. Playback choice per level
+ * will be configured later in Options > Audio > Music. */
+static int MM_Mods_ManagedCount(int kind)
+{
+    int count = 0;
+    if (kind == NATIVE_MODS_TRACK_CATEGORY) return s_nativeTrackPackCount;
+    for (int i = 0; i < s_nativeMusicPackCount; ++i)
+        if (s_nativeMusicPacks[i].kind == kind) ++count;
+    return count;
+}
+
+static struct NativeManagedPack *MM_Mods_ManagedAt(int kind, int index)
+{
+    if (index < 0) return NULL;
+    if (kind == NATIVE_MODS_TRACK_CATEGORY)
+        return index < s_nativeTrackPackCount ?
+            &s_nativeTrackPacks[index] : NULL;
+
+    for (int i = 0; i < s_nativeMusicPackCount; ++i)
+    {
+        if (s_nativeMusicPacks[i].kind == kind)
+        {
+            if (index == 0) return &s_nativeMusicPacks[i];
+            --index;
+        }
+    }
+    return NULL;
+}
+
+static int *MM_Mods_ManagedPage(int kind)
+{
+    if (kind == NATIVE_MODS_TRACK_CATEGORY) return &s_nativeTrackPage;
+    if (kind == NATIVE_MODS_MUSIC_CSEQ) return &s_nativeCseqPage;
+    return &s_nativeOggPage;
+}
+
+static int *MM_Mods_ManagedRow(int kind)
+{
+    if (kind == NATIVE_MODS_TRACK_CATEGORY) return &s_nativeTrackRow;
+    if (kind == NATIVE_MODS_MUSIC_CSEQ) return &s_nativeCseqRow;
+    return &s_nativeOggRow;
+}
+
+static int MM_Mods_TrackRecognized(const struct NativeManagedPack *pack)
+{
+    if (!pack || !pack->formatOK || !pack->enabled)
+        return 0;
+    for (int i = 0; i < NativeCustomTracks_Count(); ++i)
+        if (MM_Mods_EqualsIgnoreCase(
+            NativeCustomTracks_Name(i), pack->displayName))
+            return 1;
+    return 0;
+}
+
+static void MM_Mods_ToggleManagedPack(int kind, int absoluteIndex)
+{
+    struct NativeManagedPack *pack =
+        MM_Mods_ManagedAt(kind, absoluteIndex);
+    char slug[64];
+    int enabled;
+
+    if (!pack) return;
+    if (kind != NATIVE_MODS_TRACK_CATEGORY && !pack->formatOK)
+    {
+        /* A missing audio file cannot be enabled as a usable pack. */
+        OtherFX_Play(5, 1);
+        return;
+    }
+
+    enabled = !pack->enabled;
+    snprintf(slug, sizeof(slug), "%s", pack->slug);
+    if (!MM_Mods_WriteEnabled(pack->iniPath,
+                             kind == NATIVE_MODS_TRACK_CATEGORY ?
+                             "track" : "music", enabled))
+    {
+        OtherFX_Play(2, 1);
+        return;
+    }
+
+    MM_Mods_ScanManagedPacks();
+    /* Only explicit pack edits may rebuild the corresponding native index. */
+    if (kind == NATIVE_MODS_TRACK_CATEGORY)
+        NativeCustomTracks_Scan();
+    else
+        NativeMusicSelection_Reload();
+    Platform_Log("[MODS] %s pack %s: %s\n",
+        kind == NATIVE_MODS_TRACK_CATEGORY ? "track" :
+        kind == NATIVE_MODS_MUSIC_OGG ? "ogg" : "cseq",
+        slug, enabled ? "enabled" : "disabled");
+    Platform_LogFlush();
+    OtherFX_Play(1, 1);
+}
+
+static void MM_Mods_DrawManagedPacks(int offsetX, int interactive, int kind)
+{
+    int count = MM_Mods_ManagedCount(kind);
+    int *page = MM_Mods_ManagedPage(kind);
+    int *row = MM_Mods_ManagedRow(kind);
+    int pages = (count + NATIVE_MODS_TRACK_ROWS - 1) /
+                NATIVE_MODS_TRACK_ROWS;
+    int start, visible, mouseX = -1, mouseY = -1;
+    int y = NATIVE_MODS_LIST_Y;
+    const char *title =
+        kind == NATIVE_MODS_TRACK_CATEGORY ? "TRACKS" :
+        kind == NATIVE_MODS_MUSIC_OGG ? "OGG PACKS" : "CSEQ PACKS";
+    char footer[96];
+
+    if (pages < 1) pages = 1;
+    if (*page >= pages) *page = pages - 1;
+    if (*page < 0) *page = 0;
+
+    start = (*page) * NATIVE_MODS_TRACK_ROWS;
+    visible = count - start;
+    if (visible > NATIVE_MODS_TRACK_ROWS)
+        visible = NATIVE_MODS_TRACK_ROWS;
+    if (visible < 0) visible = 0;
+    if (*row >= visible) *row = visible > 0 ? visible - 1 : 0;
+    if (*row < 0) *row = 0;
+
+    MM_Mods_DrawPanelTitle(offsetX, title);
+    RECTMENU_NativeTouchGet(&mouseX, &mouseY);
+
+    if (visible == 0)
+    {
+        const char *message =
+            kind == NATIVE_MODS_TRACK_CATEGORY ? "NO TRACK MODS FOUND" :
+            kind == NATIVE_MODS_MUSIC_OGG ? "NO OGG PACKS FOUND" :
+            "NO CSEQ PACKS FOUND";
+        MM_Mods_DrawCenteredFit(message,
+            NATIVE_MODS_PANEL_CENTER_X + offsetX, 95,
+            FONT_SMALL, WHITE, NATIVE_MODS_CONTENT_W - 12);
+        MM_Mods_DrawCenteredFit(
+            kind == NATIVE_MODS_TRACK_CATEGORY ?
+                "ADD TRACK PACK" : "ADD MUSIC PACK",
+            NATIVE_MODS_PANEL_CENTER_X + offsetX,
+            NATIVE_MODS_FOOTER_Y, FONT_SMALL, ORANGE,
+            NATIVE_MODS_CONTENT_W - 8);
+        MM_Mods_DrawPanelBackground(offsetX);
+        return;
+    }
+
+    for (int i = 0; i < visible; ++i)
+    {
+        int absolute = start + i;
+        struct NativeManagedPack *pack =
+            MM_Mods_ManagedAt(kind, absolute);
+        int hovered = 0, clicked = 0;
+        const char *status;
+        int stride;
+        if (!pack) continue;
+
+        if (!pack->enabled) status = "[OFF]";
+        else if (!pack->formatOK) status = "[CHECK]";
+        else if (kind == NATIVE_MODS_TRACK_CATEGORY)
+            status = MM_Mods_TrackRecognized(pack) ?
+                     "[READY]" : "[CHECK]";
+        else status = "[ON]";
+
+        stride = MM_Mods_DrawWrappedRow(
+            offsetX, y, pack->displayName, status,
+            (*row) == i, interactive, mouseX, mouseY,
+            &hovered, &clicked);
+        if (hovered) *row = i;
+        if (clicked)
+        {
+            *row = i;
+            MM_Mods_ToggleManagedPack(kind, absolute);
+            RECTMENU_ClearInput();
+            MM_Mods_DrawPanelBackground(offsetX);
+            return;
+        }
+        y += stride;
+    }
+
+    {
+        struct NativeManagedPack *selected =
+            MM_Mods_ManagedAt(kind, start + *row);
+        if (kind == NATIVE_MODS_TRACK_CATEGORY)
+            snprintf(footer, sizeof(footer),
+                     "%s   %s %d/%d", NativeLocalization_Translate("TOGGLE"),
+                      NativeLocalization_Translate("PAGE"), *page + 1, pages);
+        else
+            snprintf(footer, sizeof(footer), "%d %s  %s %d/%d",
+                      selected ? selected->songCount : 0,
+                      NativeLocalization_Translate("SONGS"),
+                      NativeLocalization_Translate("PAGE"),
+                     *page + 1, pages);
+    }
+    MM_Mods_DrawCenteredFit(footer,
+        NATIVE_MODS_PANEL_CENTER_X + offsetX,
+        NATIVE_MODS_FOOTER_Y, FONT_SMALL, ORANGE,
+        NATIVE_MODS_CONTENT_W - 8);
+    MM_Mods_DrawPanelBackground(offsetX);
+}
+
+static void MM_Mods_DrawTracks(int offsetX, int interactive)
+{
+    MM_Mods_DrawManagedPacks(offsetX, interactive,
+                             NATIVE_MODS_TRACK_CATEGORY);
+}
+
+static void MM_Mods_DrawMusicPacks(int offsetX, int interactive, int kind)
+{
+    MM_Mods_DrawManagedPacks(offsetX, interactive, kind);
+}
+
 static void MM_Mods_DrawPending(int offsetX, const char *title, const char *kind)
 {
     char line[96];
 
     MM_Mods_DrawPanelTitle(offsetX, title);
-    snprintf(line, sizeof(line), "%s MOD LOADER", kind);
+    snprintf(line, sizeof(line), "%s %s", NativeLocalization_Translate(kind),
+             NativeLocalization_Translate("MOD LOADER"));
     MM_Mods_DrawCenteredFit(line,
                             NATIVE_MODS_PANEL_CENTER_X + offsetX, 76,
                             FONT_SMALL, WHITE,
@@ -1840,6 +2366,8 @@ static void MM_Mods_DrawPending(int offsetX, const char *title, const char *kind
 static void MM_Mods_RefreshCharacters(void)
 {
     MM_Mods_ScanInstalled();
+    NativeCustomTracks_Scan();
+    NativeMusicSelection_Reload();
     MM_Mods_ApplyWheelSelection();
     VanillaRacerPatch_Shutdown();
     NativeGltf_PrepareRegistryRefresh();
@@ -1857,7 +2385,7 @@ static void MM_Mods_DrawGeneral(int offsetX, int interactive)
     int mouseY = -1;
     RECT refreshRect = {
         (s16)(NATIVE_MODS_CONTENT_X + offsetX),
-        43,
+        60,
         NATIVE_MODS_CONTENT_W,
         21
     };
@@ -1865,24 +2393,25 @@ static void MM_Mods_DrawGeneral(int offsetX, int interactive)
     MM_Mods_DrawPanelTitle(offsetX, "GENERAL");
     RECTMENU_NativeTouchGet(&mouseX, &mouseY);
 
-    if (interactive && MM_Mods_PointInRect(mouseX, mouseY, &refreshRect))
-        s_nativeModsRow = 0;
+    /* Hover never changes the selected category. General has one action. */
+    (void)mouseX;
+    (void)mouseY;
 
-    MM_Mods_DrawCenteredFit("REFRESH MODS / OFFSETS",
-                            NATIVE_MODS_PANEL_CENTER_X + offsetX, 48,
+    MM_Mods_DrawCenteredFit("REFRESH ALL MODS",
+                            NATIVE_MODS_PANEL_CENTER_X + offsetX, 65,
                             FONT_SMALL, WHITE,
                             NATIVE_MODS_CONTENT_W - 12);
 
-    if (s_nativeModsRow == 0)
+    if (s_nativeModsContentFocus)
         CTR_Box_DrawClearBox(&refreshRect, &sdata->menuRowHighlight_Normal,
                              TRANS_50_DECAL, ot);
 
-    MM_Mods_DrawCenteredFit("RELOADS CHARACTER / KART / WHEEL INI",
-                            NATIVE_MODS_PANEL_CENTER_X + offsetX, 88,
+    MM_Mods_DrawCenteredFit("RELOAD ALL PACKS",
+                            NATIVE_MODS_PANEL_CENTER_X + offsetX, 108,
                             FONT_SMALL, ORANGE,
                             NATIVE_MODS_CONTENT_W - 12);
-    MM_Mods_DrawCenteredFit("OFFSETS APPLY WITHOUT RESTART",
-                            NATIVE_MODS_PANEL_CENTER_X + offsetX, 112,
+    MM_Mods_DrawCenteredFit("TRACKS + MUSIC",
+                            NATIVE_MODS_PANEL_CENTER_X + offsetX, 130,
                             FONT_SMALL, WHITE,
                             NATIVE_MODS_CONTENT_W - 12);
 
@@ -1898,14 +2427,12 @@ static void MM_Mods_DrawGeneral(int offsetX, int interactive)
 
 static void MM_Mods_DrawView(int view, int offsetX, int interactive)
 {
-    switch (view)
+    int activeView = view == NATIVE_MODS_VIEW_ROOT ?
+        s_nativeModsRootViews[s_nativeModsRow] : view;
+
+    switch (activeView)
     {
-        case NATIVE_MODS_VIEW_ROOT:
-            MM_Mods_DrawRoot(offsetX, interactive);
-            break;
         case NATIVE_MODS_VIEW_INSTALLED:
-            MM_Mods_DrawInstalled(offsetX, interactive);
-            break;
         case NATIVE_MODS_VIEW_CHARACTERS:
             MM_Mods_DrawCharacters(offsetX, interactive);
             break;
@@ -1916,29 +2443,49 @@ static void MM_Mods_DrawView(int view, int offsetX, int interactive)
             MM_Mods_DrawWheels(offsetX, interactive);
             break;
         case NATIVE_MODS_VIEW_TRACKS:
-            MM_Mods_DrawPending(offsetX, "TRACKS", "TRACK");
+            MM_Mods_DrawTracks(offsetX, interactive);
+            break;
+        case NATIVE_MODS_VIEW_OGG_MUSIC:
+            MM_Mods_DrawMusicPacks(offsetX, interactive, NATIVE_MODS_MUSIC_OGG);
+            break;
+        case NATIVE_MODS_VIEW_CSEQ_MUSIC:
+            MM_Mods_DrawMusicPacks(offsetX, interactive, NATIVE_MODS_MUSIC_CSEQ);
             break;
         case NATIVE_MODS_VIEW_GENERAL:
             MM_Mods_DrawGeneral(offsetX, interactive);
             break;
         default:
-            MM_Mods_DrawRoot(offsetX, interactive);
+            MM_Mods_DrawCharacters(offsetX, interactive);
             break;
     }
+
+    /* The category list stays on-screen in exactly the old location. */
+    MM_Mods_DrawRoot(offsetX, interactive);
 }
+
 static void MM_Mods_Open(struct RectMenu *mainMenu)
 {
-    MM_Mods_ScanInstalled();
-    MM_Mods_ApplyWheelSelection();
+    /* The root title menu already scanned the packs and applied wheels.
+     * Repeating both here rebuilt the vehicle-part registry and re-opened
+     * music/track files during a CSEQ song. */
+    if (!s_nativeWheelSelectionApplied)
+    {
+        MM_Mods_ScanInstalled();
+        MM_Mods_ApplyWheelSelection();
+    }
     CharacterRegistry_Init();
 
     s_nativeInstalledRow = 0;
     s_nativeInstalledPage = 0;
     s_nativeKartRow = 0;
     s_nativeKartPage = 0;
+    s_nativeTrackPage = s_nativeTrackRow = 0;
+    s_nativeOggPage = s_nativeOggRow = 0;
+    s_nativeCseqPage = s_nativeCseqRow = 0;
     s_nativeModsState = NATIVE_MODS_OPENING;
-    s_nativeModsView = NATIVE_MODS_VIEW_ROOT;
-    s_nativeModsNextView = NATIVE_MODS_VIEW_ROOT;
+    s_nativeModsView = NATIVE_MODS_VIEW_CHARACTERS;
+    s_nativeModsNextView = NATIVE_MODS_VIEW_CHARACTERS;
+    s_nativeModsContentFocus = 0;
     s_nativeModsRow = 0;
     s_nativeModsCharacterRow = 0;
     s_nativeModsCharacterPage = 0;
@@ -1947,6 +2494,11 @@ static void MM_Mods_Open(struct RectMenu *mainMenu)
                             mainMenu->rowSelected;
     s_nativeModsLauncherSelected = 0;
     s_nativeModsSavedState = mainMenu->state;
+    s_nativeModsMouseLastX = -1;
+    s_nativeModsMouseLastY = -1;
+    RECTMENU_NativeTouchGet(&s_nativeModsMouseLastX,
+                            &s_nativeModsMouseLastY);
+    s_nativeModsMouseMoved = 0;
 
     MM_Mods_HideTitleInstances();
     mainMenu->state |= ONLY_DRAW_TITLE | INVISIBLE;
@@ -1968,25 +2520,24 @@ static void MM_Mods_FinishClose(struct RectMenu *mainMenu)
 
 static void MM_Mods_GoBack(void)
 {
-    if (s_nativeModsView == NATIVE_MODS_VIEW_ROOT)
+    if (!s_nativeModsContentFocus)
     {
-        /* Opening and closing keep the CTR slide. Internal category changes
-         * are immediate so the Mods browser feels like one persistent list. */
         s_nativeModsState = NATIVE_MODS_CLOSING;
         MM_Mods_BeginTransition(1);
     }
     else
     {
-        s_nativeModsView = NATIVE_MODS_VIEW_ROOT;
-        s_nativeModsRow = 0;
+        /* Go back to category navigation, keeping the selected page visible. */
+        s_nativeModsContentFocus = 0;
+        s_nativeModsView = s_nativeModsRootViews[s_nativeModsRow];
     }
-
     RECTMENU_ClearInput();
 }
+
 static void MM_Mods_ActivateRootRow(void)
 {
-    s_nativeModsView = NATIVE_MODS_VIEW_INSTALLED + s_nativeModsRow;
-    s_nativeModsRow = 0;
+    s_nativeModsView = s_nativeModsRootViews[s_nativeModsRow];
+    s_nativeModsContentFocus = 1;
     RECTMENU_ClearInput();
 }
 
@@ -2167,6 +2718,57 @@ static void MM_Mods_HandleWheelsInput(u32 tap)
         MM_Mods_SelectWheel(start + s_nativeWheelRow);
 }
 
+static void MM_Mods_HandleManagedInput(u32 tap, int kind)
+{
+    int count = MM_Mods_ManagedCount(kind);
+    int *page = MM_Mods_ManagedPage(kind);
+    int *row = MM_Mods_ManagedRow(kind);
+    int pages = (count + NATIVE_MODS_TRACK_ROWS - 1) /
+                NATIVE_MODS_TRACK_ROWS;
+    int start, visible;
+
+    if (pages < 1) pages = 1;
+    if (*page >= pages) *page = pages - 1;
+    if (*page < 0) *page = 0;
+    start = *page * NATIVE_MODS_TRACK_ROWS;
+    visible = count - start;
+    if (visible > NATIVE_MODS_TRACK_ROWS) visible = NATIVE_MODS_TRACK_ROWS;
+    if (visible < 0) visible = 0;
+
+    if (tap & BTN_UP && visible > 0)
+    {
+        if (--(*row) < 0) *row = visible - 1;
+        OtherFX_Play(0, 1);
+    }
+    else if (tap & BTN_DOWN && visible > 0)
+    {
+        if (++(*row) >= visible) *row = 0;
+        OtherFX_Play(0, 1);
+    }
+    if ((tap & BTN_LEFT) && *page > 0)
+    {
+        --(*page); *row = 0; OtherFX_Play(0, 1);
+    }
+    else if ((tap & BTN_RIGHT) && *page + 1 < pages)
+    {
+        ++(*page); *row = 0; OtherFX_Play(0, 1);
+    }
+
+    if (tap & (BTN_CIRCLE | BTN_CROSS_one) && visible > 0)
+        MM_Mods_ToggleManagedPack(kind,
+                                  *page * NATIVE_MODS_TRACK_ROWS + *row);
+}
+
+static void MM_Mods_HandleTrackInput(u32 tap)
+{
+    MM_Mods_HandleManagedInput(tap, NATIVE_MODS_TRACK_CATEGORY);
+}
+
+static void MM_Mods_HandleMusicInput(u32 tap, int kind)
+{
+    MM_Mods_HandleManagedInput(tap, kind);
+}
+
 static void MM_Mods_HandleOpenInput(void)
 {
     u32 tap = sdata->AnyPlayerTap;
@@ -2177,50 +2779,55 @@ static void MM_Mods_HandleOpenInput(void)
         return;
     }
 
-    if (s_nativeModsView == NATIVE_MODS_VIEW_ROOT)
+    if (!s_nativeModsContentFocus)
     {
         if (tap & BTN_UP)
         {
-            if (--s_nativeModsRow < 0) s_nativeModsRow = NATIVE_MODS_ROOT_COUNT - 1;
+            if (--s_nativeModsRow < 0)
+                s_nativeModsRow = NATIVE_MODS_ROOT_COUNT - 1;
             OtherFX_Play(0, 1);
         }
         else if (tap & BTN_DOWN)
         {
-            if (++s_nativeModsRow >= NATIVE_MODS_ROOT_COUNT) s_nativeModsRow = 0;
+            if (++s_nativeModsRow >= NATIVE_MODS_ROOT_COUNT)
+                s_nativeModsRow = 0;
             OtherFX_Play(0, 1);
         }
 
-        if (tap & (BTN_CIRCLE | BTN_CROSS_one))
+        s_nativeModsView = s_nativeModsRootViews[s_nativeModsRow];
+        if (tap & (BTN_CIRCLE | BTN_CROSS_one | BTN_LEFT))
         {
             OtherFX_Play(1, 1);
             MM_Mods_ActivateRootRow();
         }
+        return;
     }
-    else if (s_nativeModsView == NATIVE_MODS_VIEW_INSTALLED)
+
+    switch (s_nativeModsView)
     {
-        MM_Mods_HandleInstalledInput(tap);
-    }
-    else if (s_nativeModsView == NATIVE_MODS_VIEW_CHARACTERS)
-    {
-        MM_Mods_HandleCharactersInput(tap);
-    }
-    else if (s_nativeModsView == NATIVE_MODS_VIEW_KARTS)
-    {
-        MM_Mods_HandleKartsInput(tap);
-    }
-    else if (s_nativeModsView == NATIVE_MODS_VIEW_WHEELS)
-    {
-        MM_Mods_HandleWheelsInput(tap);
-    }
-    else if (s_nativeModsView == NATIVE_MODS_VIEW_GENERAL)
-    {
-        if (tap & (BTN_CIRCLE | BTN_CROSS_one))
-        {
-            MM_Mods_RefreshCharacters();
-            OtherFX_Play(1, 1);
-        }
+        case NATIVE_MODS_VIEW_CHARACTERS:
+            MM_Mods_HandleCharactersInput(tap); break;
+        case NATIVE_MODS_VIEW_KARTS:
+            MM_Mods_HandleKartsInput(tap); break;
+        case NATIVE_MODS_VIEW_WHEELS:
+            MM_Mods_HandleWheelsInput(tap); break;
+        case NATIVE_MODS_VIEW_TRACKS:
+            MM_Mods_HandleTrackInput(tap); break;
+        case NATIVE_MODS_VIEW_OGG_MUSIC:
+            MM_Mods_HandleMusicInput(tap, NATIVE_MODS_MUSIC_OGG); break;
+        case NATIVE_MODS_VIEW_CSEQ_MUSIC:
+            MM_Mods_HandleMusicInput(tap, NATIVE_MODS_MUSIC_CSEQ); break;
+        case NATIVE_MODS_VIEW_GENERAL:
+            if (tap & (BTN_CIRCLE | BTN_CROSS_one))
+            {
+                MM_Mods_RefreshCharacters();
+                OtherFX_Play(1, 1);
+            }
+            break;
+        default: break;
     }
 }
+
 int MM_Mods_UpdateMainMenu(struct RectMenu *mainMenu)
 {
     struct GameTracker *gGT = sdata->gGT;
@@ -2249,6 +2856,7 @@ int MM_Mods_UpdateMainMenu(struct RectMenu *mainMenu)
          * Keep those instances suppressed while the Mods overlay is alive;
          * the checkered flag remains because it is level geometry. */
         MM_Mods_HideTitleInstances();
+        MM_Mods_UpdateMouseHover();
 
         if (mainMenu->funcState != RECTMENU_FUNC_STATE_UPDATE)
         {

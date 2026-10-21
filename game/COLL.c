@@ -2334,7 +2334,7 @@ internal int CollMoved_PlayerSearch_RunHitboxLInC(struct ScratchpadStruct *sps, 
 	struct MetaDataMODEL *meta = COLL_LevModelMeta(modelID);
 	if ((meta != NULL) && (meta->LInC != NULL))
 	{
-		return meta->LInC(linCInstance, t, sps);
+		return FN32(meta->LInC)(linCInstance, t, sps);
 	}
 
 	return 1;

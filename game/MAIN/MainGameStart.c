@@ -40,7 +40,12 @@ void MainGameStart_Initialize(struct GameTracker *gGT, b32 boolStopAudio)
 	 * gameplay without ever entering the missing camera animation.
 	 * Keep this limited to an explicitly selected custom track.
 	 */
-	if (NativeCustomTracks_IsSelected())
+	/* A custom selection survives until the next LEV is resolved.
+	 * IsSelected() alone also matches the title/garage on the way back
+	 * from any finished or abandoned custom race and leaked the race HUD
+	 * (lap counter, placement icons, speed bars) onto the main menu.
+	 * Only real active custom Crash Cove races may bypass the fly-in. */
+	if (NativeCustomTracks_IsActiveRace())
 	{
 		gGT->trafficLightsTimer = (s32)0xfffffc40;
 		gameModeFlag &= ~(START_OF_RACE);
@@ -51,12 +56,13 @@ void MainGameStart_Initialize(struct GameTracker *gGT, b32 boolStopAudio)
 
 #if defined(CTR_PRACTICE_FASTSTART)
 	/*
-	 * Special practice fast-start: keep normal gameplay/HUD, but begin the
-	 * loaded track already in racing state. No fly-in camera, title bars or
-	 * traffic-light countdown.
+	 * Bypass start-line fly-in but keep the transition's HUD side effect:
+	 * CAM_StartLine only sets HUD_FLAG_RACE_HUD when that animation ends.
 	 */
 	gGT->trafficLightsTimer = (s32)0xfffffc40;
 	gameModeFlag &= ~(START_OF_RACE);
+	gGT->hudFlags |= HUD_FLAG_RACE_HUD | HUD_FLAG_RENDER_LESS;
+	Platform_Log("[PRACTICE] restored race HUD after direct-start intro bypass\n");
 #endif
 
 	// save new game mode

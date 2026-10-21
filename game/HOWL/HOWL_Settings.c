@@ -176,9 +176,15 @@ void howl_VolumeSet(int type, u8 vol)
 			return;
 		}
 
-		sdata->vol_FX = vol;
+        sdata->vol_FX = vol;
+#ifdef CTR_NATIVE
+        /* HOWL updates retail channels synchronously. The native PCM
+         * engine mixer must receive the same slider event immediately;
+         * during options/pause EngineSound_Player does not tick. */
+        NativeAudio_EngineSetFxVolume((int)vol);
+#endif
 
-		Smart_EnterCriticalSection();
+        Smart_EnterCriticalSection();
 
 		UpdateChannelVol_EngineFX_All();
 	}

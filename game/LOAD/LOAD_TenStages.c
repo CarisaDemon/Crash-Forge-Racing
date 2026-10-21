@@ -1,17 +1,14 @@
 #include <common.h>
 #ifdef CTR_NATIVE
 #include <platform/native_custom_music.h>
+#include <NativeHowlSampleCatalog.h>
+#include <platform/native_menu_music_clock.h>
 #include <platform/native_disc_image.h>
 #endif
 
 void (*mainMenuInit[])() = {MM_JumpTo_Title_FirstTime, MM_JumpTo_Characters, MM_JumpTo_TrackSelect, MM_JumpTo_BattleSetup, CS_Garage_Init, MM_JumpTo_Scrapbook};
 
 #ifdef CTR_NATIVE
-enum
-{
-	LOAD_NATIVE_NDBOX_INTRO_SONG_SYNC_TIME = 0x11c0,
-};
-
 static void LOAD_NativeAudio_SetStateAfterBankReload(u32 state)
 {
 	int isSameLatchedState = sdata->audioState == (s16)state;
@@ -54,6 +51,11 @@ int LOAD_TenStages(struct GameTracker *gGT, int loadingStage, struct BigHeader *
 	{
 	case 0:
 	{
+#ifdef CTR_NATIVE
+		/* Wait for the menu-only music worker to finish BEFORE the
+		 * song/header banks are freed or the level mempack changes. */
+		NativeMenuMusicClock_Stop();
+#endif
 		// NOTE(aalhendi): ASM-verified NTSC-U 926 0x8003368c-0x80033698 for loading-start volume backup/XA pause.
 		if (!boolPlayMusicDuringLoading)
 		{
@@ -61,28 +63,21 @@ int LOAD_TenStages(struct GameTracker *gGT, int loadingStage, struct BigHeader *
 		}
 		CDSYS_XAPauseRequest();
 
-		// if first boot (SCEA + Copyright + ND Box)
+		// First native boot skips the retail SCEA/ND/copyright splash
+		// cards but retains the first-boot allocation/bookmark path.
 		if (sdata->boolFirstBoot != 0)
 		{
-			u32 vramSize;
-
 			sdata->boolFirstBoot = 0;
 
-			// Load Intro TIM for Copyright Page from VRAM file
+#if !defined(CTR_NATIVE)
+			u32 vramSize;
 			LOAD_VramFile(bigfile, LOAD_FIRST_BOOT_COPYRIGHT_TIM_BIGFILE_INDEX, NULL, &vramSize, -1);
 			MainInit_VRAMDisplay();
-
-#ifdef CTR_NATIVE
-			// NOTE(aalhendi): SCEA is already held by XA playback in MainMain. The copyright
-			// TIM has no XA, so keep it visible until the intro CSEQ reaches
-			// the point retail normally reaches while loading the ND crate.
-			// Present every wait tick so both host swapchain images are
-			// overwritten with copyright instead of briefly revealing SCEA.
-			while (((sdata->songPool[0].flags & 3) == 1) && (sdata->songPool[0].timeSpentPlaying < LOAD_NATIVE_NDBOX_INTRO_SONG_SYNC_TIME))
-			{
-				VSync(0);
-				Platform_PresentVRAMDisplay();
-			}
+#else
+			/* Licensing attributions are retained in documentation; don't
+			 * project retail studio cards in the Crash Forge native boot.
+			 * Shared font/UI VRAM was already loaded by StateZero. */
+			Platform_Log("[BOOT] bypass first-boot retail copyright TIM\n");
 #endif
 
 			gGT->db[0].drawEnv.isbg = 0;
@@ -668,9 +663,21 @@ int LOAD_TenStages(struct GameTracker *gGT, int loadingStage, struct BigHeader *
 				return loadingStage;
 			}
 
-			/* The main menu currently has no OGG override, so this is normally a
-			 * cheap no-op. If one is added later, the cache is already complete. */
-			NativeCustomMusic_TryStartLevel(currentLevelID);
+			/* The retail HOWL catalog holds ~12 MiB of instrument data.
+			 * Its lazy first-note load happened after music started and
+			 * could freeze both SPU setup and the first CSEQ loop.
+			 * Populate it while the loading display is still active.
+			 * This call is idempotent after the first title load. */
+			if (!NativeHowlSampleCatalog_IsReady() &&
+			    !NativeHowlSampleCatalog_Init())
+				Platform_LogWarn("[MENU MUSIC] HOWL prewarm unavailable; will retry on demand\n");
+
+			/* Bank/precache work ends here. Starting the menu song at
+			 * stage 8 let it run while MainLoadVLC and the first 3D
+			 * title scene were still loading. The first CSEQ loop then
+			 * sounded staggered. Start it after MainInit_FinalizeInit
+			 * in CTR_Main case 1, just before the menu music worker. */
+			return loadingStage + 1;
 #endif
 			audioState = AUDIO_GARAGE_ENTRY;
 		LAB_800346b0:

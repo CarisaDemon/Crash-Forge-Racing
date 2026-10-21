@@ -116,8 +116,10 @@
 #include "CharacterRegistry.c"
 #include "NativeSession.c"
 #include "NativeChat.c"
+#include "NativeOnlineSfx.c"
 #include "NativeHangout.c"
 #include "VehiclePartRegistry.c"
+#include "EngineSoundRegistry.c"
 #include "RacerLoadout.c"
 #include "NativeRacerVisual.c"
 #include "VanillaRacerSeparation.c"
@@ -142,6 +144,7 @@
 #include "MAIN/MainFreeze.c"
 
 #include "MAIN/MainGameStart.c"
+#include "NativeTimeTrialLog.c"
 #include "MAIN/MainGameEnd.c"
 #include "MAIN/MainStats.c"
 
@@ -227,6 +230,12 @@
 #include "UI/UI_RaceFlow.c"
 #include "UI/UI_CupStandings.c"
 
+#if defined(CTR_CNK_PHYSICS_PREVIEW_QA)
+#include "Vehicle/CNKPhysicsPreview.c"
+#endif
+#if defined(CTR_NATIVE) && defined(CTR_CNK_NATIVE_BRIDGE_QA)
+#include "Vehicle/CNKNativeBridgeQA.c"
+#endif
 #include "Vehicle/VehBirth.c"
 #include "Vehicle/VehCalc.c"
 #include "Vehicle/VehAfterColl.c"

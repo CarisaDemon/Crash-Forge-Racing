@@ -2,6 +2,10 @@
 #include <RacerLoadout.h>
 #include <CharacterRegistry.h>
 #include <VehiclePartRegistry.h>
+#include <EngineSoundRegistry.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#endif
 
 static struct NativeRacerLoadout s_racerLoadouts[RACER_LOADOUT_MAX_DRIVERS];
 static int s_racerLoadoutsInitialized;
@@ -25,6 +29,14 @@ b32 RacerLoadout_IsAdventureLocked(void)
         ADVENTURE_CUP |
         ADVENTURE_ARENA;
 
+#if defined(CTR_NATIVE)
+    /* Hangout deliberately reuses Adventure-hub geometry and therefore keeps
+     * ADVENTURE_ARENA set, but it is a sandbox rather than Story mode. Only
+     * this explicit social session may use the normal modular loadout path. */
+    if (NativeHangout_IsActive())
+        return false;
+#endif
+
     return sdata->gGT != NULL &&
            (sdata->gGT->gameMode1 & storyMask) != 0;
 }
@@ -39,6 +51,8 @@ void RacerLoadout_ResetSlot(int driverID, int characterID)
     s_racerLoadouts[driverID].wheelID = RACER_LOADOUT_INHERIT;
     s_racerLoadouts[driverID].selectionPart = RACER_SELECT_CHARACTER;
     s_racerLoadouts[driverID].kartColor = 0;
+    s_racerLoadouts[driverID].physicsClass = RACER_PHYSICS_DEFAULT;
+    s_racerLoadouts[driverID].engineSoundID = ENGINE_SOUND_AUTO;
 }
 
 void RacerLoadout_ResetAll(void)
@@ -96,6 +110,166 @@ int RacerLoadout_GetWheels(int driverID)
 {
     const struct NativeRacerLoadout *loadout = RacerLoadout_Get(driverID);
     return loadout ? loadout->wheelID : RACER_LOADOUT_ORIGINAL;
+}
+
+int RacerLoadout_GetPhysicsClass(int driverID)
+{
+    const struct NativeRacerLoadout *loadout = RacerLoadout_Get(driverID);
+    return loadout ? loadout->physicsClass : RACER_PHYSICS_DEFAULT;
+}
+
+int RacerLoadout_GetEngineSound(int driverID)
+{
+    const struct NativeRacerLoadout *loadout = RacerLoadout_Get(driverID);
+    return loadout ? loadout->engineSoundID : ENGINE_SOUND_AUTO;
+}
+
+int RacerLoadout_GetEffectiveEngineSound(int driverID)
+{
+    int selected;
+    /* Human and bot slots use the same ENGINE pack resolution.
+     * Adventure still forces authored vanilla rival engines. */
+    if (!RacerLoadout_ValidDriver(driverID) ||
+        RacerLoadout_IsAdventureLocked()) return -1;
+    selected = RacerLoadout_GetEngineSound(driverID);
+    /* Only KART ENGINE automatically inherits the equipped kart's COMPLETE
+     * audio pack. Explicit ENGINE choices override main, transmission and
+     * optional layers as one unit (including forced retail class sounds). */
+    if (selected == ENGINE_SOUND_AUTO)
+    {
+        /* KART ENGINE uses this kart's registered sound pack only: a valid
+         * main loop, transmission or optional sound layer. No accidental
+         * standalone pack inheritance and no borrowing from other karts. */
+        int kartID = RacerLoadout_GetEffectiveKart(driverID);
+        const struct VehiclePartDef *kart =
+            VehiclePartRegistry_GetByID(VEHICLE_PART_KART, kartID);
+        if (kart == NULL)
+            return -1;
+        return EngineSoundRegistry_FindForKart(kartID);
+    }
+    if (selected >= 0)
+        return EngineSoundRegistry_Get(selected) ? selected : -1;
+    return -1;
+}
+
+int RacerLoadout_GetEffectiveEngineSoundClass(int driverID)
+{
+    int characterID;
+    int retailID;
+    int original;
+    int selected;
+    const struct GameTracker *gGT = sdata->gGT;
+
+    if (!RacerLoadout_ValidDriver(driverID))
+        return BALANCED;
+
+    characterID = data.characterIDs[driverID];
+    /* A custom character can declare a fallback retail model. The sound
+     * fallback should follow that retail character, NOT the chosen physics. */
+    retailID = CharacterRegistry_GetDriverPackID(characterID);
+    original = CharacterRegistry_GetEngineClass(retailID);
+    if (original < BALANCED || original >= NUM_CLASSES)
+        original = BALANCED;
+
+    if (!gGT || driverID >= gGT->numPlyrCurrGame ||
+        driverID >= 4 || RacerLoadout_IsAdventureLocked())
+        return original;
+
+    selected = RacerLoadout_GetEngineSound(driverID);
+    switch (selected)
+    {
+    case ENGINE_SOUND_ACCEL: return ACCEL;
+    case ENGINE_SOUND_SPEED: return SPEED;
+    case ENGINE_SOUND_TURN: return TURN;
+    case ENGINE_SOUND_BALANCED: return BALANCED;
+    default: return original;
+    }
+}
+
+void RacerLoadout_SetEngineSound(int driverID, int engineSoundID)
+{
+    RacerLoadout_EnsureInit();
+    if (!RacerLoadout_ValidDriver(driverID) || RacerLoadout_IsAdventureLocked())
+        return;
+    /* Fixed retail sound choices remain usable even without an engine mod. */
+    if ((engineSoundID < 0 &&
+         engineSoundID != ENGINE_SOUND_AUTO &&
+         engineSoundID != ENGINE_SOUND_RETAIL &&
+         engineSoundID != ENGINE_SOUND_ACCEL &&
+         engineSoundID != ENGINE_SOUND_SPEED &&
+         engineSoundID != ENGINE_SOUND_TURN &&
+         engineSoundID != ENGINE_SOUND_BALANCED) ||
+        (engineSoundID >= 0 && !EngineSoundRegistry_Get(engineSoundID)))
+        engineSoundID = ENGINE_SOUND_AUTO;
+    s_racerLoadouts[driverID].engineSoundID = (s16)engineSoundID;
+}
+
+void RacerLoadout_SetPhysicsClass(int driverID, int physicsClass)
+{
+    RacerLoadout_EnsureInit();
+    if (!RacerLoadout_ValidDriver(driverID) || RacerLoadout_IsAdventureLocked())
+        return;
+    if (physicsClass < RACER_PHYSICS_DEFAULT || physicsClass > RACER_PHYSICS_LAST)
+        physicsClass = RACER_PHYSICS_DEFAULT;
+    s_racerLoadouts[driverID].physicsClass = (s8)physicsClass;
+}
+
+const char *RacerLoadout_PhysicsName(int physicsClass)
+{
+    switch (physicsClass)
+    {
+    case RACER_PHYSICS_DEFAULT: return "DEFAULT";
+    case RACER_PHYSICS_BALANCED: return "BALANCED";
+    case RACER_PHYSICS_ACCEL: return "ACCEL";
+    case RACER_PHYSICS_SPEED: return "SPEED";
+    case RACER_PHYSICS_TURN: return "TURN";
+    case RACER_PHYSICS_MAX: return "MAX STATS";
+#if defined(CTR_CNK_PHYSICS_PREVIEW_QA)
+    case RACER_PHYSICS_CNK_PREVIEW: return "CNK (TEST)";
+#endif
+    default: return "DEFAULT";
+    }
+}
+
+int RacerLoadout_GetEffectivePhysicsEngine(int driverID)
+{
+    /* Do not affect bots, main-menu AI drivers or Adventure's retail story
+     * physics. This only applies to the local human slots, up to P4. */
+    int characterID;
+    int original;
+    int selected;
+    const struct GameTracker *gGT=sdata->gGT;
+    if (!RacerLoadout_ValidDriver(driverID))
+        return BALANCED;
+    characterID=data.characterIDs[driverID];
+    original=CharacterRegistry_GetEngineClass(characterID);
+    if (original < BALANCED || original >= NUM_CLASSES)
+        original=BALANCED;
+    if (!gGT || driverID >= gGT->numPlyrCurrGame ||
+        driverID >= 4 || RacerLoadout_IsAdventureLocked())
+        return original;
+    selected=RacerLoadout_GetPhysicsClass(driverID);
+#if defined(CTR_CNK_PHYSICS_PREVIEW_QA)
+    /* Use Balanced as the safe backing class; the CNK test adapter only
+     * changes selected handling parameters, never speed or engine sounds. */
+    if (selected == RACER_PHYSICS_CNK_PREVIEW)
+        return BALANCED;
+#endif
+    if (selected>=BALANCED && selected<NUM_CLASSES)
+        return selected;
+    if (selected==RACER_PHYSICS_MAX)
+        return SPEED; /* safe engine-audio fallback and common base stats */
+    return original;
+}
+
+int RacerLoadout_UsesMaxStats(int driverID)
+{
+    const struct GameTracker *gGT=sdata->gGT;
+    if (!RacerLoadout_ValidDriver(driverID) || !gGT ||
+        driverID >= gGT->numPlyrCurrGame || driverID >= 4 ||
+        RacerLoadout_IsAdventureLocked())
+        return 0;
+    return RacerLoadout_GetPhysicsClass(driverID) == RACER_PHYSICS_MAX;
 }
 
 int RacerLoadout_GetEffectiveKart(int driverID)
@@ -163,6 +337,12 @@ int RacerLoadout_GetEffectiveKart(int driverID)
 int RacerLoadout_GetEffectiveWheels(int driverID)
 {
     if (RacerLoadout_IsAdventureLocked())
+        return RACER_LOADOUT_ORIGINAL;
+
+    /* A no-wheel kart overrides any previous or global 3D wheel selection,
+       but never deletes it: changing back to a normal kart restores wheels. */
+    if (VehiclePartRegistry_HidesWheels(
+            RacerLoadout_GetEffectiveKart(driverID)))
         return RACER_LOADOUT_ORIGINAL;
 
     return RacerLoadout_GetWheels(driverID);

@@ -146,6 +146,9 @@ void Platform_InputCancelRebindCapture(void);
 void Platform_InputPadInit(int slot, unsigned char *padData);
 int Platform_InputPadGetState(int port);
 void Platform_InputPadVibrate(int port, unsigned char *table, int len);
+/* UI haptic feedback for each logical player's currently assigned controller.
+ * Returns 0 if no rumble-capable gamepad is assigned. */
+int Platform_InputPreviewVibration(int playerIndex, int enabled);
 int Platform_InputCapturePadSnapshots(struct PlatformInputPadSnapshot *dst, int count);
 int Platform_InputInstallPadSnapshots(const struct PlatformInputPadSnapshot *src, int count);
 void Platform_InputClearInstalledPadSnapshots(void);

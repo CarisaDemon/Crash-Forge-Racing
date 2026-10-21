@@ -1,4 +1,8 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <RacerLoadout.h>
+#include <VehiclePartRegistry.h>
+#endif
 
 enum
 {
@@ -253,6 +257,17 @@ void VehGroundSkids_Main(struct Thread *thread, struct PushBuffer *pb)
 	while (thread != NULL)
 	{
 		struct Driver *d = thread->object;
+#if defined(CTR_NATIVE)
+		/* A no-wheel kart never draws skid marks, including old history.
+		 * Continue to other racers: a hovercraft must not suppress
+		 * normal karts in this render pass. */
+		if (VehiclePartRegistry_HidesWheels(
+				RacerLoadout_GetEffectiveKart((int)d->driverID)))
+		{
+			thread = thread->siblingThread;
+			continue;
+		}
+#endif
 		u32 flags = d->skidmarkEnableFlags;
 
 		if (flags > DRIVER_SKIDMARK_CURRENT_FRAME_MASK)

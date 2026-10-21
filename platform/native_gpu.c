@@ -100,6 +100,12 @@ typedef struct
 	/* Experimental native Z policy: only explicit custom opaque geometry
 	 * may participate. Retail world/effects remain OT-ordered. */
 	bool nativeDepthCandidate;
+#if defined(CTR_PC_RENDER_QA)
+	/* Modo PC etapa 1: el paquete pertenece al mundo 3D solido marcado por
+	 * MainFrame_RenderFrame y puede usar el Z-buffer real. */
+	bool pcWorld;
+	u32 pcTags; /* diagnostico: tramo de origen (no participa del merge) */
+#endif
 
 	u32 startVertex;
 	u32 numVerts;
@@ -120,6 +126,10 @@ typedef struct
 	bool psxDrawMaskSet;
 	bool framebufferFeedbackRunActive;
 	bool nativeDepthCandidate;
+#if defined(CTR_PC_RENDER_QA)
+	bool pcWorld;
+	u32 pcTags;
+#endif
 
 	/* Consecutive self-contained native OBJ triangles may share one external
 	 * texture. Keep that override alive only across adjacent B3 packets so
@@ -1212,6 +1222,9 @@ internal void AddSplit(bool semiTrans, bool textured, bool framebufferFeedback)
 	    curSplit->drawPrimMode == s_gpu.drawPrimMode && curSplit->psxTexturedSemiTrans == psxTexturedSemiTrans &&
 	    curSplit->psxTextureOutputSTP == psxTextureOutputSTP && curSplit->psxDrawMaskSet == s_gpu.psxDrawMaskSet &&
 	    curSplit->nativeDepthCandidate == nativeDepthCandidate &&
+#if defined(CTR_PC_RENDER_QA)
+	    curSplit->pcWorld == s_gpu.pcWorld &&
+#endif
 	    curSplit->drawenv.clip.x == activeDrawEnv.clip.x && curSplit->drawenv.clip.y == activeDrawEnv.clip.y &&
 	    curSplit->drawenv.clip.w == activeDrawEnv.clip.w && curSplit->drawenv.clip.h == activeDrawEnv.clip.h && curSplit->drawenv.dfe == activeDrawEnv.dfe &&
 	    curSplit->debugText == s_gpu.currentSplitDebugText)
@@ -1236,6 +1249,10 @@ internal void AddSplit(bool semiTrans, bool textured, bool framebufferFeedback)
 	split->psxTextureOutputSTP = psxTextureOutputSTP;
 	split->psxDrawMaskSet = s_gpu.psxDrawMaskSet;
 	split->nativeDepthCandidate = nativeDepthCandidate;
+#if defined(CTR_PC_RENDER_QA)
+	split->pcWorld = s_gpu.pcWorld;
+	split->pcTags = s_gpu.pcTags;
+#endif
 	split->drawenv = activeDrawEnv;
 	split->dispenv = activeDispEnv;
 	split->debugText = s_gpu.currentSplitDebugText;
@@ -1346,6 +1363,61 @@ void DrawSplit(const GPUDrawSplit *split)
 			}
 		}
 	}
+#if defined(CTR_PC_RENDER_QA)
+	{
+		/* Modo PC etapa 1: todo lo solido del mundo 3D (pista, karts,
+		 * personajes, ruedas) usa el Z-buffer real si trae profundidad GTE
+		 * en todos sus vertices. Transparencias, efectos, cielo y HUD no
+		 * entran: siguen pintandose en el orden PS1 de siempre. */
+		const int worldOpaque = split->pcWorld && drawOnScreen &&
+		                        (split->blendMode == BM_NONE) &&
+		                        !split->psxTexturedSemiTrans;
+		const int pcDepth = worldOpaque && NativePcRender_IsActive() &&
+		                    NativeGpu_SplitHasFullDepth(split);
+		NativePcRender_NoteSplit(worldOpaque, pcDepth);
+		if (NativePcRender_DiagActive() && drawOnScreen && (split->numVerts > 0u))
+		{
+			/* Diagnostico: profundidad GTE (SZ) y recuadro en pantalla de
+			 * cada parte dibujada en los frames de captura. */
+			u32 end = split->startVertex + split->numVerts;
+			u32 dmin = 0xffffu, dmax = 0u, zeros = 0u;
+			int x0 = 32767, y0 = 32767, x1 = -32768, y1 = -32768;
+			if (end > (u32)s_gpu.vertexIndex)
+				end = (u32)s_gpu.vertexIndex;
+			for (u32 i = split->startVertex; i < end; i++)
+			{
+				const GrVertex *v = &s_gpu.vertexBuffer[i];
+				if (v->depth == 0)
+					zeros++;
+				else
+				{
+					if (v->depth < dmin) dmin = v->depth;
+					if (v->depth > dmax) dmax = v->depth;
+				}
+				if (v->x < x0) x0 = v->x;
+				if (v->x > x1) x1 = v->x;
+				if (v->y < y0) y0 = v->y;
+				if (v->y > y1) y1 = v->y;
+			}
+			Platform_Log("[PC DIAG] frame=%u parte=%d etiquetas=%x mundo=%d solido=%d prof=%d blend=%d semi=%d tex=%d prim=%d mask=%d verts=%u sz=%u..%u sin_sz=%u caja=%d,%d..%d,%d\n",
+			             (unsigned)NativePcRender_DiagFrameId(), (int)(split - s_gpu.splits),
+			             (unsigned)split->pcTags, (int)split->pcWorld, worldOpaque, pcDepth,
+			             (int)split->blendMode, (int)split->psxTexturedSemiTrans, (int)split->texFormat,
+			             split->drawPrimMode, (int)split->psxDrawMaskSet,
+			             (unsigned)split->numVerts, (unsigned)(dmax ? dmin : 0u), (unsigned)dmax,
+			             (unsigned)zeros, x0, y0, x1, y1);
+			NativePcRender_DiagCountLine();
+		}
+		NativeRenderer_SetExperimentalDepthEligible(
+			pcDepth ||
+			(NativeRenderer_GetExperimentalZBuffer() &&
+			 (split->nativeDepthCandidate || NativeGpu_LevelPCDepthInteropStressEnabled()) &&
+			 drawOnScreen &&
+			 (split->blendMode == BM_NONE) &&
+			 !split->psxTexturedSemiTrans &&
+			 NativeGpu_SplitHasFullDepth(split)));
+	}
+#else
 	NativeRenderer_SetExperimentalDepthEligible(
 		NativeRenderer_GetExperimentalZBuffer() &&
 		(split->nativeDepthCandidate || NativeGpu_LevelPCDepthInteropStressEnabled()) &&
@@ -1353,6 +1425,7 @@ void DrawSplit(const GPUDrawSplit *split)
 		(split->blendMode == BM_NONE) &&
 		!split->psxTexturedSemiTrans &&
 		NativeGpu_SplitHasFullDepth(split));
+#endif
 
 	NativeRenderer_SetStencilMode(split->drawPrimMode); // draw with mask 0x16
 
@@ -1431,6 +1504,12 @@ internal int NativeGpu_PresentationSplitCompatible(const GPUDrawSplit *a, const 
 	{
 		return 0;
 	}
+#if defined(CTR_PC_RENDER_QA)
+	if (a->pcWorld != b->pcWorld)
+	{
+		return 0;
+	}
+#endif
 	if ((a->drawenv.clip.w != b->drawenv.clip.w) || (a->drawenv.clip.h != b->drawenv.clip.h))
 	{
 		return 0;
@@ -2922,6 +3001,12 @@ int ParsePrimitive(P_TAG *polyTag)
 {
 	const int primType = polyTag->code & 0xF0;
 	const int primSubType = polyTag->code & 0x0F;
+#if defined(CTR_PC_RENDER_QA)
+	/* Modo PC etapa 1: este paquete fue generado mientras se dibujaba el
+	 * mundo 3D solido? (tramos marcados en MainFrame_RenderFrame) */
+	s_gpu.pcWorld = NativePcRender_IsWorldPacket(polyTag);
+	s_gpu.pcTags = NativePcRender_DiagActive() ? NativePcRender_PacketRangeTags(polyTag) : 0u;
+#endif
 
 	/* B3 custom triangles carry their texture inline and may batch with the
 	 * immediately adjacent B3 packet. Any other drawable primitive must first

@@ -352,22 +352,22 @@ struct GameTracker
 	int swapchainIndex; // 0 or 1
 
 	// 0x10
-	struct DB *backBuffer; // the one you render to
+	struct DB * P32 backBuffer; // the one you render to
 
 	// 0x14
-	struct DB *frontBuffer; // the one being sent to screen
+	struct DB * P32 frontBuffer; // the one being sent to screen
 
 	// 0x18
 	struct DB db[2]; /* packet double buffer */
 
 	// The LEV being drawn
 	// 0x160
-	struct Level *level1; // real ND name
+	struct Level * P32 level1; // real ND name
 
 	// The LEV being loaded while
 	// the other LEV is being drawn,
 	// used in Adv Hub
-	struct Level *level2; // real ND name
+	struct Level * P32 level2; // real ND name
 
 	// Four window structs, each 0x110
 	// vec3s pos, vec3s rot, shown in FreecamCTR
@@ -390,7 +390,7 @@ struct GameTracker
 		s16 boolUpdatedThisFrame;
 
 		// 0x8
-		struct Instance *inst;
+		struct Instance * P32 inst;
 
 		// 0xC
 		char data2[0x100];
@@ -430,13 +430,13 @@ struct GameTracker
 		// [4] - 0x20: Water
 		struct
 		{
-			struct QuadBlock **ptrQuadBlocksRendered;
-			struct VisMemBspListNode *bspListStart;
+			struct QuadBlock * P32 * P32 ptrQuadBlocksRendered;
+			struct VisMemBspListNode * P32 bspListStart;
 		} list[5];
 
 		// 0x28
-		struct VisMemBspListNode *bspListStart_FullDynamic;
-		struct QuadBlock **ptrQuadBlocksRendered_FullDynamic;
+		struct VisMemBspListNode * P32 bspListStart_FullDynamic;
+		struct QuadBlock * P32 * P32 ptrQuadBlocksRendered_FullDynamic;
 
 		// 0x30 large
 
@@ -448,7 +448,7 @@ struct GameTracker
 	// 0x18c8
 	// 0x18cc
 	// one for each DB
-	void *otSwapchainDB[2];
+	void * P32 otSwapchainDB[2];
 
 	// 0x18d0
 	struct
@@ -485,8 +485,8 @@ struct GameTracker
 
 	// 0x1a38 -- UsaRetail
 	// 0x1a40 -- EurRetail, JpnRetail
-	struct VisMem *visMem1;
-	struct VisMem *visMem2;
+	struct VisMem * P32 visMem1;
+	struct VisMem * P32 visMem2;
 
 	// 0x1a40 -- UsaRetail
 	// one for each player
@@ -522,18 +522,18 @@ struct GameTracker
 	struct ThreadBucket threadBuckets[NUM_BUCKETS];
 
 	// 1c94
-	void *ptrRenderBucketInstance;
+	void * P32 ptrRenderBucketInstance;
 
 	// 1c98
 	int unk_1c98;
 
 	// 1c9c
 	// exhaust, fire, etc
-	struct Particle *particleList_ordinary;
+	struct Particle * P32 particleList_ordinary;
 
 	// 1ca0
 	// distorts screen above fire
-	struct Particle *particleList_heatWarp;
+	struct Particle * P32 particleList_heatWarp;
 
 	// 1ca4
 	int numParticles;
@@ -874,7 +874,7 @@ struct GameTracker
 
 	// 1ecc
 	// RedOff, RedOn, GreenOff, GreenOn
-	struct Icon *trafficLightIcon[4];
+	struct Icon * P32 trafficLightIcon[4];
 
 	// 1edc
 	// In retail versions of the game, this is
@@ -891,7 +891,7 @@ struct GameTracker
 
 	// 0x1e74 sep3
 	// 0x1eec UsaRetail
-	struct Icon *ptrIcons[0x88];
+	struct Icon * P32 ptrIcons[0x88];
 
 	// internal name first, followed by what it is
 	// except for current map top and bottom, they're pointers to several icons that get loaded depending on lev
@@ -1056,7 +1056,7 @@ struct GameTracker
 	// 2114 -- UsaRetail, JpnTrial
 	// 211c -- JpnRetail
 	// 2098 -- SepReview
-	struct IconGroup *iconGroup[0x11];
+	struct IconGroup * P32 iconGroup[0x11];
 
 	// Different pointer struct than 1f6c
 
@@ -1094,9 +1094,9 @@ struct GameTracker
 // always one more than the
 // array of Init Func Info
 #if BUILD == SepReview
-	struct Model *modelPtr[0xdf];
+	struct Model * P32 modelPtr[0xdf];
 #elif BUILD >= UsaRetail
-	struct Model *modelPtr[0xe3];
+	struct Model * P32 modelPtr[0xe3];
 #endif
 
 	// 0x00 - NO_FUNC
@@ -1376,10 +1376,10 @@ struct GameTracker
 	// 0xe2 - NUM_TYPES
 
 	// +24EC  8009900C
-	struct Driver *drivers[8];
+	struct Driver * P32 drivers[8];
 
 	// +250C  8009902C
-	struct Driver *driversInRaceOrder[8];
+	struct Driver * P32 driversInRaceOrder[8];
 
 	// 252c
 	// this stuct is passed to FUN_8006c684 and updates every frame (this is func with 0xdeadc0ed)

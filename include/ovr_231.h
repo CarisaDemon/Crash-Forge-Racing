@@ -40,7 +40,7 @@ struct MaskHeadWeapon
 	s16 duration;
 
 	// 0x8
-	struct Instance *maskBeamInst;
+	struct Instance * P32 maskBeamInst;
 
 	// 0xC
 	SVec3 pos;
@@ -77,6 +77,9 @@ enum
 	TRACKER_FLAG_WARPBALL_HIT_DRIVER = 0x0040,
 	TRACKER_FLAG_WARPBALL_TURN_AROUND = 0x0100,
 	TRACKER_FLAG_WARPBALL_BACKTRACKING = 0x0200,
+#if defined(CTR_NATIVE)
+	TRACKER_FLAG_CNK_TORNADO = 0x0400,
+#endif
 
 	TRACKER_FLAG_WARPBALL_PATH_MODE = TRACKER_FLAG_WARPBALL_TARGET_PATH | TRACKER_FLAG_WARPBALL_FALLBACK_PATH,
 	TRACKER_FLAG_WARPBALL_TARGET_REFRESH_BLOCKED = TRACKER_FLAG_WARPBALL_TARGET_PATH | TRACKER_FLAG_WARPBALL_BACKTRACKING,
@@ -89,16 +92,16 @@ CTR_STATIC_ASSERT(TRACKER_FLAG_WARPBALL_MASK_REPATH == 0x0010);
 struct TrackerWeapon
 {
 	// 0x0
-	struct Driver *driverTarget; // being chased
+	struct Driver * P32 driverTarget; // being chased
 
 	// 0x4
-	struct Driver *driverParent; // who shot me
+	struct Driver * P32 driverParent; // who shot me
 
 	// 0x8
-	struct Instance *instParent; // of driver who shot me
+	struct Instance * P32 instParent; // of driver who shot me
 
 	// 0xC
-	struct Particle *ptrParticle;
+	struct Particle * P32 ptrParticle;
 
 	// 0x10
 	SVec3 vel;
@@ -140,10 +143,10 @@ struct TrackerWeapon
 	int distFromGround;
 
 	// 0x3C
-	struct CheckpointNode *ptrNodeCurr;
+	struct CheckpointNode * P32 ptrNodeCurr;
 
 	// 0x40
-	struct CheckpointNode *ptrNodeNext;
+	struct CheckpointNode * P32 ptrNodeNext;
 
 	// 0x44
 	u8 nodeCurrIndex;
@@ -187,8 +190,8 @@ CTR_STATIC_ASSERT(sizeof(struct TrackerWeapon) == 0x58);
 struct RainLocal
 {
 	// 0x0
-	struct RainLocal *next;
-	struct RainLocal *prev;
+	struct RainLocal * P32 next;
+	struct RainLocal * P32 prev;
 
 	// 0x8
 	int frameCount;
@@ -206,7 +209,7 @@ struct RainLocal
 	s16 _pad_pos;
 
 	// 0x24
-	struct Instance *cloudInst;
+	struct Instance * P32 cloudInst;
 
 	// 0x28 -- size
 };
@@ -218,7 +221,7 @@ CTR_STATIC_ASSERT(sizeof(struct RainLocal) == 0x28);
 struct RainCloud
 {
 	// 0x0
-	struct RainLocal *rainLocal;
+	struct RainLocal * P32 rainLocal;
 
 	// 0x4
 	s16 timeMS;
@@ -253,10 +256,10 @@ struct Shield
 	ShieldFlags flags;
 
 	// 0x8
-	struct Instance *instColor;
+	struct Instance * P32 instColor;
 
 	// 0xC
-	struct Instance *instHighlight;
+	struct Instance * P32 instHighlight;
 
 	// 0x10
 	SVec3 highlightRot;
@@ -279,13 +282,13 @@ struct WeaponSlot231
 		struct
 		{
 			// 0x0
-			struct WeaponSlot231 *next;
-			struct WeaponSlot231 *prev;
+			struct WeaponSlot231 * P32 next;
+			struct WeaponSlot231 * P32 prev;
 		};
 	};
 
 	// 0x8
-	struct MineWeapon *mineWeapon;
+	struct MineWeapon * P32 mineWeapon;
 };
 CTR_STATIC_ASSERT(sizeof(struct WeaponSlot231) == 0xc);
 
@@ -301,13 +304,13 @@ enum
 struct MineWeapon
 {
 	// 0x0
-	struct Driver *driverTarget; // who hit me
+	struct Driver * P32 driverTarget; // who hit me
 
 	// 0x4
-	struct Instance *instParent; // of driver who placed me
+	struct Instance * P32 instParent; // of driver who placed me
 
 	// 0x8
-	struct Instance *crateInst; // if colliding with one
+	struct Instance * P32 crateInst; // if colliding with one
 
 	// 0xc
 	SVec3 velocity;
@@ -326,7 +329,7 @@ struct MineWeapon
 	s16 numFramesOnHead;
 
 	// 0x18
-	struct WeaponSlot231 *weaponSlot231;
+	struct WeaponSlot231 * P32 weaponSlot231;
 
 	// 0x1C
 	// relative to driver
@@ -379,7 +382,7 @@ struct Baron
 
 	// 0x28
 	// unused, for baron
-	struct Instance *otherInst;
+	struct Instance * P32 otherInst;
 
 	// 0x2c
 	s16 pointIndex;
@@ -542,8 +545,8 @@ CTR_STATIC_ASSERT(sizeof(struct FlameJet) == 0x14);
 struct Follower
 {
 	int frameCount;
-	struct Driver *driver;
-	struct Thread *mineTh;
+	struct Driver * P32 driver;
+	struct Thread * P32 mineTh;
 	int backupTimesDestroyed;
 
 	SVec3 realPos;
@@ -553,7 +556,7 @@ CTR_STATIC_ASSERT(sizeof(struct Follower) == 0x18);
 
 struct Fruit
 {
-	struct Driver *driver;
+	struct Driver * P32 driver;
 };
 CTR_STATIC_ASSERT(sizeof(struct Fruit) == 0x4);
 
@@ -735,7 +738,7 @@ struct Spider
 	s16 padding;
 
 	// 0xC
-	struct Instance *shadowInst;
+	struct Instance * P32 shadowInst;
 
 	// 0x10 bytes large
 };

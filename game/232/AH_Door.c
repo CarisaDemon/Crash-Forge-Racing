@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#endif
 
 enum AHDoorConstants
 {
@@ -115,6 +118,16 @@ void AH_Door_ThTick(struct Thread *t)
 	struct CameraDC *cDC = gGT->cameraDC;
 
 	doorID = door->doorID;
+
+#if defined(CTR_NATIVE)
+	/* Hangout's terrain is borrowed, but its hub doors are scenery only.
+	 * Never unlock collision, hints or Adventure camera transitions. */
+	if (NativeHangout_IsActive())
+	{
+		sdata->doorAccessFlags &= ~AH_DOOR_ACCESS_FLAG;
+		return;
+	}
+#endif
 
 	// Assume door is closed
 	doorIsOpen = false;
@@ -728,6 +741,12 @@ void AH_Door_LInB(struct Instance *inst)
 	headers = otherDoorInst->model->headers;
 
 	headers->flags |= 2;
+
+#if defined(CTR_NATIVE)
+	/* Do not initialize opened doors from any Adventure unlock state. */
+	if (NativeHangout_IsActive())
+		return;
+#endif
 
 	if (
 	    // Level ID is N Sanity Beach, check door to Glacier Park

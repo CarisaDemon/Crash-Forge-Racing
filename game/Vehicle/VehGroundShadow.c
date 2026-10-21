@@ -1,4 +1,8 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <RacerLoadout.h>
+#include <VehiclePartRegistry.h>
+#endif
 
 enum
 {
@@ -79,8 +83,8 @@ struct VehGroundShadowEntry
 	SVec3 local[3];
 	s8 state;
 	s8 depthBias;
-	struct Driver *driver;
-	struct Instance *inst;
+	struct Driver * P32 driver;
+	struct Instance * P32 inst;
 	u8 idppFlags[VEH_GROUND_SHADOW_MAX_PLAYERS];
 	SVec3 pos;
 	u16 instFlags;
@@ -91,7 +95,7 @@ struct VehGroundShadowScratch
 	u8 pad_000[0xa4];
 	struct VehGroundShadowEntry entries[VEH_GROUND_SHADOW_MAX_DRIVERS];
 	u8 pad_1e4[0x14];
-	struct Driver *sentinelDriver;
+	struct Driver * P32 sentinelDriver;
 	u8 pad_1fc[0x28];
 	struct TextureLayout shadowTex[VEH_GROUND_SHADOW_TEXTURE_COUNT];
 };
@@ -391,6 +395,18 @@ void VehGroundShadow_Main(void)
 
 		if (driver != NULL)
 		{
+#if defined(CTR_NATIVE)
+			if (VehiclePartRegistry_HidesWheels(
+					RacerLoadout_GetEffectiveKart((int)driver->driverID)))
+			{
+				/* Keep this entry occupied but culled. NULL is the loop's
+				 * end sentinel, so using NULL here would hide every
+				 * following kart's shadow too. */
+				entry->driver = driver;
+				entry->state = VEH_GROUND_SHADOW_STATE_CULLED;
+				continue;
+			}
+#endif
 			VehGroundShadow_BuildEntry(entry, driver, numPlayers);
 		}
 		else

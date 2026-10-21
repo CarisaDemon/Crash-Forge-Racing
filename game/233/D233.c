@@ -4,7 +4,7 @@ static void OVR233_ResetGarage(void);
 static void OVR233_ResetCreditsBSS(void);
 
 CTR_STATIC_ASSERT(sizeof(struct OverlayRDATA_233) == 0xbd90);
-CTR_STATIC_ASSERT(sizeof(void *) == 4);
+CTR_STATIC_ASSERT(sizeof(void * P32) == 4);
 
 struct OverlayDATA_233 D233;
 

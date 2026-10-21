@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <platform/native_custom_tracks.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800265c0-0x8002689c.
 void GAMEPROG_AdvPercent(struct AdvProgress *adv)
@@ -309,7 +312,15 @@ void GAMEPROG_GetPtrHighScoreTrack(void)
 {
 	struct GameTracker *gGT = sdata->gGT;
 	s32 gameMode1 = gGT->gameMode1;
+	s16 scoreLevelID = gGT->levelID;
+#if defined(CTR_NATIVE)
+	{
+		int customLevelID = NativeCustomTracks_SelectedOriginalLevelID();
+		if (customLevelID >= 0)
+			scoreLevelID = (s16)customLevelID;
+	}
+#endif
 
 	sdata->ptrActiveHighScoreEntry =
-	    &sdata->gameProgress.highScoreTracks[gGT->levelID].scoreEntry[MEMCARD_HIGH_SCORE_ENTRIES_PER_MODE * ((gameMode1 & RELIC_RACE) != 0)];
+	    &sdata->gameProgress.highScoreTracks[scoreLevelID].scoreEntry[MEMCARD_HIGH_SCORE_ENTRIES_PER_MODE * ((gameMode1 & RELIC_RACE) != 0)];
 }

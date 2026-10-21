@@ -25,7 +25,7 @@ void LOAD_CDRequestCallback(struct LoadQueueSlot *lqs)
 {
 	if (lqs->callbackFuncPtr != NULL)
 	{
-		lqs->callbackFuncPtr(lqs);
+		FN32(lqs->callbackFuncPtr)(lqs);
 	}
 
 	sdata->queueReady = 1;
@@ -81,7 +81,7 @@ void LOAD_NextQueuedFile()
 		{
 			if (curr->callbackFuncPtr != NULL)
 			{
-				curr->callbackFuncPtr(curr);
+				FN32(curr->callbackFuncPtr)(curr);
 			}
 
 			sdata->frameFinishedVRAM = 0;

@@ -1,6 +1,7 @@
 #include <common.h>
 #if defined(CTR_NATIVE)
 #include <NativeHangout.h>
+#include <platform/native_obj.h>
 #endif
 
 static inline void VehPickupItem_CopyMatrix(MATRIX *dst, const MATRIX *src)
@@ -70,6 +71,9 @@ enum
 	WEAPON_ID_MASK = 7,
 	WEAPON_ID_CLOCK = 8,
 	WEAPON_ID_WARPBALL = 9,
+#if defined(CTR_NATIVE)
+	WEAPON_ID_CNK_TORNADO = HELD_ITEM_CNK_TORNADO,
+#endif
 	WEAPON_ID_INVISIBILITY = 0xc,
 	WEAPON_ID_SUPER_ENGINE = 0xd,
 	SHOOT_NOW_NO_FLAGS = 0,
@@ -1077,10 +1081,16 @@ void VehPickupItem_ShootNow(struct Driver *d, s32 weaponID, s32 flags)
 		}
 		break;
 
-	// Warpball
+	// Warpball path engine, shared with the native-only CNK Tornado Top.
 	case WEAPON_ID_WARPBALL:
+#if defined(CTR_NATIVE)
+	case WEAPON_ID_CNK_TORNADO:
+#endif
 
 		dInst = d->instSelf;
+#if defined(CTR_NATIVE)
+		int isCNKTornado = (weaponID == WEAPON_ID_CNK_TORNADO);
+#endif
 		GAMEPAD_ShockFreq(d, WEAPON_GAMEPAD_RUMBLE_FRAMES, 0);
 		GAMEPAD_ShockForce1(d, WEAPON_GAMEPAD_RUMBLE_FRAMES, WEAPON_GAMEPAD_RUMBLE_FORCE);
 
@@ -1088,6 +1098,7 @@ void VehPickupItem_ShootNow(struct Driver *d, s32 weaponID, s32 flags)
 		char *warpballName = rdata.s_warpball;
 
 		weaponInst = INSTANCE_BirthWithThread(WARPBALL_MODEL, warpballName, MEDIUM, TRACKING, RB_Warpball_ThTick, sizeof(struct TrackerWeapon), 0);
+		if (weaponInst == NULL) return;
 
 		weaponInst->matrix.m[0][0] = WARPBALL_MATRIX_IDENTITY_SCALE;
 		weaponInst->matrix.m[0][1] = 0;
@@ -1102,11 +1113,44 @@ void VehPickupItem_ShootNow(struct Driver *d, s32 weaponID, s32 flags)
 		weaponInst->matrix.t[0] = CTR_MipsSra(d->posCurr.x, WARPBALL_POS_SHIFT);
 		weaponInst->matrix.t[1] = CTR_MipsSra(d->posCurr.y, WARPBALL_POS_SHIFT);
 		weaponInst->matrix.t[2] = CTR_MipsSra(d->posCurr.z, WARPBALL_POS_SHIFT);
+#if defined(CTR_NATIVE)
+		if (isCNKTornado)
+		{
+			/* New standalone CNK model: retail Warp Orb instance/model stays
+			 * unchanged. Only this tornado projectile gets a custom visual. */
+			struct Model *tornadoModel = NativeObj_LoadCnkTornado();
+			if (tornadoModel != NULL)
+			{
+				weaponInst->model = tornadoModel;
+				weaponInst->animFrame = 0;
+				weaponInst->scale.x = 0x100;
+				weaponInst->scale.y = 0x100;
+				weaponInst->scale.z = 0x100;
+				Platform_LogWarn("[CNK TORNADO QA] MESH original GameCube twister loaded (standalone)\n");
+			}
+			else
+			{
+				/* Missing asset cannot break the race; fall back visually. */
+				weaponInst->scale.x = 0xc00;
+				weaponInst->scale.y = 0x2400;
+				weaponInst->scale.z = 0xc00;
+				Platform_LogWarn("[CNK TORNADO QA] MESH missing; fallback Warp Orb visual only\n");
+			}
+		}
+#endif
 
 		weaponTh = weaponInst->thread;
 		weaponTh->funcThDestroy = PROC_DestroyInstance;
 
-		PlaySound3D(SOUND_WARPBALL, weaponInst);
+#if defined(CTR_NATIVE)
+		if (isCNKTornado)
+		{
+			NativeAudio_CNKTornadoPlay(0);
+			NativeAudio_CNKTornadoPlay(2);
+		}
+		else
+#endif
+			PlaySound3D(SOUND_WARPBALL, weaponInst);
 
 		// if human and not AI (AIs can not use Warpball)
 		if ((d->actionsFlagSet & ACTION_BOT) == 0)
@@ -1117,6 +1161,11 @@ void VehPickupItem_ShootNow(struct Driver *d, s32 weaponID, s32 flags)
 		// used by RB_Warpball_SeekDriver
 		victim = 0;
 		int rank = d->driverRank;
+#if defined(CTR_NATIVE)
+		if (isCNKTornado)
+			victim = gGT->driversInRaceOrder[0]; /* First place, not controller P1 */
+		else
+#endif
 		if (rank != 0)
 		{
 			victim = gGT->driversInRaceOrder[rank - 1];
@@ -1124,10 +1173,21 @@ void VehPickupItem_ShootNow(struct Driver *d, s32 weaponID, s32 flags)
 
 		tw = weaponTh->object;
 		tw->flags = TRACKER_FLAG_WARPBALL_FALLBACK_PATH;
+#if defined(CTR_NATIVE)
+		if (isCNKTornado) tw->flags |= TRACKER_FLAG_CNK_TORNADO;
+#endif
 		tw->soundIDCount = 0;
 		tw->ptrNodeNext = 0;
 		tw->pathProgress = 0;
 		tw->turnAroundFrames = 0;
+#if defined(CTR_NATIVE)
+		if (isCNKTornado)
+		{
+			tw->timeAlive = 0; /* 200Hz fractional speed accumulator */
+			tw->rotY = 0;     /* lateral obstacle avoidance offset */
+			tw->framesSeekTargetTnt = 0; /* tornado visual animation time (ms) */
+		}
+#endif
 		tw->driverParent = d;
 		tw->driverTarget = victim;
 		tw->instParent = dInst;
@@ -1148,6 +1208,14 @@ void VehPickupItem_ShootNow(struct Driver *d, s32 weaponID, s32 flags)
 		tw->driversHit = 1 << d->driverID;
 
 		victim = 0;
+#if defined(CTR_NATIVE)
+		/* Tornado exclusively targets the race leader, even when the
+		 * item was launched by a racer in first place. Retail Warp Orb
+		 * keeps its rank-based targeting unchanged. */
+		if (isCNKTornado)
+			victim = RB_Warpball_GetDriverTarget(tw, weaponInst);
+		else
+#endif
 		if (rank != 0)
 		{
 			victim = RB_Warpball_GetDriverTarget(tw, weaponInst);
@@ -1171,7 +1239,10 @@ void VehPickupItem_ShootNow(struct Driver *d, s32 weaponID, s32 flags)
 		tw->ptrNodeNext = RB_Warpball_NewPathNode(tw->ptrNodeCurr, victim);
 
 		tw->vel.y = 0;
-		tw->rotY = d->angle;
+#if defined(CTR_NATIVE)
+		if (!isCNKTornado)
+#endif
+			tw->rotY = d->angle;
 		tw->parentSafetyFrames = WARPBALL_PARENT_SAFETY_FRAMES;
 
 		// do NOT patch for 60fps,
@@ -1179,7 +1250,15 @@ void VehPickupItem_ShootNow(struct Driver *d, s32 weaponID, s32 flags)
 		tw->vel.x = (dInst->matrix.m[0][2] * WARPBALL_VELOCITY_NUMERATOR) >> WARPBALL_VELOCITY_SHIFT;
 		tw->vel.z = (dInst->matrix.m[2][2] * WARPBALL_VELOCITY_NUMERATOR) >> WARPBALL_VELOCITY_SHIFT;
 
-		struct Particle *p = Particle_Init(0, gGT->iconGroup[WARPBALL_PARTICLE_ICON_GROUP], &data.emSet_Warpball[0]);
+		struct Particle *p;
+#if defined(CTR_NATIVE)
+		/* CTR Warp Orb keeps its original particles. The new CNK item
+		 * never borrows those Orb particles; its own dust is separate. */
+		p = isCNKTornado ? NULL :
+		    Particle_Init(0, gGT->iconGroup[WARPBALL_PARTICLE_ICON_GROUP], &data.emSet_Warpball[0]);
+#else
+		p = Particle_Init(0, gGT->iconGroup[WARPBALL_PARTICLE_ICON_GROUP], &data.emSet_Warpball[0]);
+#endif
 
 		tw->ptrParticle = p;
 
@@ -1187,6 +1266,15 @@ void VehPickupItem_ShootNow(struct Driver *d, s32 weaponID, s32 flags)
 		{
 			p->otIndexOffset = (s8)WARPBALL_PARTICLE_OT_OFFSET;
 		}
+
+#if defined(CTR_NATIVE)
+		if (isCNKTornado)
+			Platform_LogWarn("[CNK TORNADO QA] LAUNCHED byDriver=%d targetLeaderDriver=%d targetRank=%d juiced=%d\n",
+			    d->driverID,
+			    tw->driverTarget != NULL ? tw->driverTarget->driverID : -1,
+			    tw->driverTarget != NULL ? tw->driverTarget->driverRank : -1,
+			    (tw->flags & TRACKER_FLAG_POWERED_UP) != 0);
+#endif
 
 		break;
 

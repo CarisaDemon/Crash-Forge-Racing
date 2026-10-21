@@ -1,5 +1,12 @@
 #include <common.h>
 
+#ifdef CTR_NATIVE
+/* Scoped, native-only font scaling for the unobtrusive title build stamp. */
+static s16 s_nativeCompactDecalScale = FP(1.0);
+/* Used only while drawing orange captions in the modular racer selector. */
+static int s_nativeLoadoutMirrorGreaterGlyph;
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800223f4-0x800224d0.
 int DecalFont_GetLineWidthStrlen(char *character, int len, int fontType)
 {
@@ -89,6 +96,9 @@ int DecalFont_GetLineWidthStrlen(char *character, int len, int fontType)
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800224d0-0x800224fc.
 int DecalFont_GetLineWidth(char *str, s16 fontType)
 {
+#ifdef CTR_NATIVE
+    str = NativeLocalization_Translate(str);
+#endif
 	return (s16)DecalFont_GetLineWidthStrlen(str, -1, fontType);
 }
 
@@ -96,12 +106,21 @@ int DecalFont_GetLineWidth(char *str, s16 fontType)
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800224fc-0x80022878 for the retail path.
 void DecalFont_DrawLineStrlen(char *str, s16 len, int posX, s16 posY, s16 fontType, int flags)
 {
+#ifdef CTR_NATIVE
+    if (len < 0) str = NativeLocalization_Translate(str);
+#endif
 	struct GameTracker *gGT = sdata->gGT;
 
 	// text is justified left by default
 	if (flags & (JUSTIFY_CENTER | JUSTIFY_RIGHT))
 	{
 		int alignX = DecalFont_GetLineWidthStrlen(str, len, fontType);
+#ifdef CTR_NATIVE
+		/* Only loadout captions need custom-centering at reduced scale.
+		 * The existing title stamp scaling/position is unchanged. */
+		if (s_nativeLoadoutMirrorGreaterGlyph)
+			alignX = (int)FP_Mult(alignX,s_nativeCompactDecalScale);
+#endif
 
 		if (flags & JUSTIFY_CENTER)
 		{
@@ -318,6 +337,28 @@ void DecalFont_DrawLineStrlen(char *str, s16 len, int posX, s16 posY, s16 fontTy
 
 #endif
 
+#ifdef CTR_NATIVE
+		/* The native title stamp needs smaller glyphs AND smaller tracking.
+		 * Scaling icon sprites without spacing would overlap letters.
+		 * All other game text stays retail-sized (default scale 1.0). */
+		if (s_nativeCompactDecalScale != FP(1.0))
+		{
+			charWidth = (s16)FP_Mult(charWidth, s_nativeCompactDecalScale);
+			pixWidthExtra = (s16)FP_Mult(pixWidthExtra, s_nativeCompactDecalScale);
+			pixHeightExtra = (s16)FP_Mult(pixHeightExtra, s_nativeCompactDecalScale);
+			iconScale = (s16)FP_Mult(iconScale, s_nativeCompactDecalScale);
+		}
+#endif
+
+#ifdef CTR_NATIVE
+		/* Retail maps '>' to a dash: use the real left-arrow sprite and
+		 * mirror its horizontal UV ONLY for modular loadout captions. */
+		const int mirrorSelectorRightArrow =
+			s_nativeLoadoutMirrorGreaterGlyph && (*strcopy == '>');
+		if (mirrorSelectorRightArrow)
+			iconID = data.font_characterIconID['<' - 0x21];
+#endif
+
 		// if iconID is valid
 		if (iconID != 0xff)
 		{
@@ -452,7 +493,7 @@ void DecalFont_DrawLineStrlen(char *str, s16 len, int posX, s16 posY, s16 fontTy
 
 				if (iconID < gGT->iconGroup[iconGroupID]->numIcons)
 				{
-					struct Icon **iconPtrArray = ICONGROUP_GETICONS(gGT->iconGroup[iconGroupID]);
+					struct Icon * P32 *iconPtrArray = ICONGROUP_GETICONS(gGT->iconGroup[iconGroupID]);
 
 					DecalHUD_DrawPolyGT4(iconPtrArray[iconID],
 
@@ -463,6 +504,19 @@ void DecalFont_DrawLineStrlen(char *str, s16 len, int posX, s16 posY, s16 fontTy
 					                     ptrColor[0], ptrColor[1], ptrColor[2], ptrColor[3],
 
 					                     0, iconScale);
+#ifdef CTR_NATIVE
+					if (mirrorSelectorRightArrow && iconPtrArray[iconID])
+					{
+						POLY_GT4 *glyph =
+							(POLY_GT4 *)gGT->backBuffer->primMem.cursor - 1;
+						u8 tmp = glyph->u0;
+						glyph->u0 = glyph->u1;
+						glyph->u1 = tmp;
+						tmp = glyph->u2;
+						glyph->u2 = glyph->u3;
+						glyph->u3 = tmp;
+					}
+#endif
 				}
 			}
 
@@ -470,7 +524,7 @@ void DecalFont_DrawLineStrlen(char *str, s16 len, int posX, s16 posY, s16 fontTy
 
 			if (iconStruct == 0)
 			{
-				struct Icon **iconPtrArray = ICONGROUP_GETICONS(gGT->iconGroup[iconGroupID]);
+				struct Icon * P32 *iconPtrArray = ICONGROUP_GETICONS(gGT->iconGroup[iconGroupID]);
 				if (kanaID < gGT->iconGroup[iconGroupID]->numIcons)
 					iconStruct = iconPtrArray[kanaID];
 			}
@@ -489,7 +543,7 @@ void DecalFont_DrawLineStrlen(char *str, s16 len, int posX, s16 posY, s16 fontTy
 
 #else // i.e. european build
 
-			struct Icon **iconPtrArray = ICONGROUP_GETICONS(gGT->iconGroup[iconGroupID]);
+			struct Icon * P32 *iconPtrArray = ICONGROUP_GETICONS(gGT->iconGroup[iconGroupID]);
 
 			for (; numCharacters > 0; numCharacters--, pixWidthExtra += data.font_EurPixWidthExtra[fontType])
 			{
@@ -532,6 +586,36 @@ void DecalFont_DrawLine(char *str, int posX, int posY, s16 fontType, int flags)
 	DecalFont_DrawLineStrlen(str, -1, (s16)posX, (s16)posY, fontType, (s16)flags);
 }
 
+#ifdef CTR_NATIVE
+/* Only used by the native title's two-line build/time stamp. The scale
+ * override is restored immediately so other HUD/menu fonts are unchanged. */
+void DecalFont_DrawLineScaledNative(char *str, int x, int y, s16 fontType,
+                                    int flags, s16 scale)
+{
+	const s16 oldScale = s_nativeCompactDecalScale;
+	if (scale > 0 && scale <= FP(1.0))
+		s_nativeCompactDecalScale = scale;
+	DecalFont_DrawLine(str, x, y, fontType, flags);
+	s_nativeCompactDecalScale = oldScale;
+}
+
+/* Dedicated modular selector scaler. Restore every original state so
+ * Experimental build stamps and all non-loadout fonts stay untouched. */
+void DecalFont_DrawLineNativeScaled(char *str, int x, int y,
+						s16 fontType, int flags, int percent)
+{
+	const s16 oldScale = s_nativeCompactDecalScale;
+	const int oldMirror = s_nativeLoadoutMirrorGreaterGlyph;
+	if (percent < 50) percent = 50;
+	if (percent > 100) percent = 100;
+	s_nativeCompactDecalScale =
+		(s16)(((int)FP(1.0) * percent + 50) / 100);
+	s_nativeLoadoutMirrorGreaterGlyph = 1;
+	DecalFont_DrawLine(str,x,y,fontType,flags);
+	s_nativeLoadoutMirrorGreaterGlyph = oldMirror;
+	s_nativeCompactDecalScale = oldScale;
+}
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800228c4-0x80022930.
 void DecalFont_DrawLineOT(char *str, int posX, int posY, s16 fontType, int flags, uint32_t *ot)
@@ -711,5 +795,8 @@ int DecalFont_DrawMultiLineStrlen(char *str, s16 len, s16 posX, s16 posY, s16 ma
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80022b34-0x80022b94.
 int DecalFont_DrawMultiLine(char *str, int posX, int posY, int maxPixLen, s16 fontType, int flags)
 {
+#ifdef CTR_NATIVE
+    str = NativeLocalization_Translate(str);
+#endif
 	return (s16)DecalFont_DrawMultiLineStrlen(str, -1, (s16)posX, (s16)posY, (s16)maxPixLen, fontType, (s16)flags);
 }

@@ -7,7 +7,7 @@ struct DecalMPEntry
 	u8 kartState;
 	u8 pad3[3];
 	s16 boolUpdatedThisFrame;
-	struct Instance *inst;
+	struct Instance * P32 inst;
 	u8 padC[4];
 	s16 renderW;
 	s16 renderH;

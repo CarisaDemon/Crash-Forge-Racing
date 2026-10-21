@@ -328,7 +328,7 @@ typedef struct _DISPENV
 // DRAWENV must be 0x5c bytes large
 typedef struct _NikoFakeDrEnv
 {
-	u_long *tag;
+	u_long * P32 tag;
 	u_long unk[15];
 } NikoFakeDrEnv;
 

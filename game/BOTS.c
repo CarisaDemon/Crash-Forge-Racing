@@ -508,7 +508,7 @@ void BOTS_InitNavPath(struct GameTracker *gGT, s16 index)
 {
 	(void)gGT;
 	struct NavHeader *nh = 0;
-	struct NavHeader **LevNavTable = sdata->gGT->level1->LevNavTable;
+	struct NavHeader * P32 *LevNavTable = sdata->gGT->level1->LevNavTable;
 
 	if (LevNavTable != 0)
 	{
@@ -844,6 +844,13 @@ void BOTS_Adv_AdjustDifficulty(void)
 void BOTS_UpdateGlobals(void)
 {
 	struct GameTracker *gGT = sdata->gGT;
+#ifdef CTR_NATIVE
+    static unsigned botAudioDiagCounter;
+    if (++botAudioDiagCounter % 400 == 0)
+        Platform_Log("[BOT AUDIO DIAG] updateGlobals=%u botsNext=%d botsCurr=%d players=%d robotThread=%p gameMode=%#x\n",
+                     botAudioDiagCounter,gGT->numBotsNextGame,gGT->numBotsCurrGame,
+                     gGT->numPlyrCurrGame,(void*)gGT->threadBuckets[ROBOT].thread,gGT->gameMode1);
+#endif
 
 	if (gGT->numBotsNextGame != 0)
 	{
@@ -993,7 +1000,7 @@ void BOTS_LevInstColl(struct Thread *botThread)
 	struct MetaDataMODEL *mdm = COLL_LevModelMeta(instDef->modelID);
 	if ((mdm != NULL) && (mdm->LInC != NULL))
 	{
-		mdm->LInC(inst, botThread, sps);
+		FN32(mdm->LInC)(inst, botThread, sps);
 	}
 }
 
@@ -1988,6 +1995,17 @@ UpdateTireColorTimer:
 		deltaPosThisFrame = botDriver->botData.navProgressRemainder;
 	}
 
+#if defined(CTR_NATIVE)
+	if (RB_CNKTornado_IsCapturing(botDriver))
+	{
+		/* AI advancement is separate from the human physics solver:
+		 * stop following navigation frames while the Tornado lifts it. */
+		botDriver->botData.aiPhysics.speedLinear = 0;
+		botDriver->botData.navProgressRemainder = 0;
+		deltaPosThisFrame = 0;
+	}
+#endif
+
 	int navFrameFlags = navFrameCurr->flags;
 	int navFrameSpecialBits = navFrameCurr->specialBits;
 	// local_3c == 0
@@ -2013,6 +2031,13 @@ UpdateTireColorTimer:
 	{
 		botDriver->botData.aiPhysics.speedY = -0x5000;
 	}
+
+#if defined(CTR_NATIVE)
+	/* Bots have their own Y integrator. Apply the SAME CNK lift force
+	 * before vertical integration, so bot leaders rise smoothly too. */
+	botDriver->botData.aiPhysics.speedY = RB_CNKTornado_TickLiftVelocity(
+	    botDriver, botDriver->botData.aiPhysics.speedY, elapsedMilliseconds);
+#endif
 
 	botDriver->botData.positionBackup.y =
 	    CTR_MipsAddLo(botDriver->botData.positionBackup.y, CTR_MipsSra(CTR_MipsMulLo(botDriver->botData.aiPhysics.speedY, elapsedMilliseconds), 5));

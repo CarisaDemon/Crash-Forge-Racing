@@ -4,6 +4,64 @@
 #include <NativeHangout.h>
 #endif
 
+#if defined(CTR_NATIVE)
+/* Race-result reactions use sounds that already exist in ALL PAL languages.
+ * Retail NTSC has three unique placement lines per racer, absent in PAL.
+ * Do not borrow NTSC English, including when the UI is set to English.
+ *
+ * Pool #5 (retail shield/laugh) and #3 (big jump) are positive reactions.
+ * Pool #1 (retail hit/damage) is the negative reaction.
+ *
+ * End-of-race disables Voiceline_RequestPlay, so play these directly,
+ * one at a time, AFTER the original victory/defeat XA has ended.
+ * Only finished human racers are eligible (never bots).
+ */
+static int s_nativeFinishNextHuman = -1;
+static unsigned s_nativeFinishVariation;
+
+static int Audio_NativePlayFinishReaction(struct GameTracker *gGT, int playerIndex)
+{
+    struct Driver *d;
+    s16 *voiceIDs;
+    int charID;
+    int group;
+    int num;
+    int xaID;
+    int pick;
+
+    if (playerIndex < 0 || playerIndex >= gGT->numPlyrCurrGame)
+        return 0;
+    d = gGT->drivers[playerIndex];
+    if (d == NULL || (d->actionsFlagSet & ACTION_BOT) != 0 ||
+        (d->actionsFlagSet & ACTION_RACE_FINISHED) == 0 ||
+        d->driverRank < 0 || d->driverRank > 7)
+        return 0;
+
+    charID = data.characterIDs[d->driverID];
+    if (charID >= 16)
+        charID = CharacterRegistry_GetDriverPackID(charID);
+    if (charID < 0 || charID >= 16)
+        return 0;
+
+    /* 1st-3rd: happy/laugh or celebration. 4th-8th: hit/frustration.
+     * Never interpret NTSC's per-place spoken-number lines as PAL clips. */
+    group = (d->driverRank >= 3) ? 1 : ((d->driverRank == 1) ? 3 : 5);
+    voiceIDs = data.voiceData[charID].voiceSet[group].ptr;
+    num = data.voiceData[charID].voiceSet[group].num;
+    if (voiceIDs == NULL || num <= 0)
+        return 0;
+
+    pick = (int)((s_nativeFinishVariation++ +
+                  (unsigned)(gGT->frameTimer_MainFrame_ResetDB >> 2) +
+                  (unsigned)playerIndex) % (unsigned)num);
+    xaID = (u16)voiceIDs[pick];
+    Platform_Log("[PAL FINISH VOICE] P%d char=%d rank=%d group=%d clip=%d lang=%d\n",
+                 playerIndex+1, charID, (int)d->driverRank+1, group,
+                 xaID, Platform_GetGameLanguage());
+    return CDSYS_XAPlay(CDSYS_XA_TYPE_GAME, xaID) != 0;
+}
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8002d2f4-0x8002d4cc
 void Audio_SetState(u32 state)
 {
@@ -118,6 +176,10 @@ void Audio_SetState(u32 state)
 	case AUDIO_RACE_END:
 #ifdef CTR_NATIVE
 		NativeCustomMusic_EndRace();
+		/* Only normal win/loss fanfares get localized racer reactions.
+		 * N. Tropy unlock/ghost dialogues remain untouched. */
+		s_nativeFinishNextHuman =
+			(sdata->desiredXA_RaceEndIndex == 4 || sdata->desiredXA_RaceEndIndex == 5) ? 0 : -1;
 #endif
 		sdata->boolNeedXASeek = 0;
 
@@ -542,6 +604,18 @@ void Audio_Update1(void)
 
 		if (sdata->XA_State == XA_IDLE)
 		{
+#ifdef CTR_NATIVE
+			/* After the original fanfare, queue exactly one regional reaction
+			 * per finished human. Skip failed clips and bots; no overlap. */
+			while (s_nativeFinishNextHuman >= 0 &&
+			       s_nativeFinishNextHuman < gGT->numPlyrCurrGame)
+			{
+				int nextPlayer = s_nativeFinishNextHuman++;
+				if (Audio_NativePlayFinishReaction(gGT, nextPlayer))
+					return;
+			}
+			s_nativeFinishNextHuman = -1;
+#endif
 			Audio_SetMaskSong(0);
 #ifdef CTR_NATIVE
 			NativeCustomMusic_EndRace();

@@ -292,9 +292,19 @@ void howl_StopAudio(b32 boolErasePauseBackup, b32 boolEraseMusic, b32 boolDestro
 
 	Smart_EnterCriticalSection();
 	Channel_DestroyAll_LowLevel(boolDestroyAllFX, boolEraseMusic == 0, 2);
-	Smart_ExitCriticalSection();
+    Smart_ExitCriticalSection();
+#ifdef CTR_NATIVE
+    if (boolDestroyAllFX) {
+        /* On pause RESUME, retail HOWL clears/recreates its channels.
+         * Preserve custom PCM voices once: re-binding here would start
+         * multiple retail engines and reset the custom playback phase.
+         * Every real loading/menu/quit stop still unbinds custom engines. */
+        if (!NativeAudio_EngineConsumePreserveOnHowlStop())
+            NativeAudio_EngineUnbindAll();
+    }
+#endif
 
-	if (boolErasePauseBackup != 0)
+    if (boolErasePauseBackup != 0)
 	{
 		sdata->numBackup_ChannelStats = 0;
 	}

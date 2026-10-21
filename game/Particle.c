@@ -684,7 +684,7 @@ struct ParticleRenderListScratch
 		};
 	};
 	u8 pad_14[0x0c];
-	uint32_t *ot;
+	uint32_t * P32 ot;
 	s32 cameraOffset[3];
 	s32 depth;
 };

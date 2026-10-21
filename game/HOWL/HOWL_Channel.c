@@ -1,8 +1,17 @@
 #include <common.h>
+#ifdef CTR_NATIVE
+#include <platform/native_menu_music_clock.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8002b4d0-0x8002b508
 void Smart_EnterCriticalSection(void)
 {
+#ifdef CTR_NATIVE
+	/* Serialize main-thread CSEQ/SFX edits with the menu's 60-Hz HOWL
+	 * worker. Unlike PS1's no-op native critical-section shim this
+	 * is a real mutex, and allows per-thread recursion. */
+	NativeMenuMusicClock_Lock();
+#endif
 	int count = sdata->criticalSectionCount;
 
 	sdata->criticalSectionCount = count + 1;
@@ -30,6 +39,9 @@ void Smart_ExitCriticalSection(void)
 	{
 		ExitCriticalSection();
 	}
+#ifdef CTR_NATIVE
+	NativeMenuMusicClock_Unlock();
+#endif
 }
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8002b540-0x8002b5b4
@@ -304,7 +316,7 @@ void Channel_ParseSongToChannels()
 {
 	struct Song *song;
 	struct SongSeq *seq;
-	struct SongSeq **seqEntry;
+	struct SongSeq * P32 *seqEntry;
 	b32 boolVolumeChange;
 
 	if (sdata->boolAudioEnabled == 0)

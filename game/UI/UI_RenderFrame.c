@@ -234,8 +234,17 @@ void UI_RenderFrame_Racing()
 				// If you're not in Battle Mode
 				if ((gameMode1 & BATTLE_MODE) == 0)
 				{
-					// Draw powerslide meter
-					UI_DrawSlideMeter(hudStructPtr[UI_HUD_SLOT_SLIDE_METER].x + offset, hudStructPtr[UI_HUD_SLOT_SLIDE_METER].y, playerStruct);
+					// When a custom CNK/CTR meter is shown, do not also
+					// draw the retail 2P bar in a second overlapping row.
+#if defined(CTR_NATIVE)
+					const int meterMode=NativeHUD_GetDriftMeterMode();
+					const int replaceRetail=(numPlyr==2 && Platform_GetWideMode() &&
+						(meterMode==NATIVE_HUD_DRIFT_CNK_CENTERED ||
+						 meterMode==NATIVE_HUD_DRIFT_CNK_3D ||
+						 meterMode==NATIVE_HUD_DRIFT_CTR_CENTERED));
+					if(!replaceRetail)
+#endif
+						UI_DrawSlideMeter(hudStructPtr[UI_HUD_SLOT_SLIDE_METER].x + offset, hudStructPtr[UI_HUD_SLOT_SLIDE_METER].y, playerStruct);
 				}
 
 				// If you are not in Time Trial or Relic Race

@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <platform/native_custom_tracks.h>
+#endif
 
 enum UIRaceEndMenuOption
 {
@@ -283,20 +286,26 @@ LAB_80055930:
 		// Print top title text "Arcade, Time Trial, etc"
 		DecalFont_DrawLine(titleText, posX, titleY, font, (JUSTIFY_CENTER | ORANGE));
 
-		// Print the name of the level
-		// Crash Cove, Roos Tubes, etc
-		DecalFont_DrawLine(
-
-		    // 83a88 = 110
-		    // 8d878 + 110*4 -> Dingo Canyon
-
-		    // Level ID
-		    sdata->lngStrings[data.metaDataLEV[gGT->levelID].name_LNG],
-
-		    gGT->pushBuffer[0].rect.x + ((gGT->pushBuffer[0].rect.w << 0x10) >> 0x11),
-
-		    (gGT->pushBuffer[0].rect.y + gGT->pushBuffer[0].rect.h + titleTransition + UI_RACE_START_LEVEL_TITLE_Y_OFFSET), FONT_BIG,
-		    (JUSTIFY_CENTER | ORANGE));
+		// Print the name of the level. Custom native tracks run inside the
+		// Crash Cove shell internally, but their UI title must remain their
+		// own track.ini name instead of leaking the retail shell name.
+		{
+			const char *levelTitle =
+				sdata->lngStrings[data.metaDataLEV[gGT->levelID].name_LNG];
+#if defined(CTR_NATIVE)
+			const char *customTitle = NativeCustomTracks_ActiveName();
+			if (customTitle && *customTitle)
+				levelTitle = customTitle;
+#endif
+			DecalFont_DrawLine(
+				levelTitle,
+				gGT->pushBuffer[0].rect.x +
+					((gGT->pushBuffer[0].rect.w << 0x10) >> 0x11),
+				(gGT->pushBuffer[0].rect.y + gGT->pushBuffer[0].rect.h +
+				 titleTransition + UI_RACE_START_LEVEL_TITLE_Y_OFFSET),
+				FONT_BIG,
+				(JUSTIFY_CENTER | ORANGE));
+		}
 
 		// same for all
 		rect.x = gGT->pushBuffer[0].rect.x;

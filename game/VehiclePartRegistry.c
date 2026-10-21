@@ -1,5 +1,7 @@
 #include <common.h>
 #include <VehiclePartRegistry.h>
+#include <EngineSoundRegistry.h>
+#include <NativeSession.h>
 #include <platform/native_assets.h>
 #include <platform/native_mod_packages.h>
 
@@ -59,6 +61,20 @@ static int VehiclePart_ParseBool(const char *value, int fallback)
         return 0;
 
     return fallback;
+}
+static int VehiclePart_AudioFileSafe(const char *path)
+{
+    size_t length;
+    if (!path || !*path || *path == '/' || *path == '\\' ||
+        strstr(path, "..")) return 0;
+    length = strlen(path);
+    if (length >= 128) return 0;
+    for (; *path; ++path) {
+        unsigned char c = (unsigned char)*path;
+        if (!(isalnum(c) || c == '_' || c == '-' ||
+              c == '.' || c == '/' || c == '\\')) return 0;
+    }
+    return 1;
 }
 static int VehiclePart_IsDirectory(const char *path)
 {
@@ -120,7 +136,7 @@ static const char *VehiclePart_DirectoryName(int kind)
 {
     return kind == VEHICLE_PART_KART ? "karts" : "wheels";
 }
-static void VehiclePart_LoadOne(int kind, const char *folderName)
+static void VehiclePart_LoadOne(int kind, const char *folderName, int unified)
 {
     struct VehiclePartList *list = &s_vehicleParts[kind];
     struct VehiclePartDef temp;
@@ -136,16 +152,22 @@ static void VehiclePart_LoadOne(int kind, const char *folderName)
     u8 exhaustComponents[VEHICLE_PART_MAX_EXHAUSTS] = {0};
     int exhaustCountExplicit = -1;
     int highestExhaustIndex = -1;
+    int enginePitchMinSeen = 0;
+    int enginePitchMaxSeen = 0;
 
     if (folderName == NULL || !*folderName ||
         strlen(folderName) >= sizeof(temp.slug) ||
         VehiclePart_HasSlug(kind, folderName))
         return;
 
-    snprintf(relative, sizeof(relative), "mods/%s/%s/%s",
-             VehiclePart_DirectoryName(kind),
-             folderName,
-             VehiclePart_ConfigName(kind));
+    if (unified)
+        snprintf(relative, sizeof(relative), "mods/%s/%s",
+                 folderName, VehiclePart_ConfigName(kind));
+    else
+        snprintf(relative, sizeof(relative), "mods/%s/%s/%s",
+                 VehiclePart_DirectoryName(kind),
+                 folderName,
+                 VehiclePart_ConfigName(kind));
 
     if (!NativeAssets_BuildPath(relative, configPath, sizeof(configPath)))
         return;
@@ -156,7 +178,25 @@ static void VehiclePart_LoadOne(int kind, const char *folderName)
 
     memset(&temp, 0, sizeof(temp));
     temp.kind = (u8)kind;
+    temp.unifiedMod = (u8)(unified != 0);
     temp.modelScale = 1.0f;
+    /* Optional secondary motor: no audio file means absolutely no effect. */
+    temp.secondaryEngineVolume = 35.0f;
+    temp.secondaryEnginePitchMin = 0.85f;
+    temp.secondaryEnginePitchMax = 2.5f;
+    temp.secondaryEngineSpeedMax = 32767;
+    temp.enginePitchMin = 0.86f;
+    temp.enginePitchMax = 2.65f;
+    temp.enginePitchSpeedMax = 0; /* auto: match actual physics USF maximum */
+    for (int i = 0; i < VEHICLE_PART_AUDIO_LAYER_COUNT; ++i) {
+        temp.audioLayerVolume[i] = 35.0f;
+        temp.audioLayerPitchMin[i] = 0.80f;
+        temp.audioLayerPitchMax[i] = 2.50f;
+        temp.audioLayerSpeedMax[i] = 0; /* physics reference */
+        temp.audioLayerMode[i] = VEHICLE_AUDIO_MODE_RPM;
+    }
+    for (int i = 0; i < VEHICLE_PART_MAX_EXHAUSTS; ++i)
+        temp.exhaustScale[i] = 1.0f;
     snprintf(temp.slug, sizeof(temp.slug), "%s", folderName);
     snprintf(temp.assetName, sizeof(temp.assetName), "%s", folderName);
     snprintf(temp.displayName, sizeof(temp.displayName), "%s", folderName);
@@ -198,6 +238,10 @@ static void VehiclePart_LoadOne(int kind, const char *folderName)
                 snprintf(temp.displayName, sizeof(temp.displayName), "%s", value);
             else if (!SDL_strcasecmp(key, "enabled"))
                 enabled = VehiclePart_ParseBool(value, enabled);
+            else if (kind == VEHICLE_PART_KART &&
+                     !SDL_strcasecmp(key, "hide_wheels"))
+                temp.hideWheels = (u8)VehiclePart_ParseBool(
+                    value, temp.hideWheels);
             else if (kind == VEHICLE_PART_KART &&
                      (!SDL_strcasecmp(key, "replace_original") ||
                       !SDL_strcasecmp(key, "replaces_original") ||
@@ -361,6 +405,20 @@ static void VehiclePart_LoadOne(int kind, const char *folderName)
                     }
 
                     snprintf(expected, sizeof(expected),
+                             "exhaust_%d_scale", exhaust);
+                    if (!SDL_strcasecmp(key, expected))
+                    {
+                        /* Clamp extreme scales so malformed mods cannot
+                         * overflow native s16 transforms/particle sizes. */
+                        if (parsed >= 0.1f && parsed <= 8.0f)
+                            temp.exhaustScale[exhaust] = parsed;
+                        temp.hasExhaustConfig = 1;
+                        if (exhaust > highestExhaustIndex)
+                            highestExhaustIndex = exhaust;
+                        break;
+                    }
+
+                    snprintf(expected, sizeof(expected),
                              "exhaust_%d_rotation_x", exhaust);
                     if (!SDL_strcasecmp(key, expected))
                     {
@@ -396,6 +454,143 @@ static void VehiclePart_LoadOne(int kind, const char *folderName)
             }
         }
         else if (kind == VEHICLE_PART_KART &&
+                 (!SDL_strcasecmp(section, "audio") ||
+                  !SDL_strcasecmp(section, "engine_audio")))
+        {
+            /* Filenames and numeric controls share [audio]. Do not run the
+             * path-only validation on percentages or float pitch options. */
+            /* Audio layer keys are intercepted before the general
+             * path/number parser, preventing numeric settings from being
+             * mistaken for filenames. Unknown mode keeps RPM default. */
+            int handledLayer = 0;
+            for (int layer=0; layer<VEHICLE_PART_AUDIO_LAYER_COUNT; ++layer) {
+                char prefix[32];
+                snprintf(prefix,sizeof(prefix),"audio_layer_%d_",layer+1);
+                size_t prefixLen = strlen(prefix);
+                if (SDL_strncasecmp(key,prefix,prefixLen) != 0) continue;
+                const char *opt = key + prefixLen;
+                float number=0.0f;
+                char trailer;
+                int intVal;
+                if (!SDL_strcasecmp(opt,"loop")) {
+                    if (VehiclePart_AudioFileSafe(value))
+                        snprintf(temp.audioLayerLoop[layer],
+                                 sizeof(temp.audioLayerLoop[layer]),"%s",value);
+                } else if (!SDL_strcasecmp(opt,"mode")) {
+                    if (!SDL_strcasecmp(value,"rpm") || !SDL_strcasecmp(value,"engine"))
+                        temp.audioLayerMode[layer]=VEHICLE_AUDIO_MODE_RPM;
+                    else if (!SDL_strcasecmp(value,"speed") || !SDL_strcasecmp(value,"transmission"))
+                        temp.audioLayerMode[layer]=VEHICLE_AUDIO_MODE_SPEED;
+                    else if (!SDL_strcasecmp(value,"accel") || !SDL_strcasecmp(value,"acceleration"))
+                        temp.audioLayerMode[layer]=VEHICLE_AUDIO_MODE_ACCEL;
+                    else if (!SDL_strcasecmp(value,"drift"))
+                        temp.audioLayerMode[layer]=VEHICLE_AUDIO_MODE_DRIFT;
+                    else if (!SDL_strcasecmp(value,"turbo"))
+                        temp.audioLayerMode[layer]=VEHICLE_AUDIO_MODE_TURBO;
+                } else if (!SDL_strcasecmp(opt,"volume")) {
+                    if (sscanf(value,"%f %c",&number,&trailer)==1 &&
+                        isfinite(number) && number>=0.0f && number<=100.0f)
+                        temp.audioLayerVolume[layer]=number;
+                } else if (!SDL_strcasecmp(opt,"pitch_min")) {
+                    if (sscanf(value,"%f %c",&number,&trailer)==1 &&
+                        isfinite(number) && number>=0.1f && number<=8.0f)
+                        temp.audioLayerPitchMin[layer]=number;
+                } else if (!SDL_strcasecmp(opt,"pitch_max")) {
+                    if (sscanf(value,"%f %c",&number,&trailer)==1 &&
+                        isfinite(number) && number>=0.1f && number<=8.0f)
+                        temp.audioLayerPitchMax[layer]=number;
+                } else if (!SDL_strcasecmp(opt,"speed_max")) {
+                    if (sscanf(value,"%d %c",&intVal,&trailer)==1 &&
+                        (intVal==0 || (intVal>=1000 && intVal<=32767)))
+                        temp.audioLayerSpeedMax[layer]=intVal;
+                }
+                handledLayer=1;
+                break;
+            }
+            if (handledLayer) continue;
+            if (!SDL_strcasecmp(key, "engine_pitch_mode")) {
+                if (!SDL_strcasecmp(value,"rpm") || !SDL_strcasecmp(value,"howl"))
+                    temp.enginePitchMode=1;
+                else if (!SDL_strcasecmp(value,"speed"))
+                    temp.enginePitchMode=0;
+            }
+            else if (!SDL_strcasecmp(key, "engine_pitch_min"))
+            {
+                float number;
+                char trailer;
+                if (sscanf(value, "%f %c", &number, &trailer) == 1 &&
+                    isfinite(number) && number >= 0.1f && number <= 8.0f) {
+                    temp.enginePitchMin = number;
+                    enginePitchMinSeen = 1;
+                }
+            }
+            else if (!SDL_strcasecmp(key, "engine_pitch_max"))
+            {
+                float number;
+                char trailer;
+                if (sscanf(value, "%f %c", &number, &trailer) == 1 &&
+                    isfinite(number) && number >= 0.1f && number <= 8.0f) {
+                    temp.enginePitchMax = number;
+                    enginePitchMaxSeen = 1;
+                }
+            }
+            else if (!SDL_strcasecmp(key, "engine_speed_max"))
+            {
+                int number;
+                char trailer;
+                /* 0 = automatic max-USF reference from driver physics. */
+                if (sscanf(value, "%d %c", &number, &trailer) == 1 &&
+                    (number == 0 || (number >= 1000 && number <= 32767)))
+                    temp.enginePitchSpeedMax = number;
+            }
+            else if (!SDL_strcasecmp(key, "secondary_engine_volume") ||
+                     !SDL_strcasecmp(key, "transmission_volume"))
+            {
+                float number;
+                if (sscanf(value, "%f", &number) == 1 && isfinite(number) &&
+                    number >= 0.0f && number <= 100.0f)
+                    temp.secondaryEngineVolume = number;
+            }
+            else if (!SDL_strcasecmp(key, "secondary_engine_pitch_min") ||
+                     !SDL_strcasecmp(key, "transmission_pitch_min"))
+            {
+                float number;
+                if (sscanf(value, "%f", &number) == 1 && isfinite(number) &&
+                    number >= 0.25f && number <= 6.0f)
+                    temp.secondaryEnginePitchMin = number;
+            }
+            else if (!SDL_strcasecmp(key, "secondary_engine_pitch_max") ||
+                     !SDL_strcasecmp(key, "transmission_pitch_max"))
+            {
+                float number;
+                if (sscanf(value, "%f", &number) == 1 && isfinite(number) &&
+                    number >= 0.25f && number <= 6.0f)
+                    temp.secondaryEnginePitchMax = number;
+            }
+            else if (!SDL_strcasecmp(key, "secondary_engine_speed_max") ||
+                     !SDL_strcasecmp(key, "transmission_speed_max"))
+            {
+                int number;
+                char trailer;
+                if (sscanf(value, "%d %c", &number, &trailer) == 1 &&
+                    number >= 1000 && number <= 32767)
+                    temp.secondaryEngineSpeedMax = number;
+            }
+            else if (VehiclePart_AudioFileSafe(value))
+            {
+                if (!SDL_strcasecmp(key, "engine_loop"))
+                    snprintf(temp.engineLoop, sizeof(temp.engineLoop), "%s", value);
+                else if (!SDL_strcasecmp(key, "engine_idle"))
+                    snprintf(temp.engineIdle, sizeof(temp.engineIdle), "%s", value);
+                else if (!SDL_strcasecmp(key, "engine_turbo"))
+                    snprintf(temp.engineTurbo, sizeof(temp.engineTurbo), "%s", value);
+                else if (!SDL_strcasecmp(key, "secondary_engine_loop") ||
+                         !SDL_strcasecmp(key, "transmission_loop"))
+                    snprintf(temp.secondaryEngineLoop,
+                             sizeof(temp.secondaryEngineLoop), "%s", value);
+            }
+        }
+        else if (kind == VEHICLE_PART_KART &&
                  !SDL_strcasecmp(section, "colors"))
         {
             /* Entries are presented in kart.ini order. One OBJ; each entry
@@ -410,8 +605,12 @@ static void VehiclePart_LoadOne(int kind, const char *folderName)
                 strchr(value, '/') || strchr(value, '\\') ||
                 strstr(value, ".."))
                 continue;
-            snprintf(colorRelative, sizeof(colorRelative),
-                     "mods/karts/%s/%s", folderName, value);
+            if (temp.unifiedMod)
+                snprintf(colorRelative, sizeof(colorRelative),
+                         "mods/%s/%s", folderName, value);
+            else
+                snprintf(colorRelative, sizeof(colorRelative),
+                         "mods/karts/%s/%s", folderName, value);
             if (!NativeAssets_BuildPath(colorRelative,
                                         colorPath, sizeof(colorPath)) ||
                 stat(colorPath, &colorInfo) != 0 ||
@@ -450,7 +649,7 @@ static void VehiclePart_LoadOne(int kind, const char *folderName)
          exhaust++)
     {
         if (exhaustComponents[exhaust] == 7)
-            temp.exhaustMountMask |= (u8)(1U << exhaust);
+            temp.exhaustMountValid[exhaust] = 1;
     }
 
     if (temp.hasExhaustConfig && exhaustCountExplicit < 0)
@@ -458,6 +657,32 @@ static void VehiclePart_LoadOne(int kind, const char *folderName)
         temp.exhaustCount =
             highestExhaustIndex >= 0 ?
             (u8)(highestExhaustIndex + 1) : 0;
+    }
+
+    for (int layer=0; layer<VEHICLE_PART_AUDIO_LAYER_COUNT; ++layer) {
+        if (temp.audioLayerLoop[layer][0]) {
+            if (temp.audioLayerPitchMax[layer] < temp.audioLayerPitchMin[layer]) {
+                Platform_Log("[KART AUDIO LAYER] kart=%s layer=%d invalid pitch range, disabled\n",
+                             folderName,layer+1);
+                temp.audioLayerLoop[layer][0]=0;
+            } else {
+                Platform_Log("[KART AUDIO LAYER INI] kart=%s layer=%d mode=%d vol=%.1f pitch=%.2f..%.2f\n",
+                             folderName,layer+1,temp.audioLayerMode[layer],
+                             temp.audioLayerVolume[layer],temp.audioLayerPitchMin[layer],
+                             temp.audioLayerPitchMax[layer]);
+            }
+        }
+    }
+    if (kind == VEHICLE_PART_KART && temp.engineLoop[0] &&
+        enginePitchMinSeen && enginePitchMaxSeen &&
+        temp.enginePitchMax >= temp.enginePitchMin) {
+        temp.customEnginePitchCurve = 1;
+        Platform_Log("[ENGINE CURVE INI] kart=%s idle=%.3fx usf=%.3fx speedMax=%d (0=auto)\n",
+                     folderName, temp.enginePitchMin, temp.enginePitchMax,
+                     temp.enginePitchSpeedMax);
+    } else if (enginePitchMinSeen || enginePitchMaxSeen) {
+        Platform_Log("[ENGINE CURVE INI] kart=%s ignored incomplete/invalid endpoints\n",
+                     folderName);
     }
 
     if (!enabled || !valid)
@@ -496,7 +721,7 @@ static void VehiclePart_ScanKind(int kind)
                 continue;
             snprintf(child, sizeof(child), "%s/%s", root, entry->d_name);
             if (VehiclePart_IsDirectory(child))
-                VehiclePart_LoadOne(kind, entry->d_name);
+                VehiclePart_LoadOne(kind, entry->d_name, 0);
         }
         closedir(dir);
     }
@@ -518,7 +743,7 @@ static void VehiclePart_ScanKind(int kind)
                 if (VehiclePart_IsDirectory(child) &&
                     NativeModPackage_IsValid(entry->d_name,
                         kind == VEHICLE_PART_KART ? "Kart" : "Wheels"))
-                    VehiclePart_LoadOne(kind, entry->d_name);
+                    VehiclePart_LoadOne(kind, entry->d_name, 1);
             }
             closedir(dir);
         }
@@ -538,8 +763,13 @@ void VehiclePartRegistry_Init(void)
         return;
 
     s_vehiclePartsInitialized = 1;
-    VehiclePart_ScanKind(VEHICLE_PART_KART);
-    VehiclePart_ScanKind(VEHICLE_PART_WHEELS);
+#if defined(CTR_NATIVE)
+    if (!NativeSession_NoModsActive())
+#endif
+    {
+        VehiclePart_ScanKind(VEHICLE_PART_KART);
+        VehiclePart_ScanKind(VEHICLE_PART_WHEELS);
+    }
 
     Platform_Log("[VEHICLE PART] %d karts, %d wheel sets\n",
                  s_vehicleParts[VEHICLE_PART_KART].count,
@@ -548,6 +778,7 @@ void VehiclePartRegistry_Init(void)
 
 void VehiclePartRegistry_Shutdown(void)
 {
+    EngineSoundRegistry_Shutdown();
     for (int kind = 0; kind < VEHICLE_PART_KIND_COUNT; kind++)
     {
         free(s_vehicleParts[kind].items);
@@ -649,6 +880,13 @@ int VehiclePartRegistry_GetOriginalReplacementKartID(void)
     return -1;
 }
 
+b32 VehiclePartRegistry_HidesWheels(int kartID)
+{
+    const struct VehiclePartDef *kart =
+        VehiclePartRegistry_GetByID(VEHICLE_PART_KART, kartID);
+    return kart != NULL && kart->hideWheels != 0;
+}
+
 b32 VehiclePartRegistry_GetSeatOffset(int kartID, float out[3])
 {
     const struct VehiclePartDef *kart =
@@ -684,10 +922,24 @@ int VehiclePartRegistry_GetExhaustCount(int kartID)
     const struct VehiclePartDef *kart =
         VehiclePartRegistry_GetByID(VEHICLE_PART_KART, kartID);
 
-    if (kart == NULL || !kart->hasExhaustConfig)
+    /* -1 is reserved for *no custom kart* (retail/vanilla fallback).
+     * A real custom kart without explicit exhaust attachments has ZERO
+     * exhaust outlets, not a reason to resurrect two vanilla pipes. */
+    if (kart == NULL)
         return -1;
 
-    return (int)kart->exhaustCount;
+    return kart->hasExhaustConfig ? (int)kart->exhaustCount : 0;
+}
+
+float VehiclePartRegistry_GetExhaustScale(int kartID, int exhaustIndex)
+{
+    const struct VehiclePartDef *kart =
+        VehiclePartRegistry_GetByID(VEHICLE_PART_KART, kartID);
+    if (kart == NULL || exhaustIndex < 0 ||
+        exhaustIndex >= (int)kart->exhaustCount ||
+        exhaustIndex >= VEHICLE_PART_MAX_EXHAUSTS)
+        return 1.0f;
+    return kart->exhaustScale[exhaustIndex];
 }
 
 b32 VehiclePartRegistry_GetExhaustMount(
@@ -703,7 +955,7 @@ b32 VehiclePartRegistry_GetExhaustMount(
         exhaustIndex < 0 ||
         exhaustIndex >= VEHICLE_PART_MAX_EXHAUSTS ||
         exhaustIndex >= (int)kart->exhaustCount ||
-        (kart->exhaustMountMask & (1U << exhaustIndex)) == 0)
+        !kart->exhaustMountValid[exhaustIndex])
         return false;
 
     if (outPosition != NULL)

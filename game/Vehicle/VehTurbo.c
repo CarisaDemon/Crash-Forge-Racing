@@ -3,6 +3,7 @@
 #include <RacerLoadout.h>
 #include <VehiclePartRegistry.h>
 #include <math.h>
+#include <stdlib.h>
 #endif
 
 enum
@@ -106,6 +107,29 @@ void VehTurbo_ProcessBucket(struct Thread *turboThread)
 				primary->depthOffset[1] = driver->depthOffset[1];
 			}
 
+			/* Native extra flame Instances receive exactly the same
+			 * per-player culling/OT/depth propagation as the retail pair. */
+#if defined(CTR_NATIVE)
+			if (turbo->nativeExtraExhaust != NULL)
+			{
+			    int viewIndex = i;
+			    for (int e = 0; e < turbo->nativeExtraExhaustCount; ++e)
+			    {
+			        struct Instance *extra = turbo->nativeExtraExhaust[e];
+			        if (extra != NULL &&
+						(driver->instFlags & PUSHBUFFER_EXISTS) == 0)
+			        {
+						struct InstDrawPerPlayer *idpp = INST_GETIDPP(extra) + viewIndex;
+						u32 driverDrawFlag = driver->instFlags | ~DRAW_SUCCESSFUL;
+						idpp->instFlags &= driverDrawFlag;
+						idpp->otRangeNormal = driver->otRangeNormal;
+						idpp->otRangeSecondary = driver->otRangeSecondary;
+						idpp->depthOffset[0] = driver->depthOffset[0];
+						idpp->depthOffset[1] = driver->depthOffset[1];
+			        }
+			    }
+			}
+#endif
 			primary++;
 			secondary++;
 			driver++;
@@ -123,6 +147,19 @@ void VehTurbo_ThDestroy(struct Thread *t)
 	d->actionsFlagSet &= ~ACTION_TURBO_ITEM;
 
 	INSTANCE_Death(t->inst);
+#if defined(CTR_NATIVE)
+	if (turboObj->nativeExtraExhaust != NULL)
+	{
+		for (int i = 0; i < turboObj->nativeExtraExhaustCount; ++i)
+		{
+			if (turboObj->nativeExtraExhaust[i] != NULL)
+				INSTANCE_Death(turboObj->nativeExtraExhaust[i]);
+		}
+		free(turboObj->nativeExtraExhaust);
+		turboObj->nativeExtraExhaust = NULL;
+		turboObj->nativeExtraExhaustCount = 0;
+	}
+#endif
 	INSTANCE_Death(turboObj->inst);
 }
 
@@ -214,13 +251,14 @@ static int VehTurbo_ApplyCustomExhaustTransform(
 	struct Driver *driver,
 	struct Instance *effectInst,
 	int exhaustIndex,
-	int fireSize,
-	int mirrorX)
+	int fireSize)
 {
 	struct Instance *driverInst;
 	float position[3];
 	float rotation[3];
 	float localRotation[3][3];
+	float alignedRotation[3][3];
+	float nozzleScale;
 
 	if (driver == NULL || effectInst == NULL)
 		return 0;
@@ -238,6 +276,31 @@ static int VehTurbo_ApplyCustomExhaustTransform(
 	}
 
 	VehTurbo_BuildLocalRotation(rotation, localRotation);
+	nozzleScale = VehiclePartRegistry_GetExhaustScale(
+		RacerLoadout_GetEffectiveKart((int)driver->driverID), exhaustIndex);
+
+	/* GPU measurements of original CTR fire show two biases:
+	 * +17deg sideways and -45deg vertically. The correct right-hand
+	 * transform is USER_XYZ * Ry(+17deg) * Rx(-45deg).
+	 * Matrix multiplication is order-dependent: apply Ry to the user
+	 * basis FIRST, then Rx. This is the exact GPU preview order. */
+	const float axisAlign = 0.7071067811865475244f;
+	const float sideYawCos = 0.9563047559630354f; /* cos 17deg */
+	const float sideYawSin = 0.29237170472273677f; /* sin 17deg */
+	for (int row = 0; row < 3; ++row)
+	{
+		float yawColumn0 =
+			sideYawCos * localRotation[row][0] -
+			sideYawSin * localRotation[row][2];
+		float yawColumn2 =
+			sideYawSin * localRotation[row][0] +
+			sideYawCos * localRotation[row][2];
+		alignedRotation[row][0] = yawColumn0;
+		alignedRotation[row][1] =
+			(localRotation[row][1] - yawColumn2) * axisAlign;
+		alignedRotation[row][2] =
+			(localRotation[row][1] + yawColumn2) * axisAlign;
+	}
 
 	/*
 	 * Kart exhaust attachments use the same local units as smoke. Retail turbo
@@ -258,14 +321,13 @@ static int VehTurbo_ApplyCustomExhaustTransform(
 			{
 				value +=
 					(float)driverInst->matrix.m[row][axis] *
-					localRotation[axis][col];
+					alignedRotation[axis][col];
 			}
 
-			value *= (float)fireSize /
+			/* All custom nozzles use the SAME unmirrored base transform.
+			 * Only their own XYZ rotation and scale may differ. */
+			value *= (float)fireSize * nozzleScale /
 				(float)(1 << TURBO_FIRE_MATRIX_SCALE_SHIFT);
-
-			if (mirrorX && col == 0)
-				value = -value;
 
 			effectInst->matrix.m[row][col] =
 				VehTurbo_ClampS16(value);
@@ -283,6 +345,43 @@ static int VehTurbo_ApplyCustomExhaustTransform(
 		&effectInst->matrix.t[0]);
 
 	return 1;
+}
+
+/* Synchronize additional 3D exhausts with the retail turbo animation.
+ * This is native-only; no extra threads or sound loops are created.
+ * Missing attachment XYZ hides only the affected flame.
+ */
+static void VehTurbo_SyncExtraExhausts(
+	struct Turbo *turbo,
+	struct Instance *primary,
+	int fireSize)
+{
+	if (turbo == NULL || primary == NULL ||
+		turbo->nativeExtraExhaust == NULL || sdata->gGT == NULL)
+		return;
+
+	for (int i = 0; i < turbo->nativeExtraExhaustCount; ++i)
+	{
+		struct Instance *extra = turbo->nativeExtraExhaust[i];
+		int nozzle = i + 2;
+		if (extra == NULL)
+			continue;
+
+		extra->flags = primary->flags;
+		extra->alphaScale = primary->alphaScale;
+		extra->vertSplit = primary->vertSplit;
+		extra->reflectionRGBA = primary->reflectionRGBA;
+		extra->matrix = primary->matrix;
+		/* The primary flame is assigned the frame rendered THIS tick.
+		 * turbo->fireAnimIndex may already have advanced for the NEXT tick,
+		 * so re-reading the index made outlet 3+ lag/lead outlets 1 and 2.
+		 * Reuse the exact model pointer to guarantee identical mesh/phase. */
+		extra->model = primary->model;
+
+		if (!VehTurbo_ApplyCustomExhaustTransform(
+				turbo->driver, extra, nozzle, fireSize))
+			extra->flags |= HIDE_MODEL;
+	}
 }
 
 static void VehTurbo_EnforceCustomExhaustCount(
@@ -304,10 +403,16 @@ static void VehTurbo_EnforceCustomExhaustCount(
 	if (count < 0)
 		return;
 
-	if (count <= 0 && primary != NULL)
+	/* Custom outlets exist only when their entire XYZ offset was assigned.
+	 * Otherwise the old vanilla flame transform must stay invisible. */
+	if (primary != NULL &&
+		(count <= 0 ||
+		 !VehiclePartRegistry_GetExhaustMount(kartID, 0, NULL, NULL)))
 		primary->flags |= HIDE_MODEL;
 
-	if (count <= 1 && secondary != NULL)
+	if (secondary != NULL &&
+		(count <= 1 ||
+		 !VehiclePartRegistry_GetExhaustMount(kartID, 1, NULL, NULL)))
 		secondary->flags |= HIDE_MODEL;
 }
 #endif
@@ -349,11 +454,12 @@ void VehTurbo_VisualTransformBucket(struct Thread *turboThread)
 			 * orientation. Missing/incomplete mounts retain the vanilla transform.
 			 */
 			VehTurbo_ApplyCustomExhaustTransform(
-				turbo->driver, instance, 0, fireSize, 0);
+				turbo->driver, instance, 0, fireSize);
 			VehTurbo_ApplyCustomExhaustTransform(
-				turbo->driver, secondary, 1, fireSize, 1);
+				turbo->driver, secondary, 1, fireSize);
 			VehTurbo_EnforceCustomExhaustCount(
 				turbo->driver, instance, secondary);
+			VehTurbo_SyncExtraExhausts(turbo, instance, fireSize);
 		}
 		turboThread = turboThread->siblingThread;
 	}
@@ -472,9 +578,9 @@ void VehTurbo_ThTick(struct Thread *turboThread)
 
 #if defined(CTR_NATIVE)
 	VehTurbo_ApplyCustomExhaustTransform(
-		driver, instance, 0, fireSize, 0);
+		driver, instance, 0, fireSize);
 	VehTurbo_ApplyCustomExhaustTransform(
-		driver, turbo->inst, 1, fireSize, 1);
+		driver, turbo->inst, 1, fireSize);
 #endif
 
 	// decrease turbo visibility cooldown by elapsed milliseconds per frame, ~32
@@ -520,6 +626,13 @@ void VehTurbo_ThTick(struct Thread *turboThread)
 	// STATIC_TURBO_EFFECT6
 	// STATIC_TURBO_EFFECT7
 	turbo->inst->model = gGT->modelPtr[(((int)turbo->fireAnimIndex + TURBO_SECONDARY_MODEL_FRAME_OFFSET) & TURBO_ANIM_FRAME_MASK) + STATIC_TURBO_EFFECT];
+#if defined(CTR_NATIVE)
+	/* Retail still offsets the secondary flame by three animation frames.
+	 * Custom kart outlets start with precisely the same animation frame. */
+	if (VehiclePartRegistry_GetExhaustCount(
+			RacerLoadout_GetEffectiveKart((int)driver->driverID)) >= 0)
+		turbo->inst->model = instance->model;
+#endif
 
 	if (legacyTicks > 0)
 	{
@@ -652,6 +765,10 @@ void VehTurbo_ThTick(struct Thread *turboThread)
 		turboThread->flags |= THREAD_FLAG_DEAD;
 	}
 
+#if defined(CTR_NATIVE)
+	/* Update after fade, cooldown, model-frame and reflection changes. */
+	VehTurbo_SyncExtraExhausts(turbo, instance, fireSize);
+#endif
 	// do not use infinite loop optimization,
 	// modern GCC "without" the $RA skip is more
 	// optimized than PSYQ "with" the $RA skip

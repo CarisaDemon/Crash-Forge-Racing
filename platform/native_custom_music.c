@@ -1,6 +1,8 @@
 #include <platform/native_custom_music.h>
+#include <NativeSession.h>
 #include <platform/native_assets.h>
 #include <platform/native_custom_tracks.h>
+#include <platform/native_music_selection.h>
 
 #ifdef internal
 #undef internal
@@ -10,6 +12,7 @@
 
 #include <limits.h>
 #include <stdint.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,12 +74,36 @@ global_variable SDL_AtomicInt s_customMusicCacheReady;
 global_variable SDL_AtomicInt s_customMusicCacheLoading;
 
 global_variable struct NativeCustomMusicState s_customMusic = {0};
+/* Path identity prevents reuse of a different song on the same level. */
+static char s_customMusicActivePath[1024];
+
+/* Native OGG-only mask melody overlay. Retail Aku/Uka are CSEQ song IDs
+ * 1 and 2 in a per-track pack; an independent PCM voice avoids destroying
+ * the playing level's CSEQ/songset or restarting the level OGG clock. */
+struct NativeMaskMusicState
+{
+    s16 *pcm;
+    int frameCount;
+    int channels;
+    int songID;
+    u64 positionFp;
+    u32 stepFp;
+    int active;
+    int paused;
+};
+static struct NativeMaskMusicState s_maskMusic;
+static void NativeCustomMusic_MaskStopNoLock(void)
+{
+    free(s_maskMusic.pcm);
+    memset(&s_maskMusic,0,sizeof(s_maskMusic));
+}
 global_variable u64 s_hubClockFrames = 0;
 global_variable int s_hubClockActive = 0;
 global_variable int s_hubClockPaused = 0;
 
 internal void NativeCustomMusic_StopNoLock(void)
 {
+    NativeCustomMusic_MaskStopNoLock();
 	if (s_customMusic.pcm != NULL && s_customMusic.ownsPcm)
 	{
 		free(s_customMusic.pcm);
@@ -89,6 +116,7 @@ internal void NativeCustomMusic_StopNoLock(void)
 	memset(&s_customMusic, 0, sizeof(s_customMusic));
 	s_customMusic.levelID = -1;
 	s_customMusic.volume = 190;
+	s_customMusicActivePath[0] = 0;
 }
 
 void NativeCustomMusic_BeginHubClock(void)
@@ -205,6 +233,107 @@ done:
 	return result;
 }
 
+/* Soundtrack package replacement for the two mask CSEQ melodies.
+ * Missing or unusable files fall back to normal retail CSEQ masks. */
+int NativeCustomMusic_TryStartMaskCue(int songID)
+{
+    if (NativeSession_NoModsActive()) return 0;
+    struct NativeMusicSelectionResolved selected;
+    char path[1536];
+    struct stat st;
+    s16 *pcm=NULL;
+    int frames=0,channels=0,rate=0;
+    int slot=songID==1 ? NATIVE_MUSIC_MASK_AKU_SLOT :
+             songID==2 ? NATIVE_MUSIC_MASK_UKA_SLOT : -1;
+    if(slot<0 ||
+       NativeMusicSelection_Resolve(slot,&selected)!=NATIVE_MUSIC_SOURCE_OGG ||
+       !selected.path[0] ||
+       !NativeAssets_BuildPath(selected.path,path,sizeof(path)) ||
+       stat(path,&st)!=0 || st.st_size<=0 ||
+       st.st_size>24*1024*1024)
+        return 0;
+
+    if(!NativeCustomMusic_LoadOgg(path,&pcm,&frames,&channels,&rate))
+        return 0;
+    if(frames<=0 || rate<=0 || (s64)frames>(s64)rate*240)
+    {
+        free(pcm);
+        return 0;
+    }
+    NativeAudio_LockOutput();
+    NativeCustomMusic_MaskStopNoLock();
+    s_maskMusic.pcm=pcm;
+    s_maskMusic.frameCount=frames;
+    s_maskMusic.channels=channels;
+    s_maskMusic.songID=songID;
+    s_maskMusic.stepFp=(u32)(((u64)rate<<CUSTOM_MUSIC_FP_SHIFT)/
+                            CUSTOM_MUSIC_OUTPUT_RATE);
+    if(!s_maskMusic.stepFp)s_maskMusic.stepFp=1;
+    s_maskMusic.active=1;
+    if(s_customMusic.active)s_customMusic.maskMuted=1;
+    NativeAudio_UnlockOutput();
+    Platform_Log("[Music] %s mask OGG override started: %s\n",
+                 songID==1?"Aku":"Uka",selected.path);
+    return 1;
+}
+void NativeCustomMusic_StopMaskCue(int songID)
+{
+    NativeAudio_LockOutput();
+    if(s_maskMusic.active &&
+       (!songID || s_maskMusic.songID==songID))
+    {
+        NativeCustomMusic_MaskStopNoLock();
+        s_customMusic.maskMuted=0;
+    }
+    NativeAudio_UnlockOutput();
+}
+int NativeCustomMusic_RestartMaskCue(int songID)
+{
+    int found=0;
+    NativeAudio_LockOutput();
+    if(s_maskMusic.active && s_maskMusic.songID==songID)
+    {
+        s_maskMusic.positionFp=0;
+        s_maskMusic.paused=0;
+        found=1;
+    }
+    NativeAudio_UnlockOutput();
+    return found;
+}
+internal void NativeCustomMusic_MixMaskCueNoLock(
+    int *mixLeft,int *mixRight,s16 masterLeft,s16 masterRight)
+{
+    const struct NativeMaskMusicState *m=&s_maskMusic;
+    u64 a,b;
+    u32 frac;
+    int left,right,vol;
+    if(!m->active || m->paused || !m->pcm || m->frameCount<=0)
+        return;
+    a=(m->positionFp>>CUSTOM_MUSIC_FP_SHIFT)%(u64)m->frameCount;
+    b=(a+1)%(u64)m->frameCount;
+    frac=(u32)(m->positionFp & (CUSTOM_MUSIC_FP_ONE-1));
+    if(m->channels==1)
+    {
+        left=m->pcm[a]+(int)(((s64)(m->pcm[b]-m->pcm[a])*frac)>>
+                              CUSTOM_MUSIC_FP_SHIFT);
+        right=left;
+    }
+    else
+    {
+        left=m->pcm[a*2]+(int)(((s64)(m->pcm[b*2]-m->pcm[a*2])*frac)>>
+                              CUSTOM_MUSIC_FP_SHIFT);
+        right=m->pcm[a*2+1]+
+            (int)(((s64)(m->pcm[b*2+1]-m->pcm[a*2+1])*frac)>>
+                   CUSTOM_MUSIC_FP_SHIFT);
+    }
+    vol=(sdata->vol_Music*128)/255;
+    *mixLeft+=(int)(((s64)left*vol*masterLeft)/(255*0x3fff));
+    *mixRight+=(int)(((s64)right*vol*masterRight)/(255*0x3fff));
+    s_maskMusic.positionFp+=s_maskMusic.stepFp;
+    if((s_maskMusic.positionFp>>CUSTOM_MUSIC_FP_SHIFT)>=(u64)m->frameCount)
+        s_maskMusic.positionFp%=
+            ((u64)m->frameCount<<CUSTOM_MUSIC_FP_SHIFT);
+}
 internal int NativeCustomMusic_FileExists(const char *path)
 {
 	FILE *f = fopen(path, "rb");
@@ -219,13 +348,41 @@ internal int NativeCustomMusic_FileExists(const char *path)
 
 int NativeCustomMusic_HasLevelTrack(int levelID)
 {
+	if (NativeSession_NoModsActive()) return 0;
 	char relativePath[128];
 	char path[1024];
+	struct NativeMusicSelectionResolved selected;
+	int source;
 
 	/* A community track never inherits the host retail level_03.ogg. */
 	if (NativeCustomTracks_IsActiveRace())
-		return NativeCustomTracks_SelectedMusicKind() ==
+	{
+		struct NativeMusicSelectionResolved trackSelection;
+		int slot=NATIVE_MUSIC_CUSTOM_BASE+
+		         NativeCustomTracks_SelectedIndex();
+		int chosen=NativeMusicSelection_Resolve(slot,&trackSelection);
+		if(chosen==NATIVE_MUSIC_SOURCE_OGG)
+		{
+			if (!NativeAssets_BuildPath(trackSelection.path,path,sizeof(path)))
+				return 0;
+			return NativeCustomMusic_FileExists(path);
+		}
+		return chosen==NATIVE_MUSIC_SOURCE_EXISTING &&
+		       NativeCustomTracks_SelectedMusicKind() ==
 		       NATIVE_CUSTOM_TRACK_MUSIC_OGG;
+	}
+
+	source=NativeMusicSelection_Resolve(
+	    (sdata->gGT != NULL && IS_BOSS_RACE(sdata->gGT->gameMode1)) ?
+	    NATIVE_MUSIC_BOSS_SLOT : levelID,&selected);
+	if (source==NATIVE_MUSIC_SOURCE_OGG)
+	{
+		if (!NativeAssets_BuildPath(selected.path,path,sizeof(path)))
+			return 0;
+		return NativeCustomMusic_FileExists(path);
+	}
+	if (source!=NATIVE_MUSIC_SOURCE_EXISTING)
+		return 0;
 
 	/* The public resolver is intentionally separate from TryStartLevel:
 	 * callers such as Adventure Garage can preserve the currently playing
@@ -277,6 +434,12 @@ internal int NativeCustomMusic_GetCachedLevel(
 
 int NativeCustomMusic_PreloadAll(void)
 {
+	if (NativeSession_NoModsActive())
+	{
+		SDL_SetAtomicInt(&s_customMusicCacheReady, 1);
+		SDL_SetAtomicInt(&s_customMusicCacheLoading, 0);
+		return 1;
+	}
 	int loadedCount = 0;
 	size_t totalBytes = 0;
 
@@ -375,6 +538,13 @@ internal int SDLCALL NativeCustomMusic_PreloadThread(void *unused)
 
 int NativeCustomMusic_PreloadAllAsync(void)
 {
+	if (NativeSession_NoModsActive())
+	{
+		/* Main-menu load waits for IsPreloadComplete(), even when
+		 * there is intentionally no custom music to decode. */
+		SDL_SetAtomicInt(&s_customMusicCacheReady, 1);
+		return 1;
+	}
 	SDL_Thread *thread;
 
 	if (SDL_GetAtomicInt(&s_customMusicCacheReady) ||
@@ -413,13 +583,20 @@ int NativeCustomMusic_IsPreloadComplete(void)
 
 internal int NativeCustomMusic_TryStartLevelEx(int levelID, int preservePosition)
 {
-	char relativePath[256];
-	char finalRelativePath[256];
-	char path[1024];
-	char finalPath[1024];
+	if (NativeSession_NoModsActive()) return 0;
+	char relativePath[1024];
+	char finalRelativePath[1024];
+	char path[1536];
+	char finalPath[1536];
 	int customTrack = NativeCustomTracks_IsActiveRace();
+	struct NativeMusicSelectionResolved selected;
+	int resolvedSlot=customTrack ?
+		NATIVE_MUSIC_CUSTOM_BASE+NativeCustomTracks_SelectedIndex() :
+		(sdata->gGT != NULL && IS_BOSS_RACE(sdata->gGT->gameMode1)) ?
+		NATIVE_MUSIC_BOSS_SLOT : levelID;
+	int source = NativeMusicSelection_Resolve(resolvedSlot, &selected);
 	int musicKey = customTrack ?
-		NativeCustomTracks_SelectedMusicKey() : levelID;
+		NativeCustomTracks_SelectedMusicKey() : resolvedSlot;
 
 	s16 *newPcm = NULL;
 	s16 *newFinalPcm = NULL;
@@ -439,7 +616,13 @@ internal int NativeCustomMusic_TryStartLevelEx(int levelID, int preservePosition
 	static int bannerPrinted = 0;
 
 	if (customTrack &&
-	    NativeCustomTracks_SelectedMusicKind() != NATIVE_CUSTOM_TRACK_MUSIC_OGG)
+	    (source == NATIVE_MUSIC_SOURCE_CSEQ ||
+	     source == NATIVE_MUSIC_SOURCE_RETAIL ||
+	     (source == NATIVE_MUSIC_SOURCE_EXISTING &&
+	      NativeCustomTracks_SelectedMusicKind() != NATIVE_CUSTOM_TRACK_MUSIC_OGG)))
+		return 0;
+	if (!customTrack && source != NATIVE_MUSIC_SOURCE_EXISTING &&
+	    source != NATIVE_MUSIC_SOURCE_OGG)
 		return 0;
 
 	if (!bannerPrinted)
@@ -452,7 +635,10 @@ internal int NativeCustomMusic_TryStartLevelEx(int levelID, int preservePosition
 	/* CSEQ 1/2 masks leave the OGG playing silently. Restore its audible
 	 * output without decoding or seeking when CSEQ 0 starts again. */
 	NativeAudio_LockOutput();
-	if (s_customMusic.active && (s_customMusic.levelID == musicKey))
+	if (s_customMusic.active && (s_customMusic.levelID == musicKey) &&
+	    (source == NATIVE_MUSIC_SOURCE_EXISTING ||
+	     (source == NATIVE_MUSIC_SOURCE_OGG &&
+	      !strcmp(s_customMusicActivePath, selected.path))))
 	{
 		if (!preservePosition) s_customMusic.maskMuted = 0;
 		if (preservePosition) s_customMusic.hubFallback = 0;
@@ -461,7 +647,8 @@ internal int NativeCustomMusic_TryStartLevelEx(int levelID, int preservePosition
 	}
 	NativeAudio_UnlockOutput();
 
-	if (!customTrack && NativeCustomMusic_GetCachedLevel(
+	if (!customTrack && source == NATIVE_MUSIC_SOURCE_EXISTING &&
+	    NativeCustomMusic_GetCachedLevel(
 		levelID,
 		&newPcm,
 		&newFrameCount,
@@ -472,15 +659,27 @@ internal int NativeCustomMusic_TryStartLevelEx(int levelID, int preservePosition
 	{
 		printf("[CustomMusic] Level %d: usando PCM precargado.\n", levelID);
 		fflush(stdout);
+		snprintf(relativePath, sizeof(relativePath),
+		         "MUSIC_CUSTOM/level_%02d.ogg", levelID);
 		goto track_ready;
 	}
 
-	if (customTrack)
+	if (customTrack && source != NATIVE_MUSIC_SOURCE_OGG)
 	{
 		const char *normal=NativeCustomTracks_SelectedMusicPath();
 		const char *final=NativeCustomTracks_SelectedFinalMusicPath();
 		snprintf(relativePath,sizeof(relativePath),"%s",normal?normal:"");
 		snprintf(finalRelativePath,sizeof(finalRelativePath),"%s",final?final:"");
+	}
+	else if (source == NATIVE_MUSIC_SOURCE_OGG)
+	{
+		const char *dot;
+		snprintf(relativePath,sizeof(relativePath),"%s",selected.path);
+		dot=strrchr(relativePath,'.');
+		finalRelativePath[0]=0;
+		if (dot && (size_t)(dot-relativePath)<sizeof(finalRelativePath)-12)
+			snprintf(finalRelativePath,sizeof(finalRelativePath),
+			         "%.*s_final.ogg",(int)(dot-relativePath),relativePath);
 	}
 	else
 	{
@@ -621,6 +820,8 @@ track_ready:
 	 */
 	s_customMusic.volume = (sdata->vol_Music * 128) / 255;
 	s_customMusic.levelID = musicKey;
+	snprintf(s_customMusicActivePath,sizeof(s_customMusicActivePath),
+	         "%s",relativePath);
 
 	NativeAudio_UnlockOutput();
 
@@ -638,6 +839,7 @@ int NativeCustomMusic_TryStartLevel(int levelID)
 
 int NativeCustomMusic_TrySwapHub(int levelID)
 {
+	if (NativeSession_NoModsActive()) return 0;
 	char relativePath[128];
 	char path[1024];
 
@@ -698,6 +900,8 @@ void NativeCustomMusic_SetPaused(int paused)
 	{
 		s_customMusic.paused = paused != 0;
 	}
+    if(s_maskMusic.active)
+        s_maskMusic.paused=paused!=0;
 
 	NativeAudio_UnlockOutput();
 }
@@ -934,6 +1138,8 @@ void NativeCustomMusic_MixFrameNoLock(
 
 	if (s_hubClockActive && !s_hubClockPaused) s_hubClockFrames++;
 
+    NativeCustomMusic_MixMaskCueNoLock(
+        mixLeft,mixRight,masterLeft,masterRight);
 	if (!s_customMusic.active || s_customMusic.paused)
 	{
 		return;
@@ -990,6 +1196,7 @@ void NativeCustomMusic_MixFrameNoLock(
 			}
 		}
 	}
+    if(s_maskMusic.active)maskPlaying=1;
 	/* Release the mute automatically when the original mask CSEQ ends. */
 	if (!maskPlaying) s_customMusic.maskMuted = 0;
 	/* Win/lose tracks play through XA. Keep the OGG clock advancing

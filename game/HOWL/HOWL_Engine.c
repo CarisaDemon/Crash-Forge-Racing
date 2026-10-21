@@ -1,5 +1,10 @@
 #include <common.h>
 
+#if defined(CTR_NATIVE)
+/* Same selected ENGINE owner as local players, lazy one-time bot preload. */
+void VehBirth_NativePrepareBotAudio(int driverID);
+#endif
+
 // Initialize car engine audio system for one driver
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80028880-0x800289b0
 b32 EngineAudio_InitOnce(u32 soundID, u32 flags)
@@ -149,7 +154,9 @@ void EngineSound_Player(struct Driver *driver)
 	u32 volume;
 	u32 distortion;
 	u32 lr;
-	int engine = CharacterRegistry_GetEngineClass(data.characterIDs[id]);
+	/* Always update the same chosen sound class that VehBirth allocated.
+	 * Physics presets must never silently change the engine sound. */
+	int engine = RacerLoadout_GetEffectiveEngineSoundClass(id);
 
 	if (driver->engineSoundMode == ENGINE_SOUND_FADE_OUT)
 	{
@@ -322,9 +329,33 @@ void EngineSound_Player(struct Driver *driver)
 		lr = 0xc0;
 	}
 
-	u32 echo = ((driver->actionsFlagSet & ACTION_ENGINE_ECHO) != 0) ? 1 : 0;
+    u32 echo = ((driver->actionsFlagSet & ACTION_ENGINE_ECHO) != 0) ? 1 : 0;
 
-	EngineAudio_Recalculate(((engine * 4) + id) & 0xffff, HowlSfx_Pack(lr, distortion, volume, echo));
+#ifdef CTR_NATIVE
+    /* Custom engines track actual kart speed over the FULL speed range.
+     * HOWL distortion saturates by design and used to freeze custom pitch
+     * long before the player's kart reached top speed. Retail unchanged. */
+    /* Physical USF reference comes from the driver's selected physics class;
+     * unlike a fixed 32767 cap this reaches full kart-engine pitch during
+     * maximum sacred-fire acceleration. Do not alter kart physics itself. */
+    int physicsUSFTopSpeed =
+        (int)driver->const_AccelSpeed_ClassStat +
+        (int)driver->const_SacredFireSpeed;
+    /* Match the same smoothed rev state as CTR's HOWL engine.
+     * RPM reacts to throttle/revving/airborne drift, unlike road speed alone. */
+    int howlRpmMax = physicsUSFTopSpeed + 0xf00;
+    if (NativeAudio_EngineUpdate(id, (int)volume, (int)distortion,
+                                 driver->fireSpeed > 0, sdata->vol_FX,
+                                 (int)driver->speedApprox, physicsUSFTopSpeed,
+                                 (int)driver->engineSoundPitchState, howlRpmMax,
+                                 driver->kartState == KS_DRIFTING,
+                                 driver->kartState == KS_ENGINE_REVVING,
+                                 (int)driver->turbo_MeterRoomLeft,
+                                 (int)driver->const_turboMaxRoom * ELAPSED_MS,
+                                 data.distortConst_Engine[(u8)distortion]))
+        return;
+#endif
+    EngineAudio_Recalculate(((engine * 4) + id) & 0xffff, HowlSfx_Pack(lr, distortion, volume, echo));
 }
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8002fc28-0x8002fc64
@@ -499,7 +530,36 @@ void EngineSound_AI(struct Driver *ai, struct Driver *cameraDriver, int slotInde
 	}
 
 	u32 echo = ((cameraDriver->actionsFlagSet & ACTION_ENGINE_ECHO) != 0);
-	EngineAudio_Recalculate((slotIndex + 0x10) & 0xffff, HowlSfx_Pack(lr, distortion, volume, echo));
+#if defined(CTR_NATIVE)
+    /* Vanilla CTR already supplies accurate volume falloff/pan for its
+     * 2 nearest AI cars; reuse the SAME values for native mod engines.
+     * One bot voice per actual driver ID avoids re-decoding audio each
+     * time that driver's ranking/distance changes. */
+    if (!Platform_GetHearOtherRacers()) {
+        volume=0; /* mute vanilla opponents too, NOT their other SFX */
+    } else {
+        int botID=(int)ai->driverID;
+        VehBirth_NativePrepareBotAudio(botID);
+        int maxSpeed=(int)ai->const_AccelSpeed_ClassStat +
+                     (int)ai->const_SacredFireSpeed;
+        int customMain=NativeAudio_EngineUpdate(botID,(int)volume,(int)distortion,
+            ai->fireSpeed>0,sdata->vol_FX,(int)ai->speedApprox,maxSpeed,
+            (int)ai->engineSoundPitchState,maxSpeed+0xf00,
+            ai->kartState==KS_DRIFTING,ai->kartState==KS_ENGINE_REVVING,
+            (int)ai->turbo_MeterRoomLeft,
+            (int)ai->const_turboMaxRoom*ELAPSED_MS,
+            data.distortConst_Engine[(u8)distortion]);
+        NativeAudio_EngineSetOpponentSpatial(botID,(int)lr);
+        if (customMain)
+            volume=0; /* prevents doubling with retail opponent channel */
+        static unsigned botLogCount;
+        if (++botLogCount % 300 == 0)
+            Platform_Log("[OPPONENT AUDIO] bot=%d distance=%d vol=%d pan=%d custom=%d\n",
+                         botID,distance,(int)volume,(int)lr,customMain);
+    }
+#endif
+    EngineAudio_Recalculate((slotIndex + 0x10) & 0xffff,
+                            HowlSfx_Pack(lr, distortion, volume, echo));
 }
 
 static int EngineSound_NearestAIs_GetDistance(struct Driver *ai, int pushBufferIndex)
@@ -556,12 +616,29 @@ static int EngineSound_NearestAIs_CalculateLR(s32 *dir)
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8002ff28-0x80030208
 void EngineSound_NearestAIs(void)
 {
-	struct GameTracker *gGT = sdata->gGT;
+    struct GameTracker *gGT = sdata->gGT;
+#if defined(CTR_NATIVE)
+    static unsigned botNearDiagCounter;
+    if (++botNearDiagCounter % 200 == 0)
+        Platform_Log("[BOT NEAR DIAG] called=%u next=%d curr=%d players=%d ticks=%d robotThread=%p\n",
+                     botNearDiagCounter,gGT->numBotsNextGame,gGT->numBotsCurrGame,
+                     gGT->numPlyrCurrGame,Platform_GetLegacy30HzTicks(),
+                     (void*)gGT->threadBuckets[ROBOT].thread);
+    /* Match the engine-sound 30Hz cadence; 200FPS host render must not
+     * endlessly clear nearest positions between retail sound ticks. */
+    if (Platform_GetHighRefreshMode() &&
+        Platform_GetLegacy30HzTicks()==0) return;
+    NativeAudio_EngineBeginOpponentFrame();
+#endif
 	struct Driver *closestDrivers[2];
 	int closestDistances[2];
 	s16 closestPlayers[2];
 
-	if (gGT->numBotsCurrGame == 0)
+	/* numBotsCurrGame can remain 0 in the native demo/stress race even
+	 * while 7 real ROBOT threads are active. BOTS_UpdateGlobals already
+	 * calls this routine when numBotsNextGame != 0; trust the actual
+	 * live robot thread bucket instead of this stale counter. */
+	if (gGT->threadBuckets[ROBOT].thread == NULL)
 	{
 		return;
 	}
@@ -599,6 +676,12 @@ void EngineSound_NearestAIs(void)
 			EngineSound_AI(ai, cameraDriver, i, closestDistances[i], closestDistances[i] - sdata->audioDefaults[2 + i], lr);
 			sdata->audioDefaults[2 + i] = closestDistances[i];
 		}
+        else {
+            /* A previous closest AI may have left a retail channel audible.
+             * Fade out the now-empty slot instead of replaying its last kart. */
+            EngineAudio_Recalculate((i + 0x10) & 0xffff,
+                HowlSfx_Pack(128,0x3c,0,0));
+        }
 	}
 }
 

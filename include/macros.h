@@ -15,6 +15,20 @@
 // TODO(aalhendi): something nicer than __LINE__? Maybe __COUNTER__. Look into compilers
 #define CTR_STATIC_ASSERT(expr)       typedef char CTR_STATIC_ASSERT_JOIN(ctr_static_assert_, __LINE__)[(expr) ? 1 : -1] __attribute__((unused))
 
+// Win64 build (CTR_WIN64, clang -fms-extensions): pointers inside PS1-layout structs stay 4 bytes (P32)
+// and the process is kept below 2 GB (no LARGEADDRESSAWARE), so retail layouts and asserts are unchanged.
+// Calls through a P32 function pointer must go through FN32(), which works around a clang backend crash.
+// On x86 both macros are no-ops.
+#if defined(CTR_WIN64)
+#undef __ptr32
+#undef __uptr
+#define P32 __ptr32 __uptr
+#define FN32(f) ((__typeof_unqual__(*(f)) *)(f))
+#else
+#define P32
+#define FN32(f) (f)
+#endif
+
 typedef uint64_t u64;
 typedef int64_t s64;
 typedef uint32_t u32;

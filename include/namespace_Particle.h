@@ -10,8 +10,8 @@ struct ParticleAxis
 
 struct ParticleOscillator
 {
-	struct ParticleOscillator *next;
-	struct ParticleOscillator *prev;
+	struct ParticleOscillator * P32 next;
+	struct ParticleOscillator * P32 prev;
 	u16 flags;
 	s16 previousValue;
 	u16 period;
@@ -141,18 +141,18 @@ enum ParticleAxisFlags
 struct Particle
 {
 	// 0x0
-	struct Particle *next;
+	struct Particle * P32 next;
 
 	// 0x4
 	// Active particles use this as the oscillator chain head. While a particle
 	// is inside a JitPool free list, the same word is the list Item prev field.
-	struct ParticleOscillator *oscillator;
+	struct ParticleOscillator * P32 oscillator;
 
 	// 0x8
-	struct Icon *ptrIconArray;
+	struct Icon * P32 ptrIconArray;
 
 	// 0xC
-	struct IconGroup *ptrIconGroup;
+	struct IconGroup * P32 ptrIconGroup;
 
 	// 0x10 (s16)
 	s16 framesLeftInLife;
@@ -187,16 +187,16 @@ struct Particle
 	s16 renderDepthLimit;
 
 	// 0x1C
-	void *funcPtr;
+	void * P32 funcPtr;
 
 	// 0x20
 	union
 	{
 		// used by VehEmitter
-		struct Instance *driverInst;
+		struct Instance * P32 driverInst;
 
 		// used by plant SpitTire
-		struct Instance *plantInst;
+		struct Instance * P32 plantInst;
 
 		// used for potion shatter
 		int modelID;
@@ -225,7 +225,7 @@ struct ParticleEmitter
 		struct
 		{
 			// 0x4
-			void *particle_funcPtr;
+			void * P32 particle_funcPtr;
 
 			// 0x8
 			// flags, passed to SetColors

@@ -1,4 +1,7 @@
 #include <common.h>
+#ifdef CTR_NATIVE
+#include <platform/native_menu_music_clock.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80034a80-0x80034aa4.
 void MainDrawCb_DrawSync()
@@ -37,7 +40,8 @@ void MainDrawCb_Vsync()
 #ifdef CTR_NATIVE
 	// NOTE(aalhendi): Retail calls HOWL unconditionally. Native skips only while
 	// channel lists are mid-edit.
-	if (sdata->criticalSectionCount == 0)
+	if (!NativeMenuMusicClock_IsRunning() &&
+	    sdata->criticalSectionCount == 0)
 #endif
 	{
 		howl_PlayAudio_Update();

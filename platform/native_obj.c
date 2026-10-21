@@ -862,7 +862,41 @@ struct Model *NativeObj_LoadRacer(const char *assetName)
         return NULL;
     }
 
-    struct NativeObjCache *c = Obj_Find(assetName);
+    /*
+     * The package directory and the drawable asset_name are independent.
+     * Example: mods/mad_katzz_character/{character.ini,mad_racer.obj}
+     * declares asset_name=mad_racer. Looking up only mods/racers/mad_racer
+     * silently failed and displayed fallback_retail (Pura) instead.
+     *
+     * Resolve the owning registered racer first, using its stable folder
+     * slug for the path and asset_name/model_file only for OBJ selection.
+     * Keep the old asset-named lookup for unchanged retail/legacy callers.
+     */
+    struct NativeObjCache *c = NULL;
+    for (int i = 0; i < CharacterRegistry_GetCount(); ++i)
+    {
+        const struct CharacterDef *character =
+            CharacterRegistry_GetByRosterIndex(i);
+        if (character == NULL ||
+            SDL_strcasecmp(character->assetName, assetName))
+            continue;
+
+        char dir[160], key[160], preferred[128];
+        const char *modelLeaf = character->modelFile[0] ?
+            character->modelFile : assetName;
+        snprintf(preferred, sizeof(preferred), "%s", modelLeaf);
+        size_t len = strlen(preferred);
+        if (len > 4 && !SDL_strcasecmp(preferred + len - 4, ".obj"))
+            preferred[len - 4] = '\0';
+
+        snprintf(dir, sizeof(dir), "mods/racers/%s", character->slug);
+        snprintf(key, sizeof(key), "racer:%s", character->slug);
+        c = Obj_FindInDirectory(key, dir, preferred);
+        if (c)
+            break;
+    }
+    if (!c)
+        c = Obj_Find(assetName);
     if (!c)
         return NULL;
 
@@ -888,6 +922,29 @@ struct Model *NativeObj_LoadRacer(const char *assetName)
     }
 
     return Obj_GetOrCreateModel(c, assetName);
+}
+
+/* CNK Tornado Top is a NEW item with its OWN native mesh and texture.
+ * Load from assets/cnk_tornado, never from Warp Orb assets or racer mods. */
+struct Model *NativeObj_LoadCnkTornado(void)
+{
+    struct NativeObjCache *c = Obj_FindInDirectory(
+        "effect:cnk_tornado", "cnk_tornado", "model");
+    if (c == NULL)
+        return NULL;
+
+    /* 20% smaller than prior QA (0.59 -> 0.47). CNK-only visual,
+     * with no modifications to retail Warp Orb or racer models. */
+    c->mesh.userScale = 0.47f;
+    /* CNK original texture is 'tornadoadd.png': ADDITIVE blending keeps
+     * the dark/black texels invisible instead of drawing dark opaque borders.
+     * This tag is consumed only by this OBJ's primitive packets. */
+    c->mesh.additiveEffect = 1;
+    c->mesh.userOffset[0] = 0.0f;
+    c->mesh.userOffset[1] = 0.0f;
+    c->mesh.userOffset[2] = 0.0f;
+    Obj_EnsureRenderCache(c);
+    return Obj_GetOrCreateModel(c, "cnk_tornado");
 }
 
 struct Model *NativeObj_LoadStaticTrack(const char *slug)
@@ -1851,8 +1908,10 @@ struct Model *NativeObj_LoadVehiclePart(int kind, int partID)
 
     snprintf(key, sizeof(key), "part:%s:%s",
              category, part->slug);
-    snprintf(dir, sizeof(dir), "mods/%s/%s",
-             category, part->slug);
+    if (part->unifiedMod)
+        snprintf(dir, sizeof(dir), "mods/%s", part->slug);
+    else
+        snprintf(dir, sizeof(dir), "mods/%s/%s", category, part->slug);
 
     struct NativeObjCache *c =
         Obj_FindInDirectory(key, dir, part->assetName);
@@ -1938,6 +1997,11 @@ static struct Model *NativeObj_GetWheelModelForDriver(const struct Driver *drive
     /* Adventure deliberately ignores free-form vehicle loadouts and the
        global wheel override so story mode keeps CTR's original combinations. */
     if (RacerLoadout_IsAdventureLocked())
+        return NULL;
+
+    /* A hovercraft suppresses all modular and global replacement wheels. */
+    if (VehiclePartRegistry_HidesWheels(
+            RacerLoadout_GetEffectiveKart((int)driver->driverID)))
         return NULL;
 
     {

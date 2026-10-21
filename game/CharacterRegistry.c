@@ -1,5 +1,6 @@
 #include <common.h>
 #include <CharacterRegistry.h>
+#include <NativeSession.h>
 #include <platform/native_assets.h>
 #include <platform/native_mod_packages.h>
 
@@ -186,7 +187,10 @@ static void Registry_LoadOneMod(const char *folderName)
     temp.animationCrossfade = 0.20f;
     temp.modelFormat = CHARACTER_MODEL_AUTO;
     temp.engineClass = BALANCED;
-    temp.flags = CHARACTER_REGISTRY_FLAG_HAS_WHEELS;
+    /* All custom racers are character bodies. Wheels belong to the selected
+     * kart/wheel modules, never to character.ini. Retail racer definitions
+     * keep their original wheel flags unchanged. */
+    temp.flags = CHARACTER_REGISTRY_FLAG_MODULAR_BODY;
     snprintf(temp.slug, sizeof(temp.slug), "%s", folderName);
     snprintf(temp.assetName, sizeof(temp.assetName), "%s", folderName);
     snprintf(temp.displayName, sizeof(temp.displayName), "%s", folderName);
@@ -238,11 +242,9 @@ static void Registry_LoadOneMod(const char *folderName)
                     valid = 0;
                 }
             }
-            else if (!SDL_strcasecmp(key, "has_wheels"))
-            {
-                if (Registry_ParseBool(value, 1)) temp.flags |= CHARACTER_REGISTRY_FLAG_HAS_WHEELS;
-                else temp.flags &= (u8)~CHARACTER_REGISTRY_FLAG_HAS_WHEELS;
-            }
+            /* Legacy has_wheels entries are intentionally ignored for
+               custom characters. This setting now belongs to kart modules,
+               not character bodies. */
             else if (!SDL_strcasecmp(key, "modular_body") ||
                      !SDL_strcasecmp(key, "separate_vehicle"))
             {
@@ -502,7 +504,10 @@ void CharacterRegistry_Init(void)
     if (s_registryInitialized) return;
     s_registryInitialized = 1;
     Registry_AddRetail();
-    Registry_DiscoverMods();
+#if defined(CTR_NATIVE)
+    if (!NativeSession_NoModsActive())
+#endif
+        Registry_DiscoverMods();
     if (s_registryCount > 17)
     {
         qsort(&s_registry[16], (size_t)(s_registryCount - 16), sizeof(*s_registry), Registry_CompareMods);

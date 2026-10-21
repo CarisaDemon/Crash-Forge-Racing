@@ -299,7 +299,7 @@ void INSTANCE_LevInitAll(struct InstDef *levInstDef, int numInst)
 				if (meta->LInB != NULL)
 				{
 					// call funcLevInstDefBirth, make thread for this instance
-					meta->LInB(inst);
+					FN32(meta->LInB)(inst);
 				}
 			}
 		}
@@ -307,6 +307,17 @@ void INSTANCE_LevInitAll(struct InstDef *levInstDef, int numInst)
 		b32 boolArcadeOnly = ((((u32)modelID - PU_FRUIT_CRATE) < 2) || (modelID == PU_WUMPA_FRUIT));
 
 		b32 boolRelicOnly = ((((u32)modelID - STATIC_TIME_CRATE_02) < 2) || (modelID == STATIC_TIME_CRATE_01));
+
+#if defined(CTR_NATIVE)
+		/* Community LEVs can contain the three retail Relic Race crates
+		 * even when loaded with an Arcade/Versus race-mode LOD. These
+		 * are never ordinary item crates. Preserve the actual instances
+		 * in the track file for an explicit future RELIC_RACE mode, but
+		 * hide their drawing AND collision in all other game modes.
+		 * Time Trial already performed this filter; extend it to Arcade. */
+		if (boolRelicOnly && (gGT->gameMode1 & RELIC_RACE) == 0)
+			inst->flags &= ~DRAW_COLLISION_MASK;
+#endif
 
 		if ((gGT->gameMode1 & TIME_TRIAL) != 0)
 		{
@@ -380,7 +391,7 @@ void INSTANCE_LevDelayedLInBs(struct InstDef *instDef, int numInstances)
 
 		if ((meta != NULL) && (meta->LInB != NULL))
 		{
-			meta->LInB(instDef->ptrInstance);
+			FN32(meta->LInB)(instDef->ptrInstance);
 		}
 
 		instDef++;

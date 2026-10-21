@@ -314,7 +314,7 @@ void NativeGTE_SubpixelBeginFrame(void)
 	s_nativeGTESxyValueSaved[2] = 0;
 	s_nativeGTELastSubpixelEntry = NULL;
 	s_nativeGTELastValueEntry = NULL;
-	s_nativeGTEWideModeCached = Platform_GetWideMode();
+	s_nativeGTEWideModeCached = Platform_GetAspectRatioMode();
 	s_nativeGTESubpixelGeneration++;
 	if (s_nativeGTESubpixelGeneration == 0)
 	{
@@ -443,7 +443,7 @@ internal int NativeGTE_GetWideModeCached(void)
 {
 	if (s_nativeGTEWideModeCached < 0)
 	{
-		s_nativeGTEWideModeCached = Platform_GetWideMode();
+		s_nativeGTEWideModeCached = Platform_GetAspectRatioMode();
 	}
 	return s_nativeGTEWideModeCached;
 }
@@ -1647,9 +1647,12 @@ void NativeGTE_ProjectVertexPure(
 
 	if (context->wideMode)
 	{
-		projectedX = (projectedX * 3) / 4;
-		presentationProjectedX =
-			(presentationProjectedX * 3) / 4;
+		int aspectW=4,aspectH=3;
+		Platform_GetAspectRatioSize(context->wideMode,&aspectW,&aspectH);
+		const s64 numerator=(s64)4*aspectH;
+		const s64 divisor=(s64)3*aspectW;
+		projectedX=(projectedX*numerator)/divisor;
+		presentationProjectedX=(presentationProjectedX*numerator)/divisor;
 	}
 
 	screenX16 = NativeGTE_PureF(
@@ -1866,10 +1869,15 @@ internal int GTE_RotTransPers(int idx, int lm)
 		}
 	}
 
-	if (NativeGTE_GetWideModeCached())
+	int aspectMode=NativeGTE_GetWideModeCached();
+	if(aspectMode!=PLATFORM_ASPECT_4_3)
 	{
-		projectedX = (projectedX * 3) / 4;
-		presentationProjectedX = (presentationProjectedX * 3) / 4;
+		int aspectW=4,aspectH=3;
+		Platform_GetAspectRatioSize(aspectMode,&aspectW,&aspectH);
+		const s64 numerator=(s64)4*aspectH;
+		const s64 divisor=(s64)3*aspectW;
+		projectedX=(projectedX*numerator)/divisor;
+		presentationProjectedX=(presentationProjectedX*numerator)/divisor;
 	}
 #endif
 	{

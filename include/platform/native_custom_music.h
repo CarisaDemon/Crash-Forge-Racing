@@ -5,6 +5,9 @@
 
 int NativeCustomMusic_HasLevelTrack(int levelID);
 int NativeCustomMusic_TryStartLevel(int levelID);
+int NativeCustomMusic_TryStartMaskCue(int songID);
+void NativeCustomMusic_StopMaskCue(int songID);
+int NativeCustomMusic_RestartMaskCue(int songID);
 int NativeCustomMusic_PreloadAll(void);
 int NativeCustomMusic_PreloadAllAsync(void);
 int NativeCustomMusic_IsPreloadComplete(void);

@@ -5,6 +5,7 @@
 #include <platform/native_custom_tracks.h>
 #include <platform/native_gpu_model_qa.h>
 #include <platform/native_wheel_jobs.h>
+#include <platform/native_occlusion_async.h>
 s32 NativeGpu_CorrectSubpixelNclip(const void *p0, const void *p1, const void *p2, s32 retailNclip);
 s32 NativeGpu_CorrectSubpixelNclipLocal(const void *p0, const void *p1, const void *p2, s32 retailNclip);
 int NativeGTE_GetStoredSubpixelFixedLocal(const void *address, u32 packedSxy, s32 *x16, s32 *y16);
@@ -20,8 +21,8 @@ int NativeGTE_GetCurrentSubpixelFixed(int fifoIndex, s32 *x16, s32 *y16);
 
 struct RenderBucketEntry
 {
-	struct Instance *inst;
-	struct Instance *instPlayerBase;
+	struct Instance * P32 inst;
+	struct Instance * P32 instPlayerBase;
 };
 
 struct RenderBucketQueueState
@@ -1445,6 +1446,39 @@ static int RenderBucket_OcclusionTriangleRay(
     return hitT > minT && hitT < maxT;
 }
 
+
+/* Pure ray math from a completed immutable worker snapshot.
+ * Parallel workers never execute emulated GTE or change draw results. */
+static int RenderBucket_OcclusionPreparedTriangleRay(
+    const struct NativeOccAsyncTriangle *tri,
+    const float a[3], const float d[3], float minT, float maxT)
+{
+    const float *e1 = tri->e1;
+    const float *e2 = tri->e2;
+    const float p[3] = {
+        d[1] * e2[2] - d[2] * e2[1],
+        d[2] * e2[0] - d[0] * e2[2],
+        d[0] * e2[1] - d[1] * e2[0]
+    };
+    const float det = e1[0]*p[0] + e1[1]*p[1] + e1[2]*p[2];
+    if (fabsf(det) < 0.00001f) return 0;
+    const float invDet = 1.0f / det;
+    const float t[3] = {
+        a[0] - tri->v0[0], a[1] - tri->v0[1], a[2] - tri->v0[2]
+    };
+    const float u = (t[0]*p[0] + t[1]*p[1] + t[2]*p[2])*invDet;
+    if (u < -0.0001f || u > 1.0001f) return 0;
+    const float q[3] = {
+        t[1]*e1[2] - t[2]*e1[1],
+        t[2]*e1[0] - t[0]*e1[2],
+        t[0]*e1[1] - t[1]*e1[0]
+    };
+    const float v = (d[0]*q[0] + d[1]*q[1] + d[2]*q[2])*invDet;
+    if (v < -0.0001f || u+v > 1.0001f) return 0;
+    const float hitT = (e2[0]*q[0]+e2[1]*q[1]+e2[2]*q[2])*invDet;
+    return hitT > minT && hitT < maxT;
+}
+
 static int RenderBucket_OcclusionQuadRay(
     const struct mesh_info *mesh, const struct QuadBlock *qb,
     const float a[3], const float d[3], float minT, float maxT)
@@ -1456,6 +1490,61 @@ static int RenderBucket_OcclusionQuadRay(
                           QUADBLOCK_FLAG_TRIGGER | QUADBLOCK_FLAG_KILL_PLANE)))
         return 0;
     if (!RenderBucket_OcclusionBoxRay(&qb->bbox, a, d, maxT)) return 0;
+
+    /* Asynchronous preparation is OPTIONAL. If it is late, rejected,
+     * invalidated or disabled, the original triangle loop below runs. */
+    const struct NativeOccAsyncBlock *precomputed =
+        NativeOccAsync_GetBlock(mesh,qb);
+    if (precomputed != NULL)
+    {
+        int cachedHit = 0;
+        for (int face = 0; face < precomputed->count; ++face)
+            if (precomputed->triangles[face].valid &&
+                RenderBucket_OcclusionPreparedTriangleRay(
+                    &precomputed->triangles[face],a,d,minT,maxT))
+            {
+                cachedHit = 1;
+                break;
+            }
+
+        /* Initial + periodic exact ray parity. A single divergence
+         * disables asynchronous caching for the rest of the session. */
+        if (NativeOccAsync_VerifyEnabled())
+        {
+            static unsigned checks;
+            if (++checks <= 500 || (checks % 2048u) == 0)
+            {
+                static const u8 faces[8][3] = {
+                    {0,4,5},{4,6,5},{6,4,1},{5,6,2},
+                    {8,6,7},{7,3,8},{1,7,6},{2,6,8}
+                };
+                int legacyHit=0;
+                const int count=qb->index[2]==qb->index[3] ? 4 : 8;
+                for(int face=0;face<count;++face)
+                {
+                    const u16 i0=qb->index[faces[face][0]];
+                    const u16 i1=qb->index[faces[face][1]];
+                    const u16 i2=qb->index[faces[face][2]];
+                    if(i0>=mesh->numVertex||i1>=mesh->numVertex||
+                       i2>=mesh->numVertex) continue;
+                    if(RenderBucket_OcclusionTriangleRay(
+                        &mesh->ptrVertexArray[i0],
+                        &mesh->ptrVertexArray[i1],
+                        &mesh->ptrVertexArray[i2],a,d,minT,maxT))
+                    {
+                        legacyHit=1;
+                        break;
+                    }
+                }
+                if (legacyHit != cachedHit)
+                {
+                    NativeOccAsync_DisableAfterMismatch();
+                    return legacyHit;
+                }
+            }
+        }
+        return cachedHit;
+    }
     static const u8 hiTriangles[8][3] = {
         {0,4,5}, {4,6,5}, {6,4,1}, {5,6,2},
         {8,6,7}, {7,3,8}, {1,7,6}, {2,6,8}
@@ -1593,6 +1682,9 @@ static int RenderBucket_RacerOcclusionCull(
         mesh->numQuadBlock > 40000 || mesh->numVertex < 1 ||
         mesh->numVertex > 100000)
         return 0;
+    /* Incrementally snapshot immutable terrain, then asynchronously
+     * precompute occluder edges. Always keep original culling live. */
+    NativeOccAsync_Ensure(mesh, gt->levelID);
     int driverSlot = -1;
     for (int i = 0; i < 8; ++i)
         if (gt->drivers[i] && gt->drivers[i]->instSelf == inst)
@@ -2824,7 +2916,7 @@ void *RenderBucket_QueueLevInstances(struct CameraDC *cDC, struct OTMem *otState
 
 	for (int player = count - 1; player >= 0; player--)
 	{
-		struct Instance **visInstSrc = cDC[player].visInstSrc;
+		struct Instance * P32 *visInstSrc = cDC[player].visInstSrc;
 
 		if (visInstSrc == 0)
 		{
@@ -6191,19 +6283,15 @@ static void RenderBucket_DrawObj(struct RenderBucketDrawContext *ctx, const stru
                 attachedScale[axis] = ownScale[axis] / hostScale[axis];
     }
 
-    /* A body-only custom character shares the kart instance transform but may
-       need a per-kart seat translation. Keep legacy combined OBJ racers at
-       their existing offset by applying this only to the instance's own mesh. */
-    if (mesh == NativeObj_GetMesh(ctx->inst->model))
-    {
-        float seatOffset[3];
-        if (NativeObj_GetModularBodySeatOffset(ctx->inst, seatOffset))
-        {
-            drawOffsetScaled[0] += seatOffset[0];
-            drawOffsetScaled[1] += seatOffset[1];
-            drawOffsetScaled[2] += seatOffset[2];
-        }
-    }
+    /* A body-only custom character shares the kart instance transform.
+       Keep the per-kart seat translation separate from the OBJ mesh offset:
+       seat_x/y/z are physical CTR units, NOT normalized OBJ vertices.
+       Apply it after the special CRASH_FALL offset correction, or that
+       correction would discard the seat translation completely. */
+    float modularSeatNative[3] = {0.0f, 0.0f, 0.0f};
+    const int hasModularSeat =
+        mesh == NativeObj_GetMesh(ctx->inst->model) &&
+        NativeObj_GetModularBodySeatOffset(ctx->inst, modularSeatNative);
 #else
     const int isBodyPatch = 0;
 #endif
@@ -6284,6 +6372,30 @@ static void RenderBucket_DrawObj(struct RenderBucketDrawContext *ctx, const stru
                 drawOffsetScaled[k] =
                     drawOffset[k] * mesh->normPerAuth[k] * mesh->userScale;
         }
+    }
+#endif
+
+#if defined(CTR_NATIVE)
+    if (hasModularSeat && ctx->mh != NULL)
+    {
+        /* Each OBJ axis was independently normalized to 1016 vertices.
+           The host ModelHeader.scale is applied by the 12-bit GTE matrix
+           (1 / 4096). Kart seat_x/y/z already use PHYSICAL CTR units;
+           they must be converted back to these normalized render units,
+           unlike the model-authored userOffset.
+
+           Previously we added seat XYZ directly to renderOffsetScaled.
+           On a 1.34-OBJ-unit-high racer that turned seat_y=60 into
+           only 60*(1340/4096)=19.6 CTR units. Keep seat translation
+           separate from CRASH_FALL's authored-offset adjustment. */
+        const float hostScale[3] = {
+            fmaxf(1.0f, fabsf((float)ctx->mh->scale.x)),
+            fmaxf(1.0f, fabsf((float)ctx->mh->scale.y)),
+            fmaxf(1.0f, fabsf((float)ctx->mh->scale.z))
+        };
+        for (int axis = 0; axis < 3; ++axis)
+            drawOffsetScaled[axis] +=
+                modularSeatNative[axis] * (4096.0f / hostScale[axis]);
     }
 #endif
 
@@ -6697,6 +6809,18 @@ static void RenderBucket_DrawObj(struct RenderBucketDrawContext *ctx, const stru
             p->p2 = 0;
             p->pad2 = 0;
             setPolyGT3(p);
+#if defined(CTR_NATIVE)
+            if (mesh->additiveEffect)
+            {
+                /* Original CNK TornadoAdd uses additive transparency.
+                 * Opaque B3 ignores the PNG's soft alpha and made almost
+                 * black texels appear as dark outlines. PSX ABR=1 additive
+                 * leaves black invisible while keeping its bright gusts.
+                 * Never applies to another OBJ or the CTR Warp Orb. */
+                p->tpage = 0x20;
+                setSemiTrans(p, 1);
+            }
+#endif
             CtrGpu_WritePackedXY(&p->x0, projectedSxy[0]);
             CtrGpu_WritePackedXY(&p->x1, projectedSxy[1]);
             CtrGpu_WritePackedXY(&p->x2, projectedSxy[2]);

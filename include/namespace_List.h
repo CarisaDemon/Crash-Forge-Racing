@@ -4,19 +4,19 @@
 struct Item
 {
 	// 0x0
-	struct Item *next;
+	struct Item * P32 next;
 
 	// 0x4
-	struct Item *prev;
+	struct Item * P32 prev;
 };
 
 struct LinkedList
 {
 	// 0x0
-	struct Item *first;
+	struct Item * P32 first;
 
 	// 0x4
-	struct Item *last;
+	struct Item * P32 last;
 
 	// 0x8
 	s32 count;

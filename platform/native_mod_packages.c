@@ -35,7 +35,9 @@ static const char *NativeModPackage_IniForType(const char *type)
     if (!SDL_strcasecmp(type, "Kart")) return "kart.ini";
     if (!SDL_strcasecmp(type, "Wheels")) return "wheels.ini";
     if (!SDL_strcasecmp(type, "Music")) return "music.ini";
-    return NULL; /* Tracks are staged until a native LEV/VRM loader exists. */
+    if (!SDL_strcasecmp(type, "Engine")) return "engine.ini";
+    if (!SDL_strcasecmp(type, "Track")) return "track.ini";
+    return NULL;
 }
 
 int NativeModPackage_IsValid(const char *slug, const char *kind)

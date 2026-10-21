@@ -181,7 +181,7 @@ typedef struct
 struct ChannelAttr
 {
 	// 0x0
-	void *spuStartAddr;
+	void * P32 spuStartAddr;
 
 	// as + dr = ASDR (envelope standard)
 
@@ -215,10 +215,10 @@ struct ChannelStats
 		struct
 		{
 			// 0x0
-			struct ChannelStats *next;
+			struct ChannelStats * P32 next;
 
 			// 0x4
-			struct ChannelStats *prev;
+			struct ChannelStats * P32 prev;
 		};
 	};
 
@@ -495,10 +495,10 @@ struct SongSeq
 	int NoteTimeElapsed;
 
 	// 0x14
-	u8 *firstNote;
+	u8 * P32 firstNote;
 
 	// 0x18
-	u8 *currNote;
+	u8 * P32 currNote;
 
 	// 0x1C -- size
 };
@@ -550,13 +550,13 @@ struct Song
 	u8 numSequences;
 
 	// 0x1c array of all cseq sequences in song
-	struct SongSeq *CseqSequences[0x18];
+	struct SongSeq * P32 CseqSequences[0x18];
 };
 
 struct SongSet
 {
 	int numSeqs;
-	u8 *ptrSongSetBits;
+	u8 * P32 ptrSongSetBits;
 };
 
 struct SampleBlockHeader

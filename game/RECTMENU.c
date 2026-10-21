@@ -2,7 +2,21 @@
 #if defined(CTR_NATIVE)
 #include <platform/native_input.h>
 #include <platform/native_input_glyphs.h>
+#include <NativeHangout.h>
 #endif
+
+static char *RECTMENU_GetRowString(u16 stringIndex)
+{
+#if defined(CTR_NATIVE)
+	if ((stringIndex & 0x7fff) == NATIVE_HANGOUT_MENU_CONNECT_STRING)
+		return (char *)"CONNECT PLAYER 1";
+	if ((stringIndex & 0x7fff) == NATIVE_HANGOUT_MENU_DISCONNECT_STRING)
+		return (char *)"DISCONNECT PLAYER 1";
+	if ((stringIndex & 0x7fff) == NATIVE_HANGOUT_MENU_CUSTOMIZATION_STRING)
+		return (char *)"CUSTOMIZATION";
+#endif
+	return sdata->lngStrings[stringIndex & 0x7fff];
+}
 
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80044ef8-0x80044f90.
@@ -829,7 +843,7 @@ void RECTMENU_GetWidth(struct RectMenu *m, s16 *width, b32 boolCheckSubmenu)
 	for (row = m->rows; row->stringIndex != -1; row++)
 	{
 		// width of string in each row
-		lineWidth = DecalFont_GetLineWidth(sdata->lngStrings[row->stringIndex & 0x7fff], fontType);
+		lineWidth = DecalFont_GetLineWidth(RECTMENU_GetRowString(row->stringIndex), fontType);
 
 		// set new width if new max is found
 		if (*width < (lineWidth + 1))
@@ -913,7 +927,7 @@ void RECTMENU_DrawSelf(struct RectMenu *menu, int posX, s16 posY, s16 menuWidth)
 		menu->funcState = RECTMENU_FUNC_STATE_DRAW;
 		if (menu->funcPtr != NULL)
 		{
-			menu->funcPtr(menu);
+			FN32(menu->funcPtr)(menu);
 		}
 	}
 	posX_prev = 2;
@@ -1061,13 +1075,13 @@ LAB_80045e94:
 						{
 							textFlags |= 0x8000;
 						}
-						titleString = sdata->lngStrings[uVar5 & 0x7fff];
+						titleString = RECTMENU_GetRowString(uVar5);
 						index = local_2c;
 					}
 					else
 					{
 						textFlags |= 0x8000;
-						titleString = sdata->lngStrings[uVar5 & 0x7fff];
+						titleString = RECTMENU_GetRowString(uVar5);
 						sVar4 = (s16)(posX + menu->posX_prev + local_30);
 						index = posX_prev;
 					}
@@ -1378,7 +1392,7 @@ int RECTMENU_ProcessInput(struct RectMenu *m)
 				if (m->funcPtr != 0)
 				{
 					RECTMENU_ClearInput();
-					m->funcPtr(m);
+					FN32(m->funcPtr)(m);
 				}
 
 				// Save row
@@ -1409,7 +1423,7 @@ int RECTMENU_ProcessInput(struct RectMenu *m)
 				if (m->funcPtr != 0)
 				{
 					RECTMENU_ClearInput();
-					m->funcPtr(m);
+					FN32(m->funcPtr)(m);
 				}
 			}
 			else if ((m->state & MUTE_SOUND_OF_MOVING_CURSOR) == 0)
@@ -1493,7 +1507,7 @@ void RECTMENU_ProcessState()
 	if ((state & (EXECUTE_FUNCPTR | DISABLE_INPUT_ALLOW_FUNCPTRS)) != 0)
 	{
 		currMenu->funcState = RECTMENU_FUNC_STATE_UPDATE;
-		currMenu->funcPtr(currMenu);
+		FN32(currMenu->funcPtr)(currMenu);
 
 		// check if funcPtr changed "state"
 		state = currMenu->state;

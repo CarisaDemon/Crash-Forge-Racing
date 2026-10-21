@@ -79,7 +79,7 @@ static int s_nctMenuCount=18;
 static void NCT_MenuInitRows(void)
 {
     int index;
-    NativeCustomTracks_Scan();
+    NativeCustomTracks_EnsureScanned();
     s_nctMenuCount = MM_TRACK_SELECT_ARCADE_TRACK_COUNT +
                      NativeCustomTracks_Count();
     memcpy(s_nctMenuRows,D230.arcadeTracks,sizeof(D230.arcadeTracks));
@@ -536,21 +536,10 @@ void MM_TrackSelect_MenuProc(struct RectMenu *menu)
 				// if you are in time trial mode
 				if ((gGT->gameMode1 & TIME_TRIAL) != 0)
 				{
-#if defined(CTR_NATIVE)
-					if (NativeCustomTracks_IsSelected())
-					{
-						/* The retail ghost browser indexes Crash Cove ghost data:
-						   do not mislabel those records as community track ghosts. */
-						sdata->ptrGhostTapePlaying = MEMPACK_AllocHighMem(
-							MM_TRACK_SELECT_GHOST_TAPE_ALLOC_SIZE);
-						if (sdata->ptrGhostTapePlaying)
-							memset(sdata->ptrGhostTapePlaying,0,
-								MM_TRACK_SELECT_GHOST_TAPE_CLEAR_SIZE);
-						sdata->boolReplayHumanGhost=0;
-						sdata->ptrDesiredMenu=&data.menuQueueLoadTrack;
-						return;
-					}
-#endif
+					/* Custom tracks use the same ghost browser as retail. Their original
+					 * replaced level slot is used by the native load/save helpers, so an
+					 * LRGP2 ghost remains associated with its own 0..17 track instead of
+					 * every custom race being mistaken for the Crash Cove shell. */
 					// allocate room at the end of RAM for ghosts
 					sdata->ptrGhostTapePlaying = MEMPACK_AllocHighMem(MM_TRACK_SELECT_GHOST_TAPE_ALLOC_SIZE /*, R230.s_loaded_ghost_data*/);
 
@@ -916,22 +905,28 @@ void MM_TrackSelect_MenuProc(struct RectMenu *menu)
 		rowRect.y = rowY;
 
 		// if you are in time trial mode
-		if ((gGT->gameMode1 & TIME_TRIAL) != 0
-#if defined(CTR_NATIVE)
-			&& (gGT->gameMode1 & BATTLE_MODE ||
-			    currTrack<MM_TRACK_SELECT_ARCADE_TRACK_COUNT)
-#endif
-		)
+		if ((gGT->gameMode1 & TIME_TRIAL) != 0)
 		{
 			// backup level ID
 			s16 previousLevelID = gGT->levelID;
+			s16 timeTrialLevelID = selectMenu[currTrack].levID;
+#if defined(CTR_NATIVE)
+			if (!(gGT->gameMode1 & BATTLE_MODE) &&
+			    currTrack >= MM_TRACK_SELECT_ARCADE_TRACK_COUNT)
+			{
+				int customLevelID = NativeCustomTracks_OriginalLevelIDAt(
+					currTrack - MM_TRACK_SELECT_ARCADE_TRACK_COUNT);
+				if (customLevelID >= 0)
+					timeTrialLevelID = (s16)customLevelID;
+			}
+#endif
 
 			// draw stars if N Tropy or Oxide are beaten,
 			// loop twice
 			for (s32 starIndex = 0; starIndex < MM_TRACK_SELECT_TT_STAR_COUNT; starIndex++)
 			{
-				// set level ID to the level you're hovering on, in the main menu
-				gGT->levelID = selectMenu[currTrack].levID;
+				// Use the custom track's original replaced slot for TT progress.
+				gGT->levelID = timeTrialLevelID;
 
 				// (useless?)
 				GAMEPROG_GetPtrHighScoreTrack();
@@ -992,15 +987,22 @@ void MM_TrackSelect_MenuProc(struct RectMenu *menu)
 			   Mouse hover may highlight other rows, but must not make them
 			   behave like the current selection. */
 			if (((s16)rowIndex == MM_TRACK_SELECT_CENTER_ROW) &&
-			    ((gGT->gameMode1 & TIME_TRIAL) != 0)
-#if defined(CTR_NATIVE)
-			    && ((gGT->gameMode1 & BATTLE_MODE) ||
-			        currTrack<MM_TRACK_SELECT_ARCADE_TRACK_COUNT)
-#endif
-			    )
+			    ((gGT->gameMode1 & TIME_TRIAL) != 0))
 			{
-				// Check if this track has Ghost Data
-				s16 ghostProfileCount = RefreshCard_CountGhostProfilesForLEV(selectMenu[currTrack].levID);
+				// Check if this track has Ghost Data. LRGP2 ghosts retain the
+				// original 0..17 retail slot that the mod replaced.
+				s16 ghostLevelID = selectMenu[currTrack].levID;
+#if defined(CTR_NATIVE)
+				if (!(gGT->gameMode1 & BATTLE_MODE) &&
+				    currTrack >= MM_TRACK_SELECT_ARCADE_TRACK_COUNT)
+				{
+					int customLevelID = NativeCustomTracks_OriginalLevelIDAt(
+						currTrack - MM_TRACK_SELECT_ARCADE_TRACK_COUNT);
+					if (customLevelID >= 0)
+						ghostLevelID = (s16)customLevelID;
+				}
+#endif
+				s16 ghostProfileCount = RefreshCard_CountGhostProfilesForLEV(ghostLevelID);
 
 				// If this track has Ghost Data
 				if (ghostProfileCount != 0)

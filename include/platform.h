@@ -10,6 +10,17 @@ struct PlatformMempackArena
 	int backingSize;
 };
 
+/* Persistent PC-wide language. 0=en, 1=es, 2=fr, 3=de, 4=it.
+ * Old installations with no language key receive the same first-launch
+ * picker as new ones. Loading/updating other settings never marks it chosen. */
+int Platform_GetGameLanguage(void);
+int Platform_HasGameLanguage(void);
+void Platform_SetGameLanguage(int lang);
+void NativeLocalization_SetLanguage(int lang);
+int NativeLocalization_GetLanguage(void);
+const char *NativeLocalization_GetLanguageName(int lang);
+char *NativeLocalization_Translate(const char *text);
+
 void Platform_Init(const char *title, int width, int height);
 void Platform_Shutdown(void);
 void Platform_RequestExit(void);
@@ -35,6 +46,21 @@ int Platform_PollInput(void);
 #if defined(CTR_NATIVE)
 int Platform_GetWideMode(void);
 void Platform_SetWideMode(int enabled);
+/* Independent presentation aspect, without changing render resolution. */
+enum PlatformAspectRatioMode
+{
+	PLATFORM_ASPECT_4_3=0,
+	PLATFORM_ASPECT_16_9,
+	PLATFORM_ASPECT_16_10,
+	PLATFORM_ASPECT_21_9,
+	PLATFORM_ASPECT_32_9,
+	PLATFORM_ASPECT_5_4,
+	PLATFORM_ASPECT_RATIO_COUNT
+};
+int Platform_GetAspectRatioMode(void);
+void Platform_GetAspectRatioSize(int mode,int *width,int *height);
+const char *Platform_GetAspectRatioLabel(int mode);
+void Platform_SetAspectRatioMode(int mode);
 
 enum PlatformFPSLimitMode
 {
@@ -96,12 +122,17 @@ void Platform_SetFullscreenMode(int enabled);
 struct CameraDC;
 struct PushBuffer;
 int Platform_DebugFreecamIsEnabled(void);
+void Platform_SetDebugFreecamEnabled(int enabled);
 int Platform_DebugFreecamConsumesKey(int key);
 void Platform_DebugFreecamUpdate(struct CameraDC *cDC, struct PushBuffer *pb);
 int Platform_GetSavedAudioVolume(int type, int fallback);
 void Platform_SaveAudioVolume(int type, int value);
 int Platform_GetSavedAudioMode(int fallback);
 void Platform_SaveAudioMode(int enabled);
+/* 0=retail cadence, 1=more (default), 2=frequent. Config voice_frequency= */
+int Platform_GetVoiceFrequency(void);
+int Platform_GetHearOtherRacers(void);
+void Platform_SetHearOtherRacers(int enabled);
 int Platform_GetSavedVibrationMask(void);
 void Platform_SaveVibrationMask(int mask);
 const char *Platform_GetPlayerName(int playerIndex);

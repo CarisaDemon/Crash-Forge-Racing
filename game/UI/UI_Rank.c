@@ -357,6 +357,19 @@ void UI_DrawRankedDrivers(void)
 
 			int posX = nextTrackX + UI_RANK_TRACK_ICON_POS_X_OFFSET;
 			int posY = UI_RANK_TRACK_ICON_POS_Y;
+#if defined(CTR_NATIVE)
+			/* 2P widescreen: use the central vertical separator as the
+			 * race progress graph. Bottom=start; top=finish. */
+			if(numPlyr==2 && Platform_GetWideMode())
+			{
+				int progress=(int)(s16)nextTrackX;
+				if(progress<0)progress=0;
+				if(progress>UI_RANK_TRACK_SCREEN_DIVISOR)
+					progress=UI_RANK_TRACK_SCREEN_DIVISOR;
+				posX=248;
+				posY=185-(progress*153)/UI_RANK_TRACK_SCREEN_DIVISOR;
+			}
+#endif
 
 			DecalHUD_DrawPolyGT4(gGT->ptrIcons[data.MetaDataCharacters[CharacterRegistry_GetIconRetailID(data.characterIDs[driverIndex])].iconID], posX, posY,
 
@@ -445,6 +458,17 @@ void UI_DrawRankedDrivers(void)
 
 			int posX = (remainingProgress / trackScreenUnit) + UI_RANK_TRACK_ICON_POS_X_OFFSET;
 			int posY = UI_RANK_TRACK_ICON_POS_Y;
+#if defined(CTR_NATIVE)
+			if(numPlyr==2 && Platform_GetWideMode())
+			{
+				int progress=posX-UI_RANK_TRACK_ICON_POS_X_OFFSET;
+				if(progress<0)progress=0;
+				if(progress>UI_RANK_TRACK_SCREEN_DIVISOR)
+					progress=UI_RANK_TRACK_SCREEN_DIVISOR;
+				posX=248;
+				posY=185-(progress*153)/UI_RANK_TRACK_SCREEN_DIVISOR;
+			}
+#endif
 
 			DecalHUD_DrawWeapon(
 			    // warpball icon

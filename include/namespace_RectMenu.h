@@ -178,10 +178,10 @@ struct RectMenu
 	u32 state;
 
 	// 0xC
-	struct MenuRow *rows;
+	struct MenuRow * P32 rows;
 
 	// 0x10
-	void (*funcPtr)(struct RectMenu *m);
+	void (* P32 funcPtr)(struct RectMenu *m);
 
 	// 0x14
 	// text color, box color, etc
@@ -209,10 +209,10 @@ struct RectMenu
 	s16 height;
 
 	// 0x24
-	struct RectMenu *ptrNextBox_InHierarchy;
+	struct RectMenu * P32 ptrNextBox_InHierarchy;
 
 	// 0x28
-	struct RectMenu *ptrPrevBox_InHierarchy;
+	struct RectMenu * P32 ptrPrevBox_InHierarchy;
 
 	// End of struct
 	// in UsaRetail, full struct

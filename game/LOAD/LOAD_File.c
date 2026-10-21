@@ -299,7 +299,7 @@ void LOAD_ReadFileASyncCallback(u8 result, u8 *unk)
 
 		if (sdata->callbackCdReadSuccess != NULL)
 		{
-			sdata->callbackCdReadSuccess(lqs);
+			FN32(sdata->callbackCdReadSuccess)(lqs);
 		}
 	}
 

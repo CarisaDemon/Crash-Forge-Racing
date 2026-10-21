@@ -8,7 +8,19 @@ enum NativeHUDDriftMeterMode
 	NATIVE_HUD_DRIFT_OFF = 0,
 	NATIVE_HUD_DRIFT_CTR_CENTERED = 1,
 	NATIVE_HUD_DRIFT_CNK_CENTERED = 2,
+	NATIVE_HUD_DRIFT_CNK_3D = 3,
 };
+
+enum NativeHUDCNKHeight
+{
+    NATIVE_HUD_CNK_HEIGHT_HIGH = 0,
+    NATIVE_HUD_CNK_HEIGHT_LOW = 1,
+};
+
+/* For old ctr_hud.cfg without cnk_meter_height, preserve CNK 2D's
+ * original vertical centre and CNK 3D's current lowered preview. */
+int NativeHUD_GetCNKMeterHeight(void);
+void NativeHUD_SetCNKMeterHeight(int height);
 
 #define NATIVE_HUD_RETAIL_SPEEDOMETER_OFFSET_Y (-4)
 

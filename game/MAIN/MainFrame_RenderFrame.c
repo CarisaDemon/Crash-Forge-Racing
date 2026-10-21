@@ -152,20 +152,47 @@ static void NativeHud_EndDiscard(
 
 static void NativeHud_Force3DModelsHidden(void)
 {
+	const struct GameTracker *gGT = sdata->gGT;
+	u32 mode;
+
 	if (!Platform_GetHudHidden())
+		return;
+
+	/* UI_INSTANCE_InitAll re-births these only in their own modes and nobody
+	 * clears them, so after Adventure -> Arcade they point into the reset
+	 * instance pool. Touch them only where retail owns them, never mid-load. */
+	if (gGT == NULL || sdata->Loading.stage != LOAD_IDLE)
+		return;
+	mode = gGT->gameMode1;
+	if ((mode & CRYSTAL_CHALLENGE) != 0)
+	{
+		if (sdata->ptrHudCrystal != NULL) sdata->ptrHudCrystal->flags |= HIDE_MODEL;
+		return;
+	}
+	if ((mode & ADVENTURE_MODE) == 0 ||
+	    (mode & (ADVENTURE_ARENA | RELIC_RACE | TIME_TRIAL)) != 0)
 		return;
 
 	if (sdata->ptrHudC != NULL) sdata->ptrHudC->flags |= HIDE_MODEL;
 	if (sdata->ptrHudT != NULL) sdata->ptrHudT->flags |= HIDE_MODEL;
 	if (sdata->ptrHudR != NULL) sdata->ptrHudR->flags |= HIDE_MODEL;
-	if (sdata->ptrHudCrystal != NULL) sdata->ptrHudCrystal->flags |= HIDE_MODEL;
 }
 #endif
 
 void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamepads)
 {
+#if defined(CTR_NATIVE)
+	/* Detect a 16:9 <-> 4:3 change even while paused in Options, before
+	 * rendering the cameras, sky, decals or independent HUD layers. */
+	extern void MainInit_NativeSyncTwoPlayerLayout(struct GameTracker *);
+	MainInit_NativeSyncTwoPlayerLayout(gGT);
+#endif
+
 	struct Level *lev = gGT->level1;
 	struct mesh_info *ptr_mesh_info = 0;
+
+	/* Modo PC (solo build de prueba): arranca la lista de tramos "mundo 3D". */
+	NPR_BEGIN_FRAME();
 
 	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_MAINFRAME_SETUP);
 #if defined(CTR_NATIVE)
@@ -305,11 +332,15 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_MAINFRAME_EFFECTS);
 
 	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_MAINFRAME_EXECUTE_INSTANCES);
+	NPR_WORLD_BEGIN(gGT); /* karts, personajes y objetos 3D */
 	RenderBucket_ExecuteAllInstances(gGT);
+	NPR_WORLD_END(gGT);
 	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_MAINFRAME_EXECUTE_INSTANCES);
 
 	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_MAINFRAME_EFFECTS);
+	NPR_WORLD_BEGIN(gGT); /* ruedas */
 	RenderAllTires(gGT);
+	NPR_WORLD_END(gGT);
 
 	RenderAllShadows(gGT);
 
@@ -437,7 +468,8 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 			{
 				const int limitMode = Platform_GetFPSLimitMode();
 				if (limitMode == PLATFORM_FPS_LIMIT_UNLIMITED)
-					snprintf(fpsText, sizeof(fpsText), "FPS: %d / Unlimited", fps);
+					snprintf(fpsText, sizeof(fpsText), "FPS: %d / %s", fps,
+					         NativeLocalization_Translate("Unlimited"));
 				else if (limitMode == PLATFORM_FPS_LIMIT_DISPLAY_HZ)
 					snprintf(fpsText, sizeof(fpsText), "FPS: %d / %d HZ",
 						fps, Platform_GetDisplayRefreshFPS());
@@ -473,22 +505,22 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 	}
 
 	/*
-	 * Crash Forge: Racing - public experimental build stamp.
-	 * Render from the native UI pass so the label remains visible in
-	 * submenus and at any host FPS (the 30 Hz menu logic is unchanged).
-	 * __DATE__/__TIME__ refer to this binary's actual compilation, not
-	 * the current clock. The build number is shared with --version.
+	 * Crash Forge: Racing - compact title-only experimental build stamp.
+	 * Two 62.5%-size rows, y=194/202, fit within the 216px title viewport.
+	 * Compile date/time is in the official Windows build host's Argentina
+	 * local time. Mark the zone explicitly rather than confusing users.
+	 * Never draw this on submenus, Mods, Options or menu transitions.
 	 */
-	if ((gGT->gameMode1 & MAIN_MENU) != 0 &&
-	    LOAD_IsOpen_MainMenu() &&
-	    sdata->ptrActiveMenu != NULL)
+	if (MM_NativeTitleRootVisible())
 	{
 		static const char buildLabel[] =
-			"EXPERIMENTAL  BUILD v" CTR_NATIVE_VERSION;
+			"EXPERIMENTAL v" CTR_NATIVE_VERSION;
 		static const char dateLabel[] =
-			__DATE__ "  " __TIME__;
-		DecalFont_DrawLine(buildLabel, 8, 198, FONT_SMALL, ORANGE);
-		DecalFont_DrawLine(dateLabel, 8, 211, FONT_SMALL, WHITE);
+			__DATE__ " " __TIME__ " ART UTC-3";
+		DecalFont_DrawLineScaledNative(buildLabel, 8, 194, FONT_SMALL,
+		                               ORANGE, FP(0.625));
+		DecalFont_DrawLineScaledNative(dateLabel, 8, 202, FONT_SMALL,
+		                               WHITE, FP(0.625));
 	}
 
 	/* Keep menu chrome usable while paused/options are open, but remove it
@@ -505,6 +537,29 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 
 #ifndef CTR_NATIVE
 	RenderFMV();
+#endif
+
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	/* Diagnostic: sample the packet arena consumed before GPU submission.
+	 * Only the high-water mark is logged every 1200 rendered frames. */
+	if (gGT->backBuffer != NULL && gGT->backBuffer->primMem.start != NULL)
+	{
+		static u32 primFrames = 0, primNearFull = 0;
+		static size_t primPeak = 0;
+		const struct PrimMem *pm = &gGT->backBuffer->primMem;
+		const size_t used = (size_t)((uintptr_t)pm->cursor - (uintptr_t)pm->start);
+		if (used > primPeak) primPeak = used;
+		if (pm->capacityBytes != 0 && used >= (size_t)pm->capacityBytes * 9u / 10u) ++primNearFull;
+		if (++primFrames >= 1200)
+		{
+			Platform_Log("[PRIMMEM] level=%d mode=0x%x used=%u peak=%u capacity=%u near90_frames=%u\n",
+				gGT->levelID, (unsigned)gGT->gameMode1,
+				(unsigned)used, (unsigned)primPeak,
+				(unsigned)pm->capacityBytes, (unsigned)primNearFull);
+			primFrames = primNearFull = 0;
+			primPeak = 0;
+		}
+	}
 #endif
 
 	RenderSubmit(gGT);
@@ -768,6 +823,29 @@ void RenderAllHUD(struct GameTracker *gGT)
 
 	hudFlags = gGT->hudFlags;
 	gameMode1 = gGT->gameMode1;
+
+#if defined(CTR_NATIVE)
+	/* Hangout Customization owns the full UI surface. Keep the underlying HUD
+	 * state intact, but skip drawing it while the selector or its flag wipe is
+	 * active so returning to Hangout requires no state reconstruction. */
+	if (NativeHangout_ShouldHideGameplayHud())
+		return;
+
+	/* Never draw racing, lap, ranking or crate HUD on the native main
+	 * title screen. A stale custom-track selection previously re-armed
+	 * HUD_FLAG_RACE_HUD during MainGameStart_Initialize on return. */
+	if (gGT->levelID == MAIN_MENU_LEVEL &&
+	    (gameMode1 & MAIN_MENU) != 0)
+	{
+		if ((hudFlags & HUD_FLAG_RACE_HUD) != 0)
+		{
+			Platform_Log("[MENU HUD] cleared stale race HUD on title\n");
+			gGT->hudFlags &=
+				~(HUD_FLAG_RACE_HUD | HUD_FLAG_RENDER_LESS);
+		}
+		return;
+	}
+#endif
 
 	// if drawing intro-race title bars
 	if ((gGT->numPlyrCurrGame == 1) && ((hudFlags & HUD_FLAG_INTRO_RACE_TITLE_BARS) != 0) && ((gameMode1 & START_OF_RACE) != 0))
@@ -1271,8 +1349,10 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 
 			// 226-229
 			MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_LEVEL_DRAW_OVR);
+			NPR_WORLD_BEGIN(gGT); /* pista (el cielo queda afuera) */
 			DrawLevelOvr1P(&gGT->LevRenderLists[0], pushBuffer, (struct BSP *)ptr_mesh_info, &gGT->backBuffer->primMem, gGT->visMem1->visFaceList[0],
 			               level1->ptr_tex_waterEnvMap); // waterEnvMap?
+			NPR_WORLD_END(gGT);
 			MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_LEVEL_DRAW_OVR);
 		}
 #if defined(CTR_NATIVE)
@@ -1317,9 +1397,11 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 		}
 
 		// 226-229
+		NPR_WORLD_BEGIN(gGT);
 		DrawLevelOvr2P(&gGT->LevRenderLists[0], &gGT->pushBuffer[0], (struct BSP *)ptr_mesh_info, &gGT->backBuffer->primMem, gGT->visMem1->visFaceList[0],
 		               gGT->visMem1->visFaceList[1],
 		               level1->ptr_tex_waterEnvMap); // waterEnvMap?
+		NPR_WORLD_END(gGT);
 
 		goto SkyboxGlow;
 	}
@@ -1354,6 +1436,7 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 		                                           gGT->visMem1->bspList[i]);
 	}
 
+	NPR_WORLD_BEGIN(gGT);
 	if (numPlyrCurrGame == 3)
 	{
 		// 226-229
@@ -1369,6 +1452,7 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 		               gGT->visMem1->visFaceList[1], gGT->visMem1->visFaceList[2], gGT->visMem1->visFaceList[3],
 		               level1->ptr_tex_waterEnvMap); // waterEnvMap?
 	}
+	NPR_WORLD_END(gGT);
 
 SkyboxGlow:
 
@@ -1422,8 +1506,13 @@ void WindowDivsionLines(struct GameTracker *gGT)
 
 	numPlyrCurrGame = gGT->numPlyrCurrGame;
 
-	// horizontal bar
-	if (numPlyrCurrGame > 1)
+	// horizontal bar: retail 2P 4:3, 3P/4P both aspects.
+	// Widescreen two-player games divide VERTICALLY instead.
+	if (numPlyrCurrGame > 1
+#if defined(CTR_NATIVE)
+		&& !(numPlyrCurrGame==2 && Platform_GetWideMode())
+#endif
+	)
 	{
 		p = gGT->backBuffer->primMem.cursor;
 
@@ -1452,8 +1541,12 @@ void WindowDivsionLines(struct GameTracker *gGT)
 		gGT->backBuffer->primMem.cursor = (void *)(p + 1);
 	}
 
-	// vertical bar
-	if (numPlyrCurrGame > 2)
+	// vertical bar: standard 3P/4P plus widescreen 2P.
+	if (numPlyrCurrGame > 2
+#if defined(CTR_NATIVE)
+		|| (numPlyrCurrGame==2 && Platform_GetWideMode())
+#endif
+	)
 	{
 #if 0
 		gGT->drivers[0]->numWumpas = DRIVER_WUMPA_JUICED_COUNT;

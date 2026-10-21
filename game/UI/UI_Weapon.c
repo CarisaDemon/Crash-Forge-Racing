@@ -89,6 +89,11 @@ void UI_Weapon_DrawSelf(s16 posX, s16 posY, s16 scale, struct Driver *d)
 	if (itemID != UI_WEAPON_ITEM_ROULETTE)
 	{
 		iconID = itemID + UI_WEAPON_ICON_BASE;
+#if defined(CTR_NATIVE)
+		/* QA placeholder until CNK Tornado Top HUD sprite is extracted. */
+		if (itemID == HELD_ITEM_CNK_TORNADO)
+			iconID = UI_WEAPON_ITEM_WARPBALL + UI_WEAPON_ICON_BASE;
+#endif
 
 		// character ID
 		characterID = data.characterIDs[d->driverID];

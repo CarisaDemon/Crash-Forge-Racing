@@ -1,4 +1,9 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <RacerLoadout.h>
+#include <VehiclePartRegistry.h>
+#include <stdlib.h>
+#endif
 
 enum
 {
@@ -352,6 +357,37 @@ void VehFire_Increment(struct Driver *driver, int reserves, u32 type, int fireLe
 			// Initial fire instances are billboarded but hidden until the turbo tick reveals them.
 			turboInst1->flags = turboInst1->flags | addFlags | VEH_FIRE_INITIAL_INSTANCE_FLAGS;
 			turboInst2->flags = turboInst2->flags | addFlags | VEH_FIRE_INITIAL_INSTANCE_FLAGS;
+
+			/* Native custom karts may define additional nozzles. Spawn one
+			 * independent animated 3D effect for each outlet beyond retail
+			 * left/right. Partial pool failure degrades gracefully to smoke. */
+			turboObj->nativeExtraExhaust = NULL;
+			turboObj->nativeExtraExhaustCount = 0;
+			{
+			    int kartID = RacerLoadout_GetEffectiveKart((int)driver->driverID);
+			    int nozzleCount = VehiclePartRegistry_GetExhaustCount(kartID);
+			    int extraCount = nozzleCount > 2 ? nozzleCount - 2 : 0;
+			    if (extraCount > VEHICLE_PART_MAX_EXHAUSTS - 2)
+			        extraCount = VEHICLE_PART_MAX_EXHAUSTS - 2;
+			    if (extraCount > 0)
+			    {
+			        turboObj->nativeExtraExhaust =
+						calloc((size_t)extraCount, sizeof(*turboObj->nativeExtraExhaust));
+			        if (turboObj->nativeExtraExhaust != NULL)
+			        {
+						for (int idx = 0; idx < extraCount; ++idx)
+						{
+						    struct Instance *extra = INSTANCE_Birth3D(
+						        gGT->modelPtr[STATIC_TURBO_EFFECT],
+						        "exhaust_extra", turboThread);
+						    if (extra == NULL) break;
+						    extra->flags |= addFlags | VEH_FIRE_INITIAL_INSTANCE_FLAGS;
+						    turboObj->nativeExtraExhaust[idx] = extra;
+						    turboObj->nativeExtraExhaustCount++;
+						}
+			        }
+			    }
+			}
 		}
 #else
 		turboObj = 0;

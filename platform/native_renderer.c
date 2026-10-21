@@ -609,8 +609,66 @@ void NativeRenderer_UpdateSwapIntervalState(int swapInterval)
 	NativeRenderer_ApplySwapIntervalState(swapInterval, 0, "normal");
 }
 
+#if defined(CTR_PC_RENDER_QA)
+/* Modo PC (build de prueba): comprobar UNA vez si la ventana tiene de verdad
+ * buffer de profundidad. En la RX570 hubo dudas (ver native_level_pc.c), y sin
+ * profundidad el Modo PC no tendria ningun efecto. Prueba real: limpiar la
+ * profundidad a 0.25 y leer un pixel de vuelta. */
+static void NativeRenderer_PcRenderProbeDepth(void)
+{
+	static int done;
+	int sdlDepth = -1, sdlStencil = -1;
+	GLint prevFbo = 0, type = GL_NONE, bits = 0;
+	GLenum queryErr, readErr;
+	GLboolean oldMask = GL_TRUE;
+	GLfloat oldClear = 1.0f, z = -1.0f;
+	const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+	int works;
+
+	if (done)
+		return;
+	done = 1;
+
+	SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE, &sdlDepth);
+	SDL_GL_GetAttribute(SDL_GL_STENCIL_SIZE, &sdlStencil);
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	while (glGetError() != GL_NO_ERROR) {}
+	glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH,
+		GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
+	if (type != GL_NONE)
+		glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH,
+			GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE, &bits);
+	queryErr = glGetError();
+
+	glGetBooleanv(GL_DEPTH_WRITEMASK, &oldMask);
+	glGetFloatv(GL_DEPTH_CLEAR_VALUE, &oldClear);
+	glDisable(GL_SCISSOR_TEST);
+	glDepthMask(GL_TRUE);
+	glClearDepth(0.25);
+	glClear(GL_DEPTH_BUFFER_BIT);
+	glReadPixels(g_windowWidth / 2, g_windowHeight / 2, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &z);
+	readErr = glGetError();
+	glClearDepth((GLdouble)oldClear);
+	glDepthMask(oldMask);
+	if (scissor)
+		glEnable(GL_SCISSOR_TEST);
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFbo);
+
+	works = (readErr == GL_NO_ERROR) && (z > 0.24f) && (z < 0.26f);
+	NativePcRender_SetDepthStatus(works);
+	Platform_Log("[PC RENDER] buffer de profundidad: %s (SDL depth=%d stencil=%d, GL tipo=0x%x bits=%d err=0x%x, prueba=%.3f err=0x%x)\n",
+	             works ? "SI" : "NO (sin esto el Modo PC no cambia nada)",
+	             sdlDepth, sdlStencil, (unsigned)type, (int)bits, (unsigned)queryErr,
+	             (double)z, (unsigned)readErr);
+}
+#endif
+
 void NativeRenderer_BeginScene(void)
 {
+#if defined(CTR_PC_RENDER_QA)
+	NativeRenderer_PcRenderProbeDepth();
+#endif
 	NativeRenderer_GpuTimerBeginFrame();
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_RENDERER_BEGIN_SCENE);
 	s_lastBoundTexture = 0;
@@ -619,7 +677,24 @@ void NativeRenderer_BeginScene(void)
 	NativeRenderer_ClearPresentationBars();
 	s_experimentalDepthEligible = 0;
 	NativeRenderer_EnableDepth(0);
+#if defined(CTR_PC_RENDER_QA)
+	if (NativePcRender_DiagActive())
+	{
+		GLint box[4] = {0, 0, 0, 0};
+		GLboolean mask = GL_FALSE;
+		glGetIntegerv(GL_SCISSOR_BOX, box);
+		glGetBooleanv(GL_DEPTH_WRITEMASK, &mask);
+		Platform_Log("[PC DIAG] frame=%u inicio_escena: limpia_profundidad=%d recorte=%d (%d,%d %dx%d) escritura_prof=%d viewport=%d,%d %dx%d\n",
+		             (unsigned)NativePcRender_DiagFrameId(),
+		             (s_experimentalZBufferEnabled || NativePcRender_IsActive()) ? 1 : 0,
+		             (int)glIsEnabled(GL_SCISSOR_TEST), (int)box[0], (int)box[1], (int)box[2], (int)box[3],
+		             (int)mask, s_presentViewport.x, s_presentViewport.y, s_presentViewport.w, s_presentViewport.h);
+		NativePcRender_DiagCountLine();
+	}
+	if (s_experimentalZBufferEnabled || NativePcRender_IsActive())
+#else
 	if (s_experimentalZBufferEnabled)
+#endif
 		glClear(GL_STENCIL_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	else
 		glClear(GL_STENCIL_BUFFER_BIT);
@@ -748,8 +823,75 @@ static int NativeRenderer_LevelPCShouldCaptureSnapshot(void)
 }
 #endif
 
+#if defined(CTR_NATIVE) && defined(CTR_PC_RENDER_QA)
+/* Modo PC: captura del frame terminado a media resolucion (promedio 2x2)
+ * para comparar PC vs clasico sin llenar el disco (~1/4 de una captura). */
+void NativeRenderer_PcRenderCaptureHalfPPM(const char *path)
+{
+	const int w = s_presentViewport.w, h = s_presentViewport.h;
+	if (w < 16 || h < 16 || w > 8192 || h > 8192)
+	{
+		Platform_Log("[PC RENDER] captura omitida: viewport invalido %dx%d\n", w, h);
+		return;
+	}
+	const int hw = w / 2, hh = h / 2;
+	const size_t stride = (size_t)w * 3u;
+	u8 *pixels = (u8 *)malloc(stride * (size_t)h);
+	u8 *half = (u8 *)malloc((size_t)hw * (size_t)hh * 3u);
+	if (!pixels || !half)
+	{
+		free(pixels);
+		free(half);
+		return;
+	}
+	GLint oldPack = 4;
+	glGetIntegerv(GL_PACK_ALIGNMENT, &oldPack);
+	(void)glGetError();
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(s_presentViewport.x, s_presentViewport.y, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+	const GLenum err = glGetError();
+	glPixelStorei(GL_PACK_ALIGNMENT, oldPack);
+	if (err == GL_NO_ERROR)
+	{
+		for (int y = 0; y < hh; y++)
+		{
+			/* glReadPixels entrega de abajo hacia arriba; el PPM va de arriba hacia abajo */
+			const u8 *r0 = pixels + (size_t)(h - 1 - 2 * y) * stride;
+			const u8 *r1 = pixels + (size_t)(h - 2 - 2 * y) * stride;
+			u8 *o = half + (size_t)y * (size_t)hw * 3u;
+			for (int x = 0; x < hw; x++)
+			{
+				for (int c = 0; c < 3; c++)
+				{
+					const int s = r0[(2 * x) * 3 + c] + r0[(2 * x + 1) * 3 + c] +
+					              r1[(2 * x) * 3 + c] + r1[(2 * x + 1) * 3 + c];
+					o[x * 3 + c] = (u8)((s + 2) / 4);
+				}
+			}
+		}
+		FILE *f = fopen(path, "wb");
+		if (f)
+		{
+			fprintf(f, "P6\n%d %d\n255\n", hw, hh);
+			fwrite(half, 1, (size_t)hw * (size_t)hh * 3u, f);
+			fclose(f);
+			Platform_Log("[PC RENDER] captura A/B %s (%dx%d)\n", path, hw, hh);
+		}
+	}
+	else
+	{
+		Platform_LogError("[PC RENDER] no se pudo leer el framebuffer (GL=%u)\n", (unsigned)err);
+	}
+	free(pixels);
+	free(half);
+}
+#endif
+
 void NativeRenderer_EndScene(void)
 {
+#if defined(CTR_NATIVE) && defined(CTR_PC_RENDER_QA)
+	NativePcRender_EndScene();
+#endif
 #if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
 	const int pcSnapshot=NativeRenderer_LevelPCShouldCaptureSnapshot();
 	if (pcSnapshot)
@@ -829,13 +971,16 @@ internal void NativeRenderer_SetPresentationAspect(int width, int height)
 	s_presentAspectH = height / divisor;
 }
 
+void NativeRenderer_SetDisplayAspectSize(int width,int height)
+{
+	/* Aspect selection is independent of window pixel resolution. */
+	NativeRenderer_SetPresentationAspect(width,height);
+	NativeRenderer_UpdatePresentationViewport();
+}
+
 void NativeRenderer_SetDisplayAspect(int wide)
 {
-	/* Aspect ratio is presentation-only. Window/backbuffer resolution is a
-	   separate setting in v2.0.0, so switching 4:3/16:9 must not secretly
-	   resize the host window anymore. */
-	NativeRenderer_SetPresentationAspect(wide ? 16 : 4, wide ? 9 : 3);
-	NativeRenderer_UpdatePresentationViewport();
+	NativeRenderer_SetDisplayAspectSize(wide ? 16 : 4, wide ? 9 : 3);
 }
 
 internal void NativeRenderer_UpdatePresentationViewport(void)
@@ -1194,9 +1339,21 @@ const char *gte_shader_32_rgba = "	uniform sampler2D s_texture;\n"
                                  "		fragColor.a = float(psxDrawMaskSet);\n"
                                  "	}\n";
 
+#if defined(CTR_PC_RENDER_QA)
+/* Modo PC etapa 1: profundidad reciproca (1 - 2*8/SZ) en vez de lineal.
+ * La placa de video interpola la profundidad en linea recta sobre la
+ * pantalla; la distancia real NO varia asi dentro de un triangulo grande,
+ * pero 1/distancia si. Con la version lineal, el medio de un poligono
+ * grande de pista "queda mas lejos" de lo real y deja ver cosas que tapa.
+ * Mismo orden en los vertices (nadie cambia de lugar), interior correcto. */
+#define GTE_PERSPECTIVE_CORRECTION                                                                                 \
+	"	gl_Position = Projection * vec4(a_position.xy + (a_extra.zw * (1.0 / 256.0)), 0.0, 1.0);\n"             \
+	"		if (a_depth > 0.5) gl_Position.z = clamp(1.0 - (16.0 / a_depth), -0.9999, 0.9999);\n"
+#else
 #define GTE_PERSPECTIVE_CORRECTION                                                                                 \
 	"	gl_Position = Projection * vec4(a_position.xy + (a_extra.zw * (1.0 / 256.0)), 0.0, 1.0);\n"             \
 	"		if (a_depth > 0.5) gl_Position.z = clamp((a_depth / 65535.0) * 2.0 - 1.0, -0.9999, 0.9999);\n"
+#endif
 
 #define GTE_VERTEX_SHADER                                                                                          \
 	"	attribute vec4 a_position;\n"                                                                                \
@@ -2890,10 +3047,19 @@ if (swapMs >= 8.0)
 
 internal void NativeRenderer_EnableDepth(int enable)
 {
+#if defined(CTR_PC_RENDER_QA)
+	/* En Modo PC el Z-buffer real funciona aunque el Z experimental
+	 * (Ctrl+Alt+Shift+Z) este apagado. */
+	const int active =
+		((s_experimentalZBufferEnabled != 0) || NativePcRender_IsActive()) &&
+		(s_experimentalDepthEligible != 0) &&
+		(enable != 0);
+#else
 	const int active =
 		(s_experimentalZBufferEnabled != 0) &&
 		(s_experimentalDepthEligible != 0) &&
 		(enable != 0);
+#endif
 
 	if (s_previousDepthMode == active)
 		return;

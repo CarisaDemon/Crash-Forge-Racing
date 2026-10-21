@@ -73,6 +73,12 @@ void CTR_Box_DrawSolidBox(RECT *r, Color color, uint32_t *ot);
 // decal
 u32 DecalFont_boolRacingWheel(void);
 void DecalFont_DrawLine(char *str, int posX, int posY, s16 fontType, int flags);
+#ifdef CTR_NATIVE
+void DecalFont_DrawLineScaledNative(char *str, int posX, int posY, s16 fontType, int flags, s16 scale);
+/* Orange 80-percent racer-loadout captions with symmetric arrows. */
+void DecalFont_DrawLineNativeScaled(char *str, int x, int y,
+                                    s16 fontType, int flags, int scalePercent);
+#endif
 void DecalFont_DrawLineStrlen(char *str, s16 len, int posX, s16 posY, s16 fontType, int flags);
 int DecalFont_DrawMultiLine(char *str, int posX, int posY, int maxPixLen, s16 fontType, int flags);
 void DecalGlobal_EmptyFunc_MainFrame_ResetDB(void);
@@ -428,7 +434,9 @@ void MainFreeze_SafeAdvDestroy(void);
 void MainFreeze_MenuPtrOptions(struct RectMenu *menu);
 #ifdef CTR_NATIVE
 void MainFreeze_OpenTitleOptions(struct RectMenu *menu);
+void MainFreeze_OpenLanguageSetup(struct RectMenu *menu);
 int MainFreeze_TitleOptionsIsOpen(void);
+int MM_NativeTitleRootVisible(void);
 #endif
 void MainFreeze_MenuPtrQuit(struct RectMenu *menu);
 void MainFreeze_MenuPtrDefault(struct RectMenu *menu);
@@ -731,6 +739,9 @@ struct Particle *VehEmitter_Exhaust(struct Driver *driver, VECTOR *pos, VECTOR *
 void VehEmitter_Sparks_Ground(struct Driver *driver, struct ParticleEmitter *emSet);
 void VehEmitter_Terrain_Ground(struct Driver *driver, struct ParticleEmitter *emSet);
 void VehEmitter_Sparks_Wall(struct Driver *driver, struct ParticleEmitter *emSet);
+#if defined(CTR_NATIVE)
+void VehEmitter_PreviewExhaust(struct Driver *driver);
+#endif
 void VehEmitter_DriverMain(struct Thread *thread, struct Driver *driver);
 int VehFrameInst_GetStartFrame(int animIndex, int numFrames);
 u32 VehFrameInst_GetNumAnimFrames(struct Instance *inst, int animIndex);
@@ -776,6 +787,10 @@ void VehPhysProc_SpinFirst_PhysLinear(struct Thread *t, struct Driver *d);
 void VehPhysProc_SpinFirst_PhysAngular(struct Thread *t, struct Driver *d);
 void VehPhysProc_SpinFirst_InitSetUpdate(struct Thread *t, struct Driver *d);
 void VehPhysProc_SpinFirst_Init(struct Thread *t, struct Driver *d);
+#if defined(CTR_NATIVE)
+/* Mark next spin initializer as a CNK Tornado hit, without modifying retail damage. */
+void VehPhysProc_CNKTornadoMarkSpin(struct Driver *d);
+#endif
 
 void VehPhysProc_SpinLast_Update(struct Thread *t, struct Driver *d);
 void VehPhysProc_SpinLast_PhysLinear(struct Thread *t, struct Driver *d);
@@ -860,6 +875,10 @@ void MM_Characters_BackupIDs(void);
 void MM_Characters_PreventOverlap(void);
 void MM_Characters_RestoreIDs(void);
 void MM_Characters_HideDrivers(void);
+#if defined(CTR_NATIVE)
+void MM_Characters_BeginHangoutCustomization(void);
+void MM_Characters_FinishHangoutCustomization(int apply);
+#endif
 void MM_Characters_MenuProc(struct RectMenu *unused);
 void MM_TrackSelect_Video_SetDefaults(void);
 void MM_TrackSelect_Video_State(b32 resetPreview);
@@ -1023,6 +1042,13 @@ void RB_Warpball_SetTargetDriver(struct TrackerWeapon *tw);
 void RB_Warpball_SeekDriver(struct TrackerWeapon *tw, u32 checkpointIndex, struct Driver *d);
 void RB_Warpball_ThTick(struct Thread *t);
 void RB_Warpball_TurnAround(struct Thread *t);
+#if defined(CTR_NATIVE)
+/* Physical CNK Tornado capture: takes real dt and modifies upward velocity
+ * before player or bot collision/translation. No instant position teleports. */
+int RB_CNKTornado_TickLiftVelocity(struct Driver *d, int velocityY, int elapsedMS);
+int RB_CNKTornado_IsCapturing(struct Driver *d);
+void RB_CNKTornado_HoldHorizontal(struct Driver *d);
+#endif
 
 void RB_Player_ToggleInvisible(void);
 void RB_Player_ToggleFlicker(void);

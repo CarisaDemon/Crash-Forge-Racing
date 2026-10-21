@@ -37,10 +37,13 @@ int howl_InitGlobals(char *filename)
 #ifdef CTR_NATIVE
 	sdata->vol_FX = Platform_GetSavedAudioVolume(HOWL_VOLUME_TYPE_FX, sdata->vol_FX);
 	sdata->vol_Music = Platform_GetSavedAudioVolume(HOWL_VOLUME_TYPE_MUSIC, sdata->vol_Music);
-	sdata->vol_Voice = Platform_GetSavedAudioVolume(HOWL_VOLUME_TYPE_VOICE, sdata->vol_Voice);
+    sdata->vol_Voice = Platform_GetSavedAudioVolume(HOWL_VOLUME_TYPE_VOICE, sdata->vol_Voice);
+    /* Restore slider to custom engine mixer even before a race is loaded. */
+    NativeAudio_EngineSetFxVolume((int)sdata->vol_FX);
+    NativeAudio_EngineSetHearOtherRacers(Platform_GetHearOtherRacers());
 #endif
 
-	sdata->OptionSlider_BoolPlay = 0;
+    sdata->OptionSlider_BoolPlay = 0;
 	sdata->OptionSlider_Index = 0;
 	sdata->OptionSlider_soundID = 0;
 

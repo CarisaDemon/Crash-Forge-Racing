@@ -132,6 +132,23 @@ static u32 Voiceline_RequestPlay_NextAudioRNG(void)
 	return sdata->audioRNG;
 }
 
+#if defined(CTR_NATIVE)
+static u32 Voiceline_NativeMinSpacing(void)
+{
+    int mode=Platform_GetVoiceFrequency();
+    if(mode==0) return 0x3c; /* retail 60 ticks */
+    if(mode==2) return 0x24; /* 36 ticks */
+    return 0x2d; /* default: 45 ticks */
+}
+static u32 Voiceline_NativeCooldown(void)
+{
+    int mode=Platform_GetVoiceFrequency();
+    if(mode==0) return 0x1e;
+    if(mode==2) return 0x10;
+    return 0x16;
+}
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8002cbe8-0x8002cf28
 void Voiceline_RequestPlay(u32 voiceID, u32 characterID, u32 characterID2)
 {
@@ -188,11 +205,21 @@ void Voiceline_RequestPlay(u32 voiceID, u32 characterID, u32 characterID2)
 
 		if (alreadyPlayed != 0)
 		{
+#if defined(CTR_NATIVE)
+            rng &= (Platform_GetVoiceFrequency()==2 ? 1u :
+                    Platform_GetVoiceFrequency()==1 ? 3u : 7u);
+#else
 			rng &= 7;
+#endif
 		}
 		else
 		{
+#if defined(CTR_NATIVE)
+            rng &= (Platform_GetVoiceFrequency()==2 ? 0u :
+                    Platform_GetVoiceFrequency()==1 ? 1u : 3u);
+#else
 			rng &= 3;
+#endif
 		}
 
 		if (rng != 0)
@@ -203,7 +230,11 @@ void Voiceline_RequestPlay(u32 voiceID, u32 characterID, u32 characterID2)
 
 	elapsedFrames = (u32)CTR_MipsSubLo(sdata->gGT->frameTimer_MainFrame_ResetDB, sdata->timeSet2[characterID]);
 	canImmediate = 0;
+#if defined(CTR_NATIVE)
+    if (elapsedFrames >= Voiceline_NativeMinSpacing()+1)
+#else
 	if (elapsedFrames >= 0x3d)
+#endif
 	{
 		canImmediate = voiceType < 2;
 	}
@@ -217,7 +248,11 @@ void Voiceline_RequestPlay(u32 voiceID, u32 characterID, u32 characterID2)
 	{
 		canQueue = 0;
 	}
+#if defined(CTR_NATIVE)
+    else if (elapsedFrames < Voiceline_NativeMinSpacing())
+#else
 	else if (elapsedFrames < 0x3c)
+#endif
 	{
 		canQueue = 0;
 	}
@@ -344,11 +379,19 @@ void Voiceline_StartPlay(struct Item *voiceLine)
 
 	if (CDSYS_XAPlay(CDSYS_XA_TYPE_GAME, xaID) == 0)
 	{
+#if defined(CTR_NATIVE)
+        sdata->voicelineCooldown = (s16)Voiceline_NativeCooldown();
+#else
 		sdata->voicelineCooldown = 0x1e;
+#endif
 		return;
 	}
 
+#if defined(CTR_NATIVE)
+    sdata->voicelineCooldown = (s16)(CDSYS_XAGetTrackLength(CDSYS_XA_TYPE_GAME, xaID) / 5) + (s16)Voiceline_NativeCooldown();
+#else
 	sdata->voicelineCooldown = (s16)(CDSYS_XAGetTrackLength(CDSYS_XA_TYPE_GAME, xaID) / 5) + 0x1e;
+#endif
 }
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8002d0f8-0x8002d2a8

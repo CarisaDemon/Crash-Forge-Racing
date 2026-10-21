@@ -264,7 +264,7 @@ u16 RB_Hazard_CollLevInst(struct ScratchpadStruct *sps, struct Thread *th)
 		if ((meta != NULL) && (meta->LInC != NULL))
 		{
 			// Execute LInC, create a thread for this instance, and let it run thread->funcThCollide upon collision
-			u16 flag = meta->LInC(inst, th, sps);
+			u16 flag = FN32(meta->LInC)(inst, th, sps);
 
 			// if not PU_WUMPA_FRUIT
 			if (model != 2)

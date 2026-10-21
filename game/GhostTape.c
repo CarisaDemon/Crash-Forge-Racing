@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <platform/native_custom_tracks.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80027df4-0x80027e90.
 void GhostTape_Start(void)
@@ -14,7 +17,14 @@ void GhostTape_Start(void)
 
 	gh = sdata->GhostRecording.ptrGhost;
 	gh->version = GHOST_TAPE_VERSION_RETAIL;
+#if defined(CTR_NATIVE)
+	{
+		int customLevelID = NativeCustomTracks_SelectedOriginalLevelID();
+		gh->levelID = (customLevelID >= 0) ? (s16)customLevelID : gGT->levelID;
+	}
+#else
 	gh->levelID = gGT->levelID;
+#endif
 	gh->characterID = data.characterIDs[d->driverID];
 
 	sdata->GhostRecording.VelX = 0;

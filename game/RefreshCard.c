@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <platform/native_custom_tracks.h>
+#endif
 
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800469f0-0x80046a74.
@@ -156,7 +159,21 @@ void RefreshCard_GhostEncodeProfile(u32 slotIndex, u16 characterID, u16 levelID,
 
 	description[0] = '\0';
 
-	strcat(&description[strlen(description)], sdata->lngStrings[data.metaDataLEV[(s16)levelID].name_LNG]);
+	{
+		const char *trackName = sdata->lngStrings[data.metaDataLEV[(s16)levelID].name_LNG];
+#if defined(CTR_NATIVE)
+		int customLevelID = NativeCustomTracks_SelectedOriginalLevelID();
+		int customIndex = NativeCustomTracks_SelectedIndex();
+		if (customLevelID >= 0 && customIndex >= 0 &&
+		    (s16)levelID == customLevelID)
+		{
+			const char *customName = NativeCustomTracks_Name(customIndex);
+			if (customName && *customName)
+				trackName = customName;
+		}
+#endif
+		strcat(&description[strlen(description)], trackName);
+	}
 	strcat(description, sdata->strcatData1_colon);
 	strcat(&description[strlen(description)], CharacterRegistry_GetDisplayName((s16)characterID));
 	strcat(description, sdata->strcatData1_colon);

@@ -9,6 +9,7 @@
 #define NATIVE_SESSION_NAME_MAX 31
 
 static enum NativeSessionMode s_nativeSessionMode = NATIVE_SESSION_NONE;
+static int s_nativeNoModsMode = 0;
 static int s_nativeSessionLocalPlayerID = 0;
 static char s_nativeSessionPlayerName[NATIVE_SESSION_NAME_MAX + 1] = "PLAYER";
 
@@ -97,6 +98,11 @@ const char *NativeSession_GetLocalPlayerName(void)
 	return s_nativeSessionPlayerName;
 }
 
+int NativeSession_NoModsActive(void)
+{
+	return s_nativeNoModsMode;
+}
+
 void NativeSession_ConfigureFromArgs(int argc, char **argv)
 {
 	int i;
@@ -107,6 +113,12 @@ void NativeSession_ConfigureFromArgs(int argc, char **argv)
 
 		if (arg == NULL)
 			continue;
+
+		if (strcmp(arg, "--no-mods") == 0)
+		{
+			s_nativeNoModsMode = 1;
+			continue;
+		}
 
 		if (strncmp(arg, "--hangout-name=", 15) == 0)
 		{

@@ -1,5 +1,20 @@
 #include <common.h>
 
+#if defined(CTR_NATIVE)
+static DriverModelExtraSlot s_nativeUltraFourthHiModel;
+/* Four AI characters are selected only inside LOAD_Robots2P; they
+ * cannot use the fixed three-element retail player-extra array. */
+static DriverModelExtraSlot s_nativeUltra2PAiHigh[4];
+struct Model *LOAD_NativeUltraFourthModel(void)
+{
+	return s_nativeUltraFourthHiModel.model;
+}
+struct Model *LOAD_NativeUltra2PAiModel(int index)
+{
+	return (index>=0 && index<4)?s_nativeUltra2PAiHigh[index].model:NULL;
+}
+#endif
+
 #if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
 #include <platform/native_checkpoint.h>
 #endif
@@ -83,6 +98,22 @@ void LOAD_Robots2P(struct BigHeader *bigfile, int p1, int p2, void (*callback)(s
 	data.characterIDs[4] = robotSet[2];
 	data.characterIDs[5] = robotSet[3];
 
+#if defined(CTR_NATIVE)
+	/* The pack below contains the four original low-detail bot models.
+	 * ULTRA loads all four HI models BEFORE that pack, so its existing
+	 * completion callback remains last. Keep Battle 2P lightweight:
+	 * it has no AI kart threads and never needs these extra assets. */
+	if(sdata->gGT->numPlyrCurrGame==2 &&
+	   (sdata->gGT->gameMode1&BATTLE_MODE)==0 &&
+	   Platform_GetCharacterDetailMode()==3)
+	{
+		for(int bot=0;bot<4;bot++)
+			LOAD_AppendQueue(bigfile,LT_GETADDR,
+				BI_RACERMODELHI+CharacterRegistry_GetDriverPackID(data.characterIDs[2+bot]),
+				&s_nativeUltra2PAiHigh[bot].fileBase,
+				LOAD_QUEUE_CALLBACK_SET_POINTER);
+	}
+#endif
 	LOAD_AppendQueue(bigfile, LT_GETADDR, BI_2PARCADEPACK + setIndex, NULL, callback);
 }
 
@@ -123,6 +154,13 @@ int LOAD_DriverMPK(struct BigHeader *bigfile, int levelLOD, void (*callback)(str
 	struct GameTracker *gGT = sdata->gGT;
 	gameMode1 = gGT->gameMode1;
 
+#if defined(CTR_NATIVE)
+	const int nativeUltraMulti = Platform_GetCharacterDetailMode()==3 &&
+		(gGT->numPlyrCurrGame>=2 && gGT->numPlyrCurrGame<=4) &&
+		((gameMode1 & (MAIN_MENU|ADVENTURE_ARENA|GAME_CUTSCENE))==0);
+	s_nativeUltraFourthHiModel.fileBase=NULL;
+	memset(s_nativeUltra2PAiHigh,0,sizeof(s_nativeUltra2PAiHigh));
+#endif
 	int lastFileIndexMPK;
 
 	// 3P/4P
@@ -130,9 +168,23 @@ int LOAD_DriverMPK(struct BigHeader *bigfile, int levelLOD, void (*callback)(str
 	{
 		for (i = 0; i < LOAD_DRIVER_MODEL_EXTRA_COUNT; i++)
 		{
-			// low lod CTR model
-			LOAD_AppendQueue(bigfile, LT_GETADDR, BI_RACERMODELLOW + CharacterRegistry_GetDriverPackID(data.characterIDs[i]), &data.driverModelExtras[i].fileBase, LOAD_DriverMPK_SetPointer);
+			/* PC ULTRA actually loads the HIGH model asset for each
+			 * player instead of high-detail walking a LOW-only model. */
+			LOAD_AppendQueue(bigfile, LT_GETADDR,
+#if defined(CTR_NATIVE)
+				(nativeUltraMulti?BI_RACERMODELHI:BI_RACERMODELLOW) +
+#else
+				BI_RACERMODELLOW +
+#endif
+				CharacterRegistry_GetDriverPackID(data.characterIDs[i]),
+				&data.driverModelExtras[i].fileBase,LOAD_DriverMPK_SetPointer);
 		}
+#if defined(CTR_NATIVE)
+		if(nativeUltraMulti)
+			LOAD_AppendQueue(bigfile,LT_GETADDR,
+				BI_RACERMODELHI+CharacterRegistry_GetDriverPackID(data.characterIDs[3]),
+				&s_nativeUltraFourthHiModel.fileBase,LOAD_DriverMPK_SetPointer);
+#endif
 
 		// load 4P MPK of fourth player
 		lastFileIndexMPK = BI_4PARCADEPACK + CharacterRegistry_GetDriverPackID(data.characterIDs[3]);
@@ -215,8 +267,15 @@ int LOAD_DriverMPK(struct BigHeader *bigfile, int levelLOD, void (*callback)(str
 		// med models
 		for (i = 0; i < LOAD_MED_LOD_DRIVER_MODEL_EXTRA_COUNT; i++)
 		{
-			// med lod CTR model
-			LOAD_AppendQueue(bigfile, LT_GETADDR, BI_RACERMODELMED + CharacterRegistry_GetDriverPackID(data.characterIDs[i]), &data.driverModelExtras[i].fileBase, LOAD_DriverMPK_SetPointer);
+			/* Match ULTRA in two-player races/battles as well. */
+			LOAD_AppendQueue(bigfile, LT_GETADDR,
+#if defined(CTR_NATIVE)
+				(nativeUltraMulti?BI_RACERMODELHI:BI_RACERMODELMED) +
+#else
+				BI_RACERMODELMED +
+#endif
+				CharacterRegistry_GetDriverPackID(data.characterIDs[i]),
+				&data.driverModelExtras[i].fileBase,LOAD_DriverMPK_SetPointer);
 		}
 
 		LOAD_Robots2P(bigfile, data.characterIDs[0], data.characterIDs[1], callback);
@@ -245,7 +304,7 @@ void LOAD_LangFile(int bigfilePtr, int lang)
 
 	int i;
 	int numStrings;
-	char **strArray;
+	char * P32 *strArray;
 
 #if BUILD == EurRetail
 	// This is to turn the screen black for a bit (optional)
@@ -267,7 +326,7 @@ void LOAD_LangFile(int bigfilePtr, int lang)
 	}
 
 	numStrings = lngFile->numStrings;
-	strArray = (char **)((u32)lngFile + lngFile->offsetToPtrArr);
+	strArray = (char * P32 *)((uintptr_t)lngFile + lngFile->offsetToPtrArr);
 
 	sdata->numLngStrings = numStrings;
 	sdata->lngStrings = strArray;

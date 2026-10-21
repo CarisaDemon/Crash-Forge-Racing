@@ -2155,7 +2155,7 @@ void CAM_ThTick(struct Thread *t)
 	u32 uVar10;
 	struct PVS *psVar11;
 	s32 *piVar12;
-	struct Instance **ppsVar13;
+	struct Instance * P32 *ppsVar13;
 	struct SpawnType1 *psVar14;
 	struct CheckpointNode *psVar15;
 	u32 uVar16;
@@ -2224,12 +2224,35 @@ void CAM_ThTick(struct Thread *t)
 	}
 
 	ptrZoomData = &data.NearCam4x3;
-	if (gGT->numPlyrCurrGame == 2)
+	if (gGT->numPlyrCurrGame == 2
+#if defined(CTR_NATIVE)
+		&& !Platform_GetWideMode()
+#endif
+	)
 	{
+		/* Retail 8:3 zoom belongs only to horizontal/top-bottom
+		 * 2P. Side-by-side widescreen has narrow 4:3-like panes. */
 		ptrZoomData = &data.NearCam8x3;
 	}
 
 	ptrZoomData = &ptrZoomData[cDC->nearOrFar * 2];
+
+#if defined(CTR_NATIVE)
+	/* Tall portrait half-screen needs the kart further back and slightly
+	 * higher, not the 1P camera simply cropped in half. Use a LOCAL
+	 * ZoomData copy so each player has its own independent camera and
+	 * the original zoom values stay intact for 4:3/3P/4P. */
+	struct ZoomData portraitZoom;
+	if(gGT->numPlyrCurrGame==2 && Platform_GetWideMode() &&
+	   cDC->cameraID<2 && (gGT->gameMode1 & MAIN_MENU)==0)
+	{
+		portraitZoom=*ptrZoomData;
+		portraitZoom.distMin=(s16)((portraitZoom.distMin*5)/4);
+		portraitZoom.distMax=(s16)((portraitZoom.distMax*5)/4);
+		portraitZoom.vertDistance=(s16)((portraitZoom.vertDistance*9)/8);
+		ptrZoomData=&portraitZoom;
+	}
+#endif
 
 	if ((cDC->flags & CAMERA_FLAG_ARCADE_END_OF_RACE_REQUESTED) == 0)
 	{

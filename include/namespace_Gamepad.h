@@ -211,7 +211,7 @@ struct GamepadBuffer
 	// 0x20
 	// For details,
 	// see GamepadSystem->slotBuffer
-	struct ControllerPacket *ptrControllerPacket;
+	struct ControllerPacket * P32 ptrControllerPacket;
 
 	// 0x24
 	s16 gamepadID; // 0 - 7
@@ -264,7 +264,7 @@ struct GamepadBuffer
 	s16 padding;
 
 	// 0x4c
-	struct RacingWheelData *rwd;
+	struct RacingWheelData * P32 rwd;
 };
 
 struct GamepadSystem

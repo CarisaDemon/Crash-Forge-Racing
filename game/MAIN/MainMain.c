@@ -1,6 +1,10 @@
 #include <common.h>
 #if defined(CTR_NATIVE)
 #include <NativeHangout.h>
+#include <platform/native_custom_tracks.h>
+#include <platform/native_music_selection.h>
+#include <platform/native_menu_music_clock.h>
+#include <platform/native_custom_music.h>
 /* Keep sub-millisecond time from Unlimited loading frames instead of
  * rounding every host frame up to one millisecond. */
 static double s_nativeLoadingTimeCarryMS = 0.0;
@@ -242,6 +246,26 @@ u32 main(void)
 			{
 				Audio_SetState_Safe(uVar12);
 			}
+#endif
+#ifdef CTR_NATIVE
+			if (gGT->levelID == MAIN_MENU_LEVEL)
+			{
+				/* The title's bank, VLC, driver models and menu resources are
+				 * now ready. Only now schedule note zero and start playback.
+				 * This removes the drift in the first menu music loop. */
+				CseqMusic_StopAll();
+				Music_End();
+				NativeCustomMusic_TryStartLevel(MAIN_MENU_LEVEL);
+				Audio_SetState(AUDIO_GARAGE_ENTRY);
+				sdata->audioState = AUDIO_GARAGE_ENTRY;
+				Platform_Log("[MENU MUSIC] title theme started AFTER level initialization\n");
+			}
+			/* Only menus use the independent HOWL clock. Race physics,
+			 * TAS, VBlank and the game renderer remain on their original
+			 * main-thread timing model. */
+			if ((gGT->gameMode1 & MAIN_MENU) != 0 &&
+			    sdata->Loading.stage == LOAD_IDLE)
+				NativeMenuMusicClock_Start();
 #endif
 			sdata->mainGameState = 3;
 			gGT->clockEffectEnabled &= 0xfffe;
@@ -823,6 +847,13 @@ void StateZero()
 	gGT->numPlyrCurrGame = 1;
 	gGT->numPlyrNextGame = 1;
 	Platform_Log("[PRACTICE] fast-start target: level_03 CRASH_COVE (HUD enabled)\n");
+#elif defined(CTR_NATIVE)
+	/* Native Crash Forge Racing boot: go straight to the normal title
+	 * level instead of entering the licensed studio-logo cutscene.
+	 * Keep menu/Adventure/race routing identical after the title loads. */
+	gGT->levelID = MAIN_MENU_LEVEL;
+	sdata->mainMenuState = MAIN_MENU_TITLE;
+	Platform_Log("[BOOT] direct Crash Forge title; Sony/ND startup intros disabled\n");
 #else
 	gGT->levelID = NAUGHTY_DOG_CRATE;
 	// gGT->levelID = OXIDE_TRUE_ENDING;
@@ -849,11 +880,20 @@ void StateZero()
 	PutDrawEnv(&gGT->db[1].drawEnv);
 	DrawSync(0);
 
-	// Load Intro TIM for "SCEA Presents" from VRAM file
-#if !defined(CTR_PRACTICE_FASTSTART)
+	/* Retail starts with the Sony/SCEA bitmap. The native port starts
+	 * with a blank loading frame and skips this copyrighted studio card. */
+#if !defined(CTR_NATIVE) && !defined(CTR_PRACTICE_FASTSTART)
 	LOAD_VramFile(sdata->ptrBigfile1, 0x1fd, NULL, &vramSize, -1);
 #endif
 	MainInit_VRAMDisplay();
+
+	/* Full LEV/VRM validation and soundtrack-pack directory scanning belong
+	 * to startup, before the HOWL sequencer/audio stream becomes active.
+	 * Never repeat these synchronous file reads on ordinary menu transitions. */
+#ifdef CTR_NATIVE
+	NativeCustomTracks_EnsureScanned();
+	NativeMusicSelection_EnsureReady();
+#endif
 
 	// \SOUNDS\KART.HWL;1
 	// NOTE(aalhendi): ASM-verified NTSC-U 926 0x8003c8e0-0x8003c928 for startup HOWL/music/XA setup.
@@ -861,7 +901,12 @@ void StateZero()
 
 	VSyncCallback(MainDrawCb_Vsync);
 
-#if !defined(CTR_PRACTICE_FASTSTART)
+#if defined(CTR_NATIVE)
+	/* No Sony voice-over XA, Naughty Dog song or splash-screen loop.
+	 * Normal title soundtrack initializes through LOAD_TenStages
+	 * when the main-menu bank is ready. */
+	CseqMusic_StopAll();
+#elif !defined(CTR_PRACTICE_FASTSTART)
 	Music_SetIntro();
 	CseqMusic_StopAll();
 	CseqMusic_Start(CSEQ_SONG_LEVEL, 0, NULL, 0, 0);

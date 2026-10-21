@@ -1086,6 +1086,13 @@ static int DrawTiresSolid_StagePlayer(struct DrawTiresScratch *scratch, struct D
 	scratch->depthOffsetEndBytes = idpp->depthOffset[1] << 2;
 	scratch->instFlags = flags;
 
+#if defined(CTR_NATIVE)
+	/* Suppress both native 3D and retail 2D wheels for hovercraft karts. */
+	if (VehiclePartRegistry_HidesWheels(
+			RacerLoadout_GetEffectiveKart((int)driver->driverID)))
+		return 0;
+#endif
+
 	if ((flags & DRAW_SUCCESSFUL) == 0)
 	{
 		return 0;
@@ -1727,6 +1734,13 @@ static int DrawTiresReflection_StagePlayer(struct DrawTiresScratch *scratch, str
 	scratch->depthOffsetStartBytes = idpp->depthOffset[0] << 2;
 	scratch->depthOffsetEndBytes = idpp->depthOffset[1] << 2;
 	scratch->instFlags = flags;
+
+#if defined(CTR_NATIVE)
+	/* Suppress both native 3D and retail 2D wheels for hovercraft karts. */
+	if (VehiclePartRegistry_HidesWheels(
+			RacerLoadout_GetEffectiveKart((int)driver->driverID)))
+		return 0;
+#endif
 
 	if ((flags & DRAW_SUCCESSFUL) == 0)
 	{

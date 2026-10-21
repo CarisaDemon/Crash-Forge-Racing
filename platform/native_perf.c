@@ -138,6 +138,7 @@ global_variable char s_csvBuffer[NATIVE_PERF_CSV_BUFFER_BYTES];
 global_variable s32 s_enabled;
 global_variable s32 s_frameOpen;
 global_variable s32 s_rowsSinceFlush;
+global_variable s32 s_perfCsvStride = 1;
 global_variable u32 s_frameIndex;
 global_variable u32 s_framesOverBudget;
 global_variable u32 s_workFramesOverBudget;
@@ -807,6 +808,26 @@ int NativePerf_ConfigureFromArgs(int argc, char **argv)
             else Platform_Log("[BOTPROFILE] could not open output %s\n",path);
         }
     }
+    /* Continuous per-frame CSV can write multiple gigabytes when menus run
+     * at 1000+ FPS. Keep all exact aggregate/worst-frame measurements, but
+     * record one detailed CSV row per 30 frames by default. A developer can
+     * explicitly request stride 1..1000 through CTR_PERF_CSV_STRIDE_QA.
+     * This avoids profile disk I/O blocking CSEQ timing during menu input. */
+    {
+        const char *stride = SDL_getenv("CTR_PERF_CSV_STRIDE_QA");
+        int selected = 30;
+
+        if (stride != NULL && *stride != 0)
+        {
+            char *end = NULL;
+            long parsed = strtol(stride, &end, 10);
+            if (end != stride && *end == 0 && parsed >= 1 && parsed <= 1000)
+                selected = (int)parsed;
+        }
+        s_perfCsvStride = selected;
+        Platform_Log("[PERF CSV] stride=%d (all frame totals and worst frames retained)\n",
+                     s_perfCsvStride);
+    }
 	s_enabled = 1;
 
 	/* GPU queries are asynchronous/non-blocking; profiler sessions enable them
@@ -955,6 +976,10 @@ void NativePerf_EndFrame(const struct NativePerfFrameInfo *info)
 
 	NativeAudio_GetOutputStats(&endUnderrunFrames, &endOverflowFrames, &endQueuedFrames);
 
+    const int saveCsvRow = (s_perfCsvStride <= 1) ||
+        ((s_frameIndex % (u32)s_perfCsvStride) == 0u);
+    if(saveCsvRow)
+    {
 	fprintf(s_csvFile, "%u,%.3f,%.3f,%d,%.3f,%d,%.3f,%.3f,%s,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 	        s_frameIndex, totalMs, workMs, rowInfo->targetFPS, budgetMs, rowInfo->fullscreen,
 	        overBudgetMs, workOverBudgetMs, NativePerf_BucketName(dominantBucket), dominantMs,
@@ -972,9 +997,13 @@ void NativePerf_EndFrame(const struct NativePerfFrameInfo *info)
 	for (s32 bucket = 0; bucket < NATIVE_PERF_BUCKET_COUNT; bucket++)
 	{
 		fprintf(s_csvFile, ",%.3f", s_frameBucketMs[bucket]);
-		s_bucketTotals[bucket] += s_frameBucketMs[bucket];
 	}
 	fprintf(s_csvFile, "\n");
+    }
+    /* Preserve exact profiler bucket accumulation on EVERY frame, even
+     * when detailed CSV text was skipped. */
+    for (s32 bucket = 0; bucket < NATIVE_PERF_BUCKET_COUNT; bucket++)
+        s_bucketTotals[bucket] += s_frameBucketMs[bucket];
 
     if(s_botCsvFile && sdata && sdata->gGT)
     {

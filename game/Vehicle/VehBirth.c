@@ -1,5 +1,6 @@
 #include <common.h>
 #include <CharacterRegistry.h>
+#include <RacerLoadout.h>
 #include <NativeRacerVisual.h>
 #if defined(CTR_NATIVE)
 #include <platform/native_gltf.h>
@@ -602,6 +603,25 @@ struct Model *VehBirth_GetModelByName(char *searchName)
 		}
 	}
 
+#if defined(CTR_NATIVE)
+	/* 3P/4P retain the original fourth-player MPK for compatibility,
+	 * but the separate high-quality asset wins in ULTRA when present. */
+	if (Platform_GetCharacterDetailMode()==3)
+	{
+		struct Model *ultraFourth=LOAD_NativeUltraFourthModel();
+		if(ultraFourth && VehBirth_ModelNameEquals(ultraFourth,searchName))
+			return ultraFourth;
+		/* 2P Arcade's four AIs are stored in the retail AI MPK at
+		 * low quality; in ULTRA resolve our separately loaded HI
+		 * assets before that low pack, even at extreme range. */
+		for(int ai=0;ai<4;ai++)
+		{
+			struct Model *high=LOAD_NativeUltra2PAiModel(ai);
+			if(high && VehBirth_ModelNameEquals(high,searchName))
+				return high;
+		}
+	}
+#endif
 	struct Model **models = (struct Model **)sdata->PLYROBJECTLIST;
 
 	if (
@@ -636,7 +656,8 @@ void VehBirth_SetConsts(struct Driver *driver)
 {
 	u8 *d = (u8 *)driver;
 
-	int engineID = CharacterRegistry_GetEngineClass(data.characterIDs[driver->driverID]);
+	int engineID = RacerLoadout_GetEffectivePhysicsEngine(driver->driverID);
+    const int maxStats = RacerLoadout_UsesMaxStats(driver->driverID);
 
 	for (u32 i = 0; i < VEH_BIRTH_META_PHYS_COUNT; i++)
 	{
@@ -644,7 +665,35 @@ void VehBirth_SetConsts(struct Driver *driver)
 
 		u32 metaPhysSize = metaPhys->size;
 
-		u32 rawValue = (u32)metaPhys->value[engineID];
+		/*
+         * JP/PAL Penta-style best-of-three *handling categories*.
+         * Speed fields use retail SPEED, acceleration field uses ACCEL;
+         * steering/drift response fields use TURN. Do not simply choose
+         * the numerically biggest value for all 65 fields: several are
+         * delays, frictions or signed values where 'bigger' is not better.
+         * The non-class-dependent stats remain identical to retail SPEED.
+         */
+        int fieldClass = engineID;
+        if (maxStats)
+        {
+            switch (i)
+            {
+            case ACCEL_CLASS_STAT:
+                fieldClass = ACCEL;
+                break;
+            case TURN_RATE:
+            case TURN_DECREASE_RATE:
+            case TURN_INPUT_DELAY:
+            case PRE_TURBO:
+            case DRIFT_TURN_BASE:
+                fieldClass = TURN;
+                break;
+            default:
+                fieldClass = SPEED;
+                break;
+            }
+        }
+		u32 rawValue = (u32)metaPhys->value[fieldClass];
 		u8 *dst = &d[metaPhys->offset];
 
 		if (metaPhysSize == 1)
@@ -669,23 +718,189 @@ void VehBirth_SetConsts(struct Driver *driver)
 		}
 	}
 
+#if defined(CTR_CNK_PHYSICS_PREVIEW_QA)
+    CNKPhysicsPreview_Apply(driver);
+#endif
+
+#if defined(CTR_NATIVE)
+    if (driver->driverID < 4)
+    {
+        const int selected = RacerLoadout_GetPhysicsClass(driver->driverID);
+        Platform_Log("[PHYSICS] driver=%d character=%d option=%s engine=%d max=%d accel=%d speed=%d cap=%d turn=%d drift=%d\n",
+                     driver->driverID, data.characterIDs[driver->driverID],
+                     RacerLoadout_PhysicsName(selected), engineID, maxStats,
+                     driver->const_Accel_ClassStat, driver->const_Speed_ClassStat,
+                     driver->const_AccelSpeed_ClassStat, driver->const_TurnRate,
+                     driver->const_DriftTurnBase);
+    }
+#endif
 	return;
 }
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80058ba4-0x80058c44.
+#ifdef CTR_NATIVE
+/* Local and opponent racers MUST resolve identical ENGINE-pack ownership:
+ * main audio, custom pitch, gearbox and auxiliary layers. For bots the
+ * driver's real ID 1..7 identifies the selected Kart via RacerLoadout. */
+static unsigned s_nativeBotAudioPrepared;
+static int VehBirth_NativeBindSelectedEngine(int driverID)
+{
+            int packID = RacerLoadout_GetEffectiveEngineSound(driverID);
+            int visualKartID = RacerLoadout_GetEffectiveKart(driverID);
+            int engineSelection = RacerLoadout_GetEngineSound(driverID);
+            const struct EngineSoundDef *route = EngineSoundRegistry_Get(packID);
+            /* All mod audio belongs to the selected ENGINE option. In
+             * particular, visualKartID must NEVER be consulted to choose
+             * transmission/layers when ACCEL or another engine is selected. */
+            const struct VehiclePartDef *soundKart =
+                route && route->kartID >= 0 ?
+                VehiclePartRegistry_GetByID(VEHICLE_PART_KART,route->kartID) :
+                NULL;
+            char loop[1024] = "", idle[1024] = "", turbo[1024] = "";
+            int mainCustom = 0;
+            Platform_Log("[ENGINE ROUTE] driver=%d visualKart=%d selection=%d "
+                         "effectivePack=%d ownerKart=%d packName=%s source=%s\n",
+                         driverID, visualKartID, engineSelection, packID,
+                         route ? route->kartID : -1,
+                         route ? route->displayName : "RETAIL",
+                         route ? route->loop : "RETAIL");
+            if (packID >= 0 &&
+                EngineSoundRegistry_BuildClipPath(packID, ENGINE_SOUND_CLIP_LOOP,
+                                                  loop, sizeof(loop)) &&
+                NativeAudio_EngineBind(driverID, loop,
+                    EngineSoundRegistry_BuildClipPath(packID, ENGINE_SOUND_CLIP_IDLE,
+                                                      idle, sizeof(idle)) ? idle : NULL,
+                    EngineSoundRegistry_BuildClipPath(packID, ENGINE_SOUND_CLIP_TURBO,
+                                                      turbo, sizeof(turbo)) ? turbo : NULL)) {
+                Platform_Log("[ENGINE AUDIO] driver=%d pack=%d custom active\n",
+                             driverID, packID);
+                /* Custom primary pitch belongs to the owner of the selected
+                 * ENGINE pack (not the equipped/visual kart). */
+                if (soundKart && soundKart->customEnginePitchCurve)
+                    NativeAudio_EngineSetPitchCurve(driverID,
+                        soundKart->enginePitchMin,
+                        soundKart->enginePitchMax,
+                        soundKart->enginePitchSpeedMax,
+                        soundKart->enginePitchMode);
+                mainCustom = 1;
+            }
+            /* Transmission is an inseparable part of the selected ENGINE
+             * pack, not the physical kart. Selecting ACCEL/retail means
+             * soundKart=NULL -> NO CNK gearbox. Selecting Team Bandicoot
+             * from another visual kart loads Bandicoot's gearbox instead. */
+            if (soundKart && soundKart->secondaryEngineLoop[0]) {
+                char relative[420], full[1024];
+                int bound = 0;
+                if (snprintf(relative, sizeof(relative),
+                             soundKart->unifiedMod ? "mods/%s/%s" :
+                                                     "mods/karts/%s/%s",
+                             soundKart->slug,soundKart->secondaryEngineLoop) <
+                        (int)sizeof(relative) &&
+                    NativeAssets_BuildPath(relative, full, sizeof(full)))
+                {
+                    bound = NativeAudio_EngineBindSecondary(driverID, full,
+                        soundKart->secondaryEngineVolume,
+                        soundKart->secondaryEnginePitchMin,
+                        soundKart->secondaryEnginePitchMax,
+                        soundKart->secondaryEngineSpeedMax);
+                }
+                Platform_Log("[ENGINE TRANSMISSION] driver=%d selection=%d "
+                             "pack=%d ownerKart=%d bound=%d\n",
+                             driverID,engineSelection,packID,soundKart->id,bound);
+            } else {
+                Platform_Log("[ENGINE TRANSMISSION] driver=%d selection=%d "
+                             "pack=%d ownerKart=-1 bound=0 (no selected gearbox)\n",
+                             driverID,engineSelection,packID);
+            }
+            /* All three optional loops also belong to the selected ENGINE
+             * pack. Explicit retail choices play no custom layers; a pack
+             * from another kart carries its own supplemental sounds. */
+            {
+                const struct VehiclePartDef *kart = soundKart;
+                if (kart) for (int layer=0; layer<VEHICLE_PART_AUDIO_LAYER_COUNT; ++layer) {
+                    if (!kart->audioLayerLoop[layer][0]) continue;
+                    char relative[420],full[1024];
+                    if (snprintf(relative,sizeof(relative),
+                                 kart->unifiedMod ? "mods/%s/%s" :
+                                                    "mods/karts/%s/%s",
+                                 kart->slug,kart->audioLayerLoop[layer]) <
+                            (int)sizeof(relative) &&
+                        NativeAssets_BuildPath(relative,full,sizeof(full))) {
+                        NativeAudio_EngineBindLayer(driverID,layer,full,
+                            kart->audioLayerMode[layer],
+                            kart->audioLayerVolume[layer],
+                            kart->audioLayerPitchMin[layer],
+                            kart->audioLayerPitchMax[layer],
+                            kart->audioLayerSpeedMax[layer]);
+                    }
+                }
+            }
+            return mainCustom;
+}
+
+void VehBirth_NativePrepareBotAudio(int driverID)
+{
+    struct GameTracker *gGT = sdata->gGT;
+    unsigned bit;
+    if (!gGT || driverID < gGT->numPlyrCurrGame ||
+        driverID < 0 || driverID >= 8 || RacerLoadout_IsAdventureLocked())
+        return;
+    bit=1u<<(unsigned)driverID;
+    if (s_nativeBotAudioPrepared & bit) return;
+    s_nativeBotAudioPrepared |= bit;
+    /* Late-binding on FIRST actual nearby exposure avoids decoding every
+     * offscreen opponent during race load, important for 200-FPS gameplay.
+     * Each bot is decoded at most ONCE per race, even if the nearest two
+     * change many times. */
+    int customMain=VehBirth_NativeBindSelectedEngine(driverID);
+    NativeAudio_EngineMarkOpponent(driverID);
+    Platform_Log("[OPPONENT ENGINE BIND] bot=%d main=%d pack=%d\n",
+                 driverID,customMain,
+                 RacerLoadout_GetEffectiveEngineSound(driverID));
+}
+#endif
+
 void VehBirth_EngineAudio_AllPlayers(void)
 {
-	struct GameTracker *gGT = sdata->gGT;
+    struct GameTracker *gGT = sdata->gGT;
+#ifdef CTR_NATIVE
+    NativeAudio_EngineUnbindAll();
+    s_nativeBotAudioPrepared=0;
+    /* The native Main Menu reuses live player/kart structs. Previously the
+     * sound from the previous race was rebound on the menu's level init,
+     * so engines kept revving forever behind the UI. */
+    if (gGT == NULL || gGT->levelID == MAIN_MENU_LEVEL ||
+        (gGT->gameMode1 & MAIN_MENU) != 0) {
+        Platform_Log("[ENGINE LIFECYCLE] menu: custom engines unbound; no race engines\n");
+        return;
+    }
+#endif
 
-	for (struct Thread *th = gGT->threadBuckets[PLAYER].thread; th != 0; th = th->siblingThread)
+    for (struct Thread *th = gGT->threadBuckets[PLAYER].thread; th != 0; th = th->siblingThread)
 	{
 		struct Driver *d = th->object;
 
 		u8 driverID = d->driverID;
 
-		int engine = CharacterRegistry_GetEngineClass(data.characterIDs[driverID]);
-
-		EngineAudio_InitOnce((engine * 4) + driverID, HOWL_SFX_CENTER_NO_DISTORTION);
+        /* Engine sound selection is independent of physics and kart model.
+         * Missing kart sounds fall back to the character's retail class. */
+        int engine = RacerLoadout_GetEffectiveEngineSoundClass(driverID);
+#ifdef CTR_NATIVE
+        if (VehBirth_NativeBindSelectedEngine(driverID)) continue;
+#endif
+        /* Kart audio is optional. When there is no usable custom loop,
+         * keep the selected character's original retail engine sound;
+         * this is independent of the player's physics settings. */
+#ifdef CTR_NATIVE
+        if (RacerLoadout_GetEngineSound(driverID) == ENGINE_SOUND_AUTO)
+            Platform_Log("[ENGINE FALLBACK] player=%d kart=%d retailCharacter=%d soundClass=%d\n",
+                         driverID, RacerLoadout_GetEffectiveKart(driverID),
+                         CharacterRegistry_GetDriverPackID(data.characterIDs[driverID]),
+                         engine);
+#endif
+        if (!EngineAudio_InitOnce((engine * 4) + driverID, HOWL_SFX_CENTER_NO_DISTORTION))
+            Platform_LogWarn("[ENGINE AUDIO] player=%d retail class=%d could not start\n",
+                             driverID, engine);
 	}
 }
 

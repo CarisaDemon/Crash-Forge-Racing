@@ -103,7 +103,7 @@ struct BspSearchVertex
 	CollNormalAxis normalAxis;
 
 	// 0x8
-	struct LevVertex *pLevelVertex;
+	struct LevVertex * P32 pLevelVertex;
 
 	// 0xC
 	struct CollPlane plane;
@@ -113,7 +113,7 @@ struct BspSearchVertex
 
 struct BspSearchTriangle
 {
-	struct QuadBlock *quadblock;
+	struct QuadBlock * P32 quadblock;
 	s32 triangleID;
 	s32 scrubDepth;
 };
@@ -139,7 +139,7 @@ struct BspSearchResult
 	u8 triangleID;
 
 	// 0x18
-	struct QuadBlock *ptrQuadblock;
+	struct QuadBlock * P32 ptrQuadblock;
 };
 
 struct CollInstanceHitboxScratch
@@ -175,16 +175,16 @@ struct CollTriangleBarycentrics
 
 struct CollLevelTriangle
 {
-	struct LevVertex *v0;
-	struct LevVertex *v1;
-	struct LevVertex *v2;
+	struct LevVertex * P32 v0;
+	struct LevVertex * P32 v1;
+	struct LevVertex * P32 v2;
 };
 
 struct CollBspSearchTriangle
 {
-	struct BspSearchVertex *v0;
-	struct BspSearchVertex *v1;
-	struct BspSearchVertex *v2;
+	struct BspSearchVertex * P32 v0;
+	struct BspSearchVertex * P32 v1;
+	struct BspSearchVertex * P32 v2;
 };
 
 struct BSP;
@@ -259,19 +259,19 @@ struct ScratchpadStruct
 			s16 pad16;
 
 			// 0x18
-			struct Thread *thread;
+			struct Thread * P32 thread;
 
 			// 0x1c
 			struct BoundingBox bbox;
 
 			// 0x28
-			CollThBuckCallback funcCallback;
+			CollThBuckCallback P32 funcCallback;
 
 		} ThBuckColl;
 	} Union;
 
 	// 0x2C
-	struct mesh_info *ptr_mesh_info;
+	struct mesh_info * P32 ptr_mesh_info;
 
 	// 0x30
 	struct BoundingBox bbox;
@@ -290,10 +290,10 @@ struct ScratchpadStruct
 	s16 boolDidTouchHitbox;
 
 	// 0x44
-	struct mesh_info *ptr_mesh_info_2;
+	struct mesh_info * P32 ptr_mesh_info_2;
 
 	// 0x48
-	struct BSP *bspHitbox;
+	struct BSP * P32 bspHitbox;
 
 	// 0x4c
 	struct BspSearchResult candidate;
@@ -308,7 +308,7 @@ struct ScratchpadStruct
 	// 0x88
 	// COLL_MOVED_PlayerSearch can test up to 15 hitboxes, so this prevents
 	// duplicate collision handling within one search.
-	struct BSP *bspHitboxesHit[15];
+	struct BSP * P32 bspHitboxesHit[15];
 
 	// 0xc4
 	s32 numBspHitboxesHit;

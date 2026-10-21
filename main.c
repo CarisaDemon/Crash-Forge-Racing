@@ -27,6 +27,7 @@
 #include "platform/native_perf.h"
 #include "platform/native_replay_scheduler.h"
 #include "platform/native_savestate.h"
+#include "platform/native_pc_render.h"
 
 #ifndef __GNUC__
 #define __attribute__(x)
@@ -47,9 +48,15 @@
 #include "platform/native_assets.c"
 #include "platform/native_mod_packages.c"
 #include "platform/native_custom_tracks.c"
+#include "platform/native_music_selection.c"
+#include "platform/native_localization.c"
 #include "platform/native_audio.c"
+
+#include "platform/native_menu_music_clock.c"
 #include "platform/native_custom_music.c"
+#include "platform/native_engine_audio.c"
 #include "platform/native_jobs.c"
+#include "platform/native_occlusion_async.c"
 #include "platform/native_wheel_jobs.c"
 #include "platform/native_memory.c"
 #include "platform/native_checkpoint.c"
@@ -57,6 +64,7 @@
 #include "platform/native_cd.c"
 #include "platform/native_gpu_links.c"
 #include "platform/native_gpu.c"
+#include "platform/native_pc_render.c"
 #include "platform/native_gte_core.c"
 #include "platform/native_glad.c"
 #include "platform/native_input.c"
@@ -158,6 +166,19 @@ static int NativeArg_IsVersion(const char *arg)
 
 int main(int argc, char *argv[])
 {
+#if defined(CTR_WIN64)
+	{
+		// P32 pointers keep only 32 bits: refuse to run if code, stack or heap ended up above 2 GB.
+		void *probe = malloc(64u << 20);
+		const uintptr_t limit = 0x80000000u;
+		if (((uintptr_t)&probe >= limit) || ((uintptr_t)probe >= limit) || ((uintptr_t)(void *)&main >= limit))
+		{
+			fprintf(stderr, "CTR Native Win64: memory above 2 GB (exe must be built without LARGEADDRESSAWARE)\n");
+			return 3;
+		}
+		free(probe);
+	}
+#endif
 #if defined(CTR_NATIVE)
 	NativeSession_ConfigureFromArgs(argc, argv);
 #endif
@@ -169,8 +190,21 @@ int main(int argc, char *argv[])
 			printf("CTR Native %s (%s)\n", CTR_NATIVE_VERSION, CTR_NATIVE_BUILD_ID);
 			return 0;
 		}
+#if defined(CTR_NATIVE)
+		/* Launcher feature probe: do not initialize SDL, scan mods or access
+		 * the original disc. Clean launch is supported from this version. */
+		if (strcmp(argv[argIndex], "--supports-no-mods") == 0)
+		{
+			puts("CFR_NO_MODS_V1");
+			return 0;
+		}
+#endif
 	}
 
+#if defined(CTR_NATIVE)
+	if (NativeSession_NoModsActive())
+		printf("[CFR CLEAN] --no-mods: community racers, karts, wheels, tracks and soundpacks disabled for this process\n");
+#endif
 	printf("[CTR Native] Starting...\n");
 	fflush(stdout);
 
@@ -270,10 +304,12 @@ int main(int argc, char *argv[])
 #if defined(CTR_CSEQ_LIBERATION)
 	NativeMusicRegistry_Shutdown();
 #endif
+	NativeOccAsync_Shutdown();
 	NativeObj_Shutdown();
 	CharacterRegistry_Shutdown();
 #endif
 
+	NativeWheelJobs_Shutdown();
 	NativeJobs_Shutdown();
 	Platform_Shutdown();
 	return NativeConsole_Return(result);

@@ -1,6 +1,7 @@
 /* Crash Forge native LEV/VRM track discovery.
    This module does not modify original tracks or the rendering pipeline. */
 #include <platform/native_custom_tracks.h>
+#include <NativeSession.h>
 #include <platform/native_assets.h>
 #include <SDL3/SDL.h>
 #include <stdio.h>
@@ -16,6 +17,7 @@
 struct NCT_Record
 {
     char slug[64];
+    char id[80];
     char name[80];
     char lev[NCT_PATH_MAX];
     char vrm[NCT_PATH_MAX];
@@ -24,10 +26,14 @@ struct NCT_Record
     char finalMusic[192];
     int musicKind;
     int musicSamples;
+    int originalLevelID; /* original retail slot, -1 when not declared */
+    int sortOrder; /* optional 0..999; -1 uses existing name sort */
+    int manifestOrder; /* track_order.txt position, -1 when not listed */
 };
 static struct NCT_Record s_nctRecords[NATIVE_CUSTOM_TRACK_LIMIT];
 static int s_nctCount;
 static int s_nctSelected = -1;
+static int s_nctScanned;
 
 static char *NCT_Trim(char *p)
 {
@@ -208,6 +214,9 @@ static void NCT_Add(const char *prefix, const char *slug, int legacy)
     memset(&newTrack,0,sizeof(newTrack));
     snprintf(newTrack.slug,sizeof(newTrack.slug),"%s",slug);
     snprintf(newTrack.name,sizeof(newTrack.name),"%s",slug);
+    newTrack.originalLevelID=-1;
+    newTrack.sortOrder=-1;
+    newTrack.manifestOrder=-1;
     while(fgets(line,sizeof(line),f))
     {
         char *str=NCT_Trim(line);
@@ -236,6 +245,20 @@ static void NCT_Add(const char *prefix, const char *slug, int legacy)
                     formatOK=!SDL_strcasecmp(val,"native_lev_vrm");
                 if(!SDL_strcasecmp(key,"name")&&*val)
                     snprintf(newTrack.name,sizeof(newTrack.name),"%s",val);
+                if(!SDL_strcasecmp(key,"sort_order"))
+                {
+                    char *end=NULL;
+                    long n=strtol(val,&end,10);
+                    if(end!=val && !*end && n>=0 && n<=999)
+                        newTrack.sortOrder=(int)n;
+                }
+                if(!SDL_strcasecmp(key,"original_level_id"))
+                {
+                    char *end=NULL;
+                    long n=strtol(val,&end,10);
+                    if(end!=val && !*end && n>=0 && n<=0x1f)
+                        newTrack.originalLevelID=(int)n;
+                }
                 if(!SDL_strcasecmp(key,"lev"))
                     snprintf(levFile,sizeof(levFile),"%s",val);
                 if(!SDL_strcasecmp(key,"vrm"))
@@ -278,6 +301,8 @@ static void NCT_Add(const char *prefix, const char *slug, int legacy)
     if(legacy && declaredMeta &&
        (!NCT_SafeSlug(declaredID)||SDL_strcasecmp(declaredType,"Track")))
         return;
+    snprintf(newTrack.id,sizeof(newTrack.id),"%s",
+             declaredMeta ? declaredID : slug);
     if(snprintf(newTrack.lev,sizeof(newTrack.lev),"mods/%s%s/%s",
                 prefix,slug,levFile)>=(int)sizeof(newTrack.lev)||
        snprintf(newTrack.vrm,sizeof(newTrack.vrm),"mods/%s%s/%s",
@@ -377,11 +402,83 @@ static void NCT_ScanDir(const char *prefix,int legacy)
 #endif
 }
 
+static int NCT_FindUnsorted(const char *id)
+{
+    int i;
+    if(!id || !*id)return -1;
+    for(i=0;i<s_nctCount;i++)
+        if(!SDL_strcasecmp(id,s_nctRecords[i].id) ||
+           !SDL_strcasecmp(id,s_nctRecords[i].slug))
+            return i;
+    return -1;
+}
+
+static void NCT_ApplyOrderManifest(void)
+{
+    char path[NCT_PATH_MAX];
+    FILE *f;
+    char line[256];
+    int order=0;
+    int applied=0;
+
+    /* Optional user-editable order. One stable track ID/slug per line.
+     * Tracks not listed remain valid and are appended by sort_order/name. */
+    if(!NativeAssets_BuildPath("mods/tracks/track_order.txt",path,sizeof(path)))
+        return;
+    f=fopen(path,"rb");
+    if(!f)return;
+
+    while(fgets(line,sizeof(line),f))
+    {
+        char *id=NCT_Trim(line);
+        int index;
+        if(!*id || *id=='#' || *id==';')continue;
+        index=NCT_FindUnsorted(id);
+        if(index<0)
+        {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[CustomTracks] track_order.txt unknown id: %s",id);
+            continue;
+        }
+        if(s_nctRecords[index].manifestOrder>=0)
+        {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[CustomTracks] track_order.txt duplicate id: %s",id);
+            continue;
+        }
+        s_nctRecords[index].manifestOrder=order++;
+        applied++;
+    }
+    fclose(f);
+    SDL_Log("[CustomTracks] track_order.txt applied %d/%d listed track(s)",
+            applied,s_nctCount);
+}
+
 static int NCT_Compare(const void *a,const void *b)
 {
     const struct NCT_Record *left=(const struct NCT_Record *)a;
     const struct NCT_Record *right=(const struct NCT_Record *)b;
-    return SDL_strcasecmp(left->name,right->name);
+
+    /* Global manifest wins. This lets users reorder tracks without touching
+     * each mod folder or recompiling the game. Unlisted drop-in tracks still
+     * appear automatically after the manifest block. */
+    if(left->manifestOrder>=0 && right->manifestOrder<0)return -1;
+    if(left->manifestOrder<0 && right->manifestOrder>=0)return 1;
+    if(left->manifestOrder>=0 && right->manifestOrder>=0 &&
+       left->manifestOrder!=right->manifestOrder)
+        return left->manifestOrder<right->manifestOrder?-1:1;
+
+    /* Per-track order remains a compatible fallback for author packs. */
+    if(left->sortOrder>=0 && right->sortOrder<0)return -1;
+    if(left->sortOrder<0 && right->sortOrder>=0)return 1;
+    if(left->sortOrder>=0 && right->sortOrder>=0 &&
+       left->sortOrder!=right->sortOrder)
+        return left->sortOrder<right->sortOrder?-1:1;
+    {
+        const int byName=SDL_strcasecmp(left->name,right->name);
+        if(byName)return byName;
+    }
+    return SDL_strcasecmp(left->slug,right->slug);
 }
 
 void NativeCustomTracks_ClearSelection(void){s_nctSelected=-1;}
@@ -393,16 +490,44 @@ void NativeCustomTracks_Scan(void)
 {
     s_nctCount=0;
     s_nctSelected=-1;
+    if (NativeSession_NoModsActive())
+    {
+        s_nctScanned = 1;
+        SDL_Log("[CFR CLEAN] custom tracks disabled for this session");
+        return;
+    }
     NCT_ScanDir("",0);
     NCT_ScanDir("tracks/",1);
+    NCT_ApplyOrderManifest();
     qsort(s_nctRecords,(size_t)s_nctCount,sizeof(s_nctRecords[0]),NCT_Compare);
+    s_nctScanned = 1;
     SDL_Log("[CustomTracks] %d valid native LEV/VRM track(s) found",s_nctCount);
+}
+/* Avoid synchronous multi-megabyte LEV/VRM reads on menu transitions.
+ * Calling Scan() explicitly continues to support installed mods refresh. */
+void NativeCustomTracks_EnsureScanned(void)
+{
+    if (!s_nctScanned)
+        NativeCustomTracks_Scan();
 }
 int NativeCustomTracks_Count(void){return s_nctCount;}
 const char *NativeCustomTracks_Name(int index)
 {
     return index>=0&&index<s_nctCount ? s_nctRecords[index].name : NULL;
 }
+const char *NativeCustomTracks_IdAt(int index)
+{
+    return index>=0 && index<s_nctCount ? s_nctRecords[index].id : NULL;
+}
+int NativeCustomTracks_FindId(const char *id)
+{
+    if(!id || !*id)return -1;
+    for(int i=0;i<s_nctCount;i++)
+        if(!SDL_strcasecmp(id,s_nctRecords[i].id) ||
+           !SDL_strcasecmp(id,s_nctRecords[i].slug)) return i;
+    return -1;
+}
+int NativeCustomTracks_SelectedIndex(void){return NativeCustomTracks_IsSelected()?s_nctSelected:-1;}
 int NativeCustomTracks_Select(int index)
 {
     if(index<0||index>=s_nctCount){s_nctSelected=-1;return 0;}
@@ -421,9 +546,31 @@ int NativeCustomTracks_MusicKindAt(int index)
 {
     return index>=0&&index<s_nctCount?s_nctRecords[index].musicKind:0;
 }
+int NativeCustomTracks_OriginalLevelIDAt(int index)
+{
+    return index>=0&&index<s_nctCount?s_nctRecords[index].originalLevelID:-1;
+}
+int NativeCustomTracks_SelectedOriginalLevelID(void)
+{
+    return NativeCustomTracks_IsSelected() ?
+           s_nctRecords[s_nctSelected].originalLevelID : -1;
+}
 const char *NativeCustomTracks_MusicPathAt(int index)
 {
     return index>=0&&index<s_nctCount?s_nctRecords[index].music:NULL;
+}
+int NativeCustomTracks_MusicSamplesAt(int index)
+{
+    return index>=0&&index<s_nctCount?s_nctRecords[index].musicSamples:0;
+}
+const char *NativeCustomTracks_DirectoryAt(int index)
+{
+    return index>=0&&index<s_nctCount?s_nctRecords[index].directory:NULL;
+}
+const char *NativeCustomTracks_ActiveName(void)
+{
+    return NativeCustomTracks_IsActiveRace() ?
+           s_nctRecords[s_nctSelected].name : NULL;
 }
 int NativeCustomTracks_SelectedMusicKind(void)
 {

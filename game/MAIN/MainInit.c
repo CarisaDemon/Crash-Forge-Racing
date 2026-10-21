@@ -1,6 +1,117 @@
 #include <common.h>
 #if defined(CTR_NATIVE)
 #include <NativeRacerVisual.h>
+#include <NativeHangout.h>
+
+/* 2P widescreen is genuinely PORTRAIT (each image 253x216), NOT a
+ * 4-player quadrant stretched to full height. Keep pristine 2P tables so
+ * switching back to 4:3 restores every retail pixel and every 3D slot. */
+static struct UiElement2D s_nativeRetailTwoPlayerHud[2][UI_HUD_SLOT_COUNT];
+static int s_nativeRetailTwoPlayerHudSaved;
+static int s_nativeTwoPlayerAppliedAspect = -1;
+
+/* Positions are in the game's 512x216 coordinate system. Both players
+ * receive identical relative positions inside their independent panes.
+ * This is separate from the four-player HUD, which has half the height. */
+static void MainInit_NativeSetTwoPlayerHudLayout(int numPlyr)
+{
+	struct UiElement2D *dst[2]={data.hud_2P_P1,data.hud_2P_P2};
+	if(!s_nativeRetailTwoPlayerHudSaved)
+	{
+		for(int p=0;p<2;p++)
+			memcpy(s_nativeRetailTwoPlayerHud[p],dst[p],
+			       sizeof(s_nativeRetailTwoPlayerHud[p]));
+		s_nativeRetailTwoPlayerHudSaved=1;
+	}
+	for(int p=0;p<2;p++)
+	{
+		struct UiElement2D *h=dst[p];
+		memcpy(h,s_nativeRetailTwoPlayerHud[p],sizeof(s_nativeRetailTwoPlayerHud[p]));
+		if(numPlyr!=2 || !Platform_GetWideMode())
+			continue;
+		const int x=p?259:0;
+		/* Top bar: item and fruit; race lap below top-right. */
+		h[UI_HUD_SLOT_WEAPON].x=x+18;
+		h[UI_HUD_SLOT_WEAPON].y=9;
+		h[UI_HUD_SLOT_WEAPON].scale=3072;
+		h[UI_HUD_SLOT_WUMPA_COUNT].x=x+124;
+		h[UI_HUD_SLOT_WUMPA_COUNT].y=13;
+		h[UI_HUD_SLOT_FRUIT_MODEL].x=x+162;
+		h[UI_HUD_SLOT_FRUIT_MODEL].y=14;
+		h[UI_HUD_SLOT_LAP_COUNT].x=x+237;
+		h[UI_HUD_SLOT_LAP_COUNT].y=37;
+		h[UI_HUD_SLOT_BATTLE_SCORE].x=x+174;
+		h[UI_HUD_SLOT_BATTLE_SCORE].y=38;
+		h[UI_HUD_SLOT_RACING_WEAPON_BG].x=x+20;
+		h[UI_HUD_SLOT_RACING_WEAPON_BG].y=5;
+		h[UI_HUD_SLOT_BATTLE_WEAPON_BG].x=x+20;
+		h[UI_HUD_SLOT_BATTLE_WEAPON_BG].y=5;
+
+		/* Bottom: rank at outer edge; drift/meter and speed on same
+		 * player's pane, never on the shared central separator. */
+		h[UI_HUD_SLOT_BIG1].x=x+18;
+		h[UI_HUD_SLOT_BIG1].y=174;
+		h[UI_HUD_SLOT_BIG1].z=256;
+		h[UI_HUD_SLOT_BIG1].scale=3072;
+		h[UI_HUD_SLOT_RANK].x=x+52;
+		h[UI_HUD_SLOT_RANK].y=182;
+		h[UI_HUD_SLOT_JUMP_METER].x=x+208;
+		h[UI_HUD_SLOT_JUMP_METER].y=174;
+		h[UI_HUD_SLOT_SLIDE_METER].x=x+153;
+		h[UI_HUD_SLOT_SLIDE_METER].y=188;
+		h[UI_HUD_SLOT_SPEEDOMETER].x=x+198;
+		h[UI_HUD_SLOT_SPEEDOMETER].y=185;
+		h[UI_HUD_SLOT_TIMEBOX].x=x+211;
+		h[UI_HUD_SLOT_TIMEBOX].y=49;
+	}
+}
+
+/* Executed at the start of a frame so changes in Options > Graphics are
+ * applied immediately. PushBuffer_Init rebuilds rectangles, projection
+ * and aspect for both cameras; the following camera tick keeps the normal
+ * smooth camera follow. No loading stage or track restart is required. */
+void MainInit_NativeSyncTwoPlayerLayout(struct GameTracker *gGT)
+{
+	if(gGT==NULL || gGT->numPlyrCurrGame!=2 ||
+	   (gGT->gameMode1 & MAIN_MENU)!=0 ||
+	   gGT->level1==NULL)
+		return;
+	/* Live reflow only after MainInit_FinalizeInit built THIS 2P level (it
+	 * stores the applied aspect; -1 for menu and other player counts) and
+	 * while no load runs. On menu->race numPlyrCurrGame is already 2 while
+	 * drivers[]/instBigNum still belong to the freed previous scene:
+	 * 0xC0000005 at RVA 0x85371, 2026-10-19. */
+	if(s_nativeTwoPlayerAppliedAspect<0 || sdata->Loading.stage!=LOAD_IDLE)
+		return;
+	const int wide=Platform_GetWideMode()!=0;
+	if(s_nativeTwoPlayerAppliedAspect==wide)
+		return;
+
+	for(int p=0;p<2;p++)
+		PushBuffer_Init(&gGT->pushBuffer[p],p,2);
+	MainInit_NativeSetTwoPlayerHudLayout(2);
+	s_nativeTwoPlayerAppliedAspect=wide;
+
+	/* Big rank digits are 3D UI instances initialized only at load;
+	 * update their transforms on layout changes, too. */
+	for(int p=0;p<2;p++)
+	{
+		struct Driver *d=gGT->drivers[p];
+		const struct UiElement2D *ui=&data.hud_2P_P1[
+			p*UI_HUD_SLOT_COUNT+UI_HUD_SLOT_BIG1];
+		if(d!=NULL && d->instBigNum!=NULL)
+		{
+			d->instBigNum->matrix.t[0]=UI_ConvertX_2(ui->x,ui->z);
+			d->instBigNum->matrix.t[1]=UI_ConvertY_2(ui->y,ui->z);
+			d->instBigNum->matrix.t[2]=ui->z;
+			d->instBigNum->scale.x=ui->scale;
+			d->instBigNum->scale.y=ui->scale;
+			d->instBigNum->scale.z=ui->scale;
+		}
+	}
+	Platform_Log("[SPLIT 2P] live aspect=%s layout=%s HUD=reflow cameras=refreshed\\n",
+	             wide?"16:9":"4:3",wide?"LEFT/RIGHT":"TOP/BOTTOM");
+}
 #endif
 
 #ifdef CTR_NATIVE
@@ -151,12 +262,17 @@ void MainInit_PrimMem(struct GameTracker *gGT)
 {
 	int size = MainInit_GetPrimMemSize(gGT);
 #ifdef CTR_NATIVE
-	/* PC render budget: the native camera/frustum path can legitimately expose
-	   much more geometry than the PS1 PVS did. Four times retail was still
-	   exhausting Coco Park at some camera angles, which silently dropped later
-	   world polygons. Eight times retail stays small on PC while removing that
-	   angle-dependent primitive-memory ceiling. */
-	if (size > 0) size *= 8;
+	/* Native PC render packet arena. HD modular racers can saturate the
+	 * former 8x retail arena before the track geometry has been emitted.
+	 * Keep non-race/menu allocations at 8x; use 16x in a real race or battle.
+	 * This is allocated at level load (not per frame), remains below the
+	 * 24-bit OT token budget, and preserves 32-bit memory layouts. */
+	if (size > 0)
+	{
+		const u32 raceModes = TIME_TRIAL | BATTLE_MODE | ARCADE_MODE;
+		const int scale = (gGT->gameMode1 & raceModes) ? 16 : 8;
+		size *= scale;
+	}
     /* The Assembly Lane prototype occupies a much larger visible world
      * than Crash Cove. Reserve enough space for clipped faces and nearby
      * karts without silently truncating the track's drawing packets.
@@ -499,6 +615,12 @@ void MainInit_FinalizeInit(struct GameTracker *gGT)
 	}
 
 	MainInit_JitPoolsReset(gGT);
+#if defined(CTR_NATIVE)
+	/* Every Instance of the previous scene died in the pool reset above;
+	 * drop native caches that would still point into it. AH_SaveObj
+	 * re-binds the save screen when the new hub spawns it. */
+	NativeHangout_BindSaveScreen(NULL);
+#endif
 
 	lev1 = gGT->level1;
 
@@ -527,6 +649,14 @@ void MainInit_FinalizeInit(struct GameTracker *gGT)
 	PushBuffer_Init(&gGT->pushBuffer[1], 1, numPlyr);
 	PushBuffer_Init(&gGT->pushBuffer[2], 2, numPlyr);
 	PushBuffer_Init(&gGT->pushBuffer[3], 3, numPlyr);
+#if defined(CTR_NATIVE)
+	MainInit_NativeSetTwoPlayerHudLayout(numPlyr);
+	s_nativeTwoPlayerAppliedAspect=(numPlyr==2)?(Platform_GetWideMode()!=0):-1;
+	if(numPlyr==2)
+		Platform_Log("[SPLIT 2P] aspect=%s layout=%s (Arcade/VS/Battle)\n",
+		             Platform_GetWideMode()?"16:9":"4:3",
+		             Platform_GetWideMode()?"LEFT/RIGHT":"TOP/BOTTOM");
+#endif
 
 	struct PushBuffer *pb;
 

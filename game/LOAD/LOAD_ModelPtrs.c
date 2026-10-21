@@ -33,6 +33,22 @@ void LOAD_GlobalModelPtrs_MPK()
 	{
 		LibraryOfModels_Store(gGT, -1, (struct Model **)sdata->PLYROBJECTLIST);
 	}
+#if defined(CTR_NATIVE)
+	/* The retail 4P pack is still loaded, but its low-detail fourth
+	 * kart/racer is overridden after storing the pack pointers. */
+	if (Platform_GetCharacterDetailMode()==3)
+	{
+		struct Model *high=LOAD_NativeUltraFourthModel();
+		if(high && high->id>=0 && high->id<(s32)len(gGT->modelPtr))
+			gGT->modelPtr[high->id]=high;
+		for(int ai=0;ai<4;ai++)
+		{
+			high=LOAD_NativeUltra2PAiModel(ai);
+			if(high && high->id>=0 && high->id<(s32)len(gGT->modelPtr))
+				gGT->modelPtr[high->id]=high;
+		}
+	}
+#endif
 }
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80031bdc-0x80031c1c.

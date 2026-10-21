@@ -72,6 +72,8 @@ struct NativeObjMesh {
     float renderOffsetScaled[3];
     float userScale;
     float userOffset[3];
+    /* Standalone CNK Tornado additive texture, not regular OBJ materials. */
+    unsigned char additiveEffect;
     short frameOrigin[3];
     unsigned int wheelMask;
     struct NativeObjWheel wheels[4];
@@ -81,6 +83,8 @@ struct NativeObjMesh {
 };
 #define NATIVE_OBJ_MODEL_MAGIC 0x4f424a31
 struct Model *NativeObj_LoadRacer(const char *assetName);
+/* Dedicated native weapon model; cannot override CTR's Warp Orb model. */
+struct Model *NativeObj_LoadCnkTornado(void);
 struct Model *NativeObj_LoadStaticTrack(const char *slug);
 int NativeObj_CustomTrack_IsActive(void);
 void NativeObj_CustomTrack_Update(struct GameTracker *gt);

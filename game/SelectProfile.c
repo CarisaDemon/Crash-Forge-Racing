@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <platform/native_custom_tracks.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80047da8-0x80047dfc.
 void SelectProfile_QueueLoadHub_MenuProc(struct RectMenu *menu)
@@ -422,8 +425,22 @@ void SelectProfile_DrawGhostProfile(struct GhostProfile *profile, int posX, int 
 	{
 		struct MetaDataLEV *mdLev = &data.metaDataLEV[profile->trackID];
 		int iconID = data.MetaDataCharacters[CharacterRegistry_GetIconRetailID(profile->characterID)].iconID;
+		const char *trackName = sdata->lngStrings[mdLev->name_LNG];
+#if defined(CTR_NATIVE)
+		{
+			int customLevelID = NativeCustomTracks_SelectedOriginalLevelID();
+			int customIndex = NativeCustomTracks_SelectedIndex();
+			if (customLevelID >= 0 && customIndex >= 0 &&
+			    profile->trackID == customLevelID)
+			{
+				const char *customName = NativeCustomTracks_Name(customIndex);
+				if (customName && *customName)
+					trackName = customName;
+			}
+		}
+#endif
 
-		DecalFont_DrawLine(sdata->lngStrings[mdLev->name_LNG], posX + 0x64, posY + 0x1e, FONT_SMALL, 0xffff801d);
+		DecalFont_DrawLine((char *)trackName, posX + 0x64, posY + 0x1e, FONT_SMALL, 0xffff801d);
 		DecalFont_DrawLine(RECTMENU_DrawTime(profile->trackTime), posX + 0x78, posY + 10, FONT_BIG, 0xffff8001);
 		RECTMENU_DrawPolyGT4(gGT->ptrIcons[iconID], posX + 8, posY + 5, &gGT->backBuffer->primMem, gGT->backBuffer->otMem.uiOT, sdata->ghostIconColor,
 		                     sdata->ghostIconColor, sdata->ghostIconColor, sdata->ghostIconColor, TRANS_50_DECAL, 0x1000);
@@ -653,6 +670,16 @@ static int SelectProfile_IsGhostMode(void)
 	return *SelectProfile_AllProfiles_Mode() == SELECT_PROFILE_SCREEN_GHOST;
 }
 
+static s16 SelectProfile_GhostTrackID(s16 fallback)
+{
+#if defined(CTR_NATIVE)
+	int customLevelID = NativeCustomTracks_SelectedOriginalLevelID();
+	if (customLevelID >= 0)
+		return (s16)customLevelID;
+#endif
+	return fallback;
+}
+
 static int SelectProfile_AdvProfileOccupied(int slot)
 {
 	return SelectProfile_MemcardProfile()->advProgress[slot].characterID >= 0;
@@ -703,7 +730,9 @@ static void SelectProfile_StartGhostSave(struct RectMenu *menu)
 		time = driver->timeElapsedInRace;
 	}
 
-	RefreshCard_GhostEncodeProfile(menu->rowSelected, data.characterIDs[0], gGT->levelID, time, gGT->prevNameEntered);
+	RefreshCard_GhostEncodeProfile(menu->rowSelected, data.characterIDs[0],
+	                               SelectProfile_GhostTrackID(gGT->levelID),
+	                               time, gGT->prevNameEntered);
 
 	sdata->ghostProfile_indexSave = menu->rowSelected;
 	sdata->ghostProfile_rowSelect = -1;
@@ -857,7 +886,8 @@ static void SelectProfile_DrawGhostRows(struct RectMenu *menu, int rowCount, int
 		// NOTE(aalhendi): Retail compares against GameTracker.currLEV
 		// (0x1eb0). Ghost selection happens before QueueLoadTrack, so
 		// levelID still refers to the previously loaded level.
-		if ((profile != NULL) && (profile->trackID != sdata->gGT->currLEV))
+		if ((profile != NULL) &&
+		    (profile->trackID != SelectProfile_GhostTrackID(sdata->gGT->currLEV)))
 		{
 			isWrongTrack = sdata->memcardAction != SELECT_PROFILE_ACTION_SAVE;
 		}
@@ -1014,7 +1044,8 @@ static void SelectProfile_StartLoadGhost(struct RectMenu *menu, int rowCount)
 
 	// NOTE(aalhendi): Retail uses currLEV here; levelID is not updated to the
 	// selected Time Trial track until the queued load starts.
-	if (sdata->ghostProfile_memcard[menu->rowSelected].trackID == sdata->gGT->currLEV)
+	if (sdata->ghostProfile_memcard[menu->rowSelected].trackID ==
+	    SelectProfile_GhostTrackID(sdata->gGT->currLEV))
 	{
 		sdata->ghostProfile_indexLoad = menu->rowSelected;
 		RefreshCard_StartMemcardAction(5);

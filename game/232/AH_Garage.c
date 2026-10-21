@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#endif
 
 enum AHGarageConstants
 {
@@ -38,6 +41,11 @@ void AH_Garage_ThDestroy(struct Thread *t)
 void AH_Garage_Open(struct ScratchpadStruct *sps, void *hitObject)
 {
 	struct Thread *otherTh = hitObject;
+
+#if defined(CTR_NATIVE)
+	if (NativeHangout_IsActive())
+		return;
+#endif
 
 	if (otherTh->modelIndex != DYNAMIC_PLAYER)
 	{
@@ -103,6 +111,20 @@ void AH_Garage_ThTick(struct Thread *t)
 	s32 levelID = gGT->levelID;
 	s32 hubID = levelID - GEM_STONE_VALLEY;
 	struct ScratchpadStruct *sps = CTR_SCRATCHPAD_PTR(struct ScratchpadStruct, 0x108);
+
+#if defined(CTR_NATIVE)
+	/* No boss collision, opening animation, fade or race transition in Hangout. */
+	if (NativeHangout_IsActive())
+	{
+		sdata->doorAccessFlags &= ~AH_GARAGE_ACCESS_FLAG;
+		garage->direction = BOSS_GARAGE_DOOR_STOPPED;
+		garage->cooldown = 0;
+		inst->matrix.t[1] = inst->instDef->pos.y;
+		inst->flags &= ~HIDE_MODEL;
+		t->modelIndex = 0;
+		return;
+	}
+#endif
 
 	// if door is not opening or closing
 	if (garage->direction == BOSS_GARAGE_DOOR_STOPPED)
@@ -440,6 +462,11 @@ void AH_Garage_LInB(struct Instance *inst)
 
 		garage->garageTopInst = garageTop;
 	}
+
+#if defined(CTR_NATIVE)
+	if (NativeHangout_IsActive())
+		goto GarageLocked;
+#endif
 
 	if (levelID == GEM_STONE_VALLEY)
 	{

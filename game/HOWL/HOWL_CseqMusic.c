@@ -1,6 +1,7 @@
 #include <common.h>
 #include <platform/native_custom_music.h>
 #include <platform/native_custom_tracks.h>
+#include <platform/native_music_selection.h>
 #if defined(CTR_NATIVE)
 #include <NativeHangout.h>
 #endif
@@ -16,8 +17,13 @@ int CseqMusic_Start(u16 songID, int p2, struct SongSet *p3, int p4, int p5)
 #if defined(CTR_NATIVE)
 	int musicLevelID =
 		(sdata->gGT != NULL && NativeHangout_IsActive())
-			? NATIVE_HANGOUT_MUSIC_LEVEL_ID
-			: ((sdata->gGT != NULL) ? sdata->gGT->levelID : -1);
+			? NATIVE_MUSIC_HANGOUT_SLOT
+			: (NativeCustomTracks_IsActiveRace() &&
+			   NativeCustomTracks_SelectedIndex() >= 0)
+				? NATIVE_MUSIC_CUSTOM_BASE + NativeCustomTracks_SelectedIndex()
+				: (sdata->gGT != NULL && IS_BOSS_RACE(sdata->gGT->gameMode1))
+					? NATIVE_MUSIC_BOSS_SLOT
+					: ((sdata->gGT != NULL) ? sdata->gGT->levelID : -1);
 #endif
 #if defined(CTR_CSEQ_LIBERATION)
 	int externalCseq = 0;
@@ -29,18 +35,32 @@ int CseqMusic_Start(u16 songID, int p2, struct SongSet *p3, int p4, int p5)
 	{
 		return 0;
 	}
+#ifdef CTR_NATIVE
+    /* Only override the mask melody. Retail mask pickup SFX stay intact.
+     * Preserve the Music_Adjust 0/1/2 state transitions. */
+    if((songID==CSEQ_SONG_AKU || songID==CSEQ_SONG_UKA) &&
+       NativeCustomMusic_TryStartMaskCue(songID))
+        return 1;
+#endif
 #if defined(CTR_CSEQ_LIBERATION)
 	if (songID == 0 && sdata->gGT != NULL)
 	{
 		int customTrack = NativeCustomTracks_IsActiveRace();
+		struct NativeMusicSelectionResolved selection;
+		const int source = customTrack ?
+			NativeMusicSelection_Resolve(musicLevelID, &selection) :
+			NATIVE_MUSIC_SOURCE_EXISTING;
 		if (customTrack &&
-		    NativeCustomTracks_SelectedMusicKind()!=NATIVE_CUSTOM_TRACK_MUSIC_CSEQ)
+		    (source == NATIVE_MUSIC_SOURCE_OGG ||
+		     (source == NATIVE_MUSIC_SOURCE_EXISTING &&
+		      NativeCustomTracks_SelectedMusicKind()!=NATIVE_CUSTOM_TRACK_MUSIC_CSEQ)))
 		{
 			/* Custom maps share Crash Cove's level shell, never its music.
 			 * OGG is loaded from this track's own mod folder only.
 			 * Missing music is intentionally SILENT; race SFX still work. */
 			CseqMusic_StopAll();
-			if (NativeCustomTracks_SelectedMusicKind()==NATIVE_CUSTOM_TRACK_MUSIC_OGG)
+			if (source == NATIVE_MUSIC_SOURCE_OGG ||
+			    NativeCustomTracks_SelectedMusicKind()==NATIVE_CUSTOM_TRACK_MUSIC_OGG)
 			{
 				if(!NativeCustomMusic_TryStartLevel(musicLevelID))
 					Platform_Log("[CustomTracks] OGG failed; track remains silent\n");
@@ -50,7 +70,9 @@ int CseqMusic_Start(u16 songID, int p2, struct SongSet *p3, int p4, int p5)
 			return 1;
 		}
 		externalCseq = customTrack ?
-			NativeMusicRegistry_TryApplyCustomTrack() :
+			(source == NATIVE_MUSIC_SOURCE_CSEQ ?
+			 NativeMusicRegistry_TryApplyLevel(musicLevelID) :
+			 NativeMusicRegistry_TryApplyCustomTrack()) :
 			NativeMusicRegistry_TryApplyLevel(musicLevelID);
 		if(customTrack && !externalCseq)
 		{
@@ -312,6 +334,12 @@ void CseqMusic_Restart(u16 songID, int p2)
 	int i;
 	struct Song *song;
 
+#ifdef CTR_NATIVE
+    if((songID==CSEQ_SONG_AKU || songID==CSEQ_SONG_UKA) &&
+       NativeCustomMusic_RestartMaskCue(songID))
+        return;
+#endif
+
 	if (sdata->boolAudioEnabled == 0)
 	{
 		return;
@@ -458,6 +486,11 @@ void CseqMusic_Stop(u16 songID)
 {
 	int i;
 	struct Song *song;
+
+#ifdef CTR_NATIVE
+    if(songID==CSEQ_SONG_AKU || songID==CSEQ_SONG_UKA)
+        NativeCustomMusic_StopMaskCue(songID);
+#endif
 
 	if (sdata->boolAudioEnabled == 0)
 	{

@@ -1,8 +1,16 @@
 #include <common.h>
+#if defined(CTR_NATIVE)
+#include <NativeHangout.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8003e29c-0x8003e344.
 u8 MEMCARD_Load(int slotIdx, char *name, u8 *ptrMemcard, int memcardFileSize, u32 loadFlags)
 {
+#if defined(CTR_NATIVE)
+	/* Social sessions have no relationship with any Adventure save slot. */
+	if (NativeHangout_IsActive())
+		return MC_RETURN_TIMEOUT;
+#endif
 	if (sdata->memcard_stage != MC_STAGE_IDLE)
 		return MC_RETURN_TIMEOUT;
 
@@ -30,6 +38,11 @@ u8 MEMCARD_Load(int slotIdx, char *name, u8 *ptrMemcard, int memcardFileSize, u3
 u8 MEMCARD_Save(int slotIdx, char *name, char *param_3, u8 *ptrMemcard, int memcardFileSize, u32 saveFlags)
 
 {
+#if defined(CTR_NATIVE)
+	/* Defense in depth: never write transient Hangout progress to disk. */
+	if (NativeHangout_IsActive())
+		return MC_RETURN_TIMEOUT;
+#endif
 	if (sdata->memcard_stage != MC_STAGE_IDLE)
 		return MC_RETURN_TIMEOUT;
 

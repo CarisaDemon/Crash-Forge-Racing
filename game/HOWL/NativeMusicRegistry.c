@@ -1,9 +1,11 @@
 #include <common.h>
 #include <NativeMusicRegistry.h>
+#include <NativeSession.h>
 #include <NativeCustomSampleRegistry.h>
 #include <platform/native_assets.h>
 #include <platform/native_mod_packages.h>
 #include <platform/native_custom_tracks.h>
+#include <platform/native_music_selection.h>
 
 #if defined(CTR_NATIVE)
 
@@ -22,6 +24,7 @@ static unsigned char *s_externalCseq;
 static int s_externalCseqSize;
 static int s_externalLevel = -1;
 static char s_externalSlug[NATIVE_MUSIC_SLUG_MAX];
+static char s_externalPath[NATIVE_MUSIC_PATH_MAX];
 
 static char *NativeMusic_Trim(char *text)
 {
@@ -323,6 +326,7 @@ static int NativeMusic_LoadPackage(
 	s_externalCseq = bytes.data;
 	s_externalCseqSize = bytes.size;
 	s_externalLevel = requestedLevel;
+	s_externalPath[0] = 0;
 	snprintf(
 		s_externalSlug,
 		sizeof(s_externalSlug),
@@ -342,6 +346,7 @@ static int NativeMusic_LoadPackage(
 
 int NativeMusicRegistry_TryApplyCustomTrack(void)
 {
+    if (NativeSession_NoModsActive()) return 0;
     struct NativeAssetsByteBuffer bytes;
     const char *music;
     const char *directory;
@@ -379,20 +384,84 @@ int NativeMusicRegistry_TryApplyCustomTrack(void)
     s_externalCseq=bytes.data;
     s_externalCseqSize=bytes.size;
     s_externalLevel=key;
+    s_externalPath[0]=0;
     snprintf(s_externalSlug,sizeof(s_externalSlug),"%s",directory);
     howl_ParseCseqHeader((struct CseqHeader *)s_externalCseq);
     Platform_Log("[CustomTracks] CSEQ from mod: %s (%d bytes)\n",music,bytes.size);
     return 1;
 }
 
+/* Explicit Music settings can select a particular CSEQ from ANY enabled
+ * pack, regardless of its original target level. The path and WAV bank are
+ * tied to the selected song (not to the most recent filesystem entry). */
+static int NativeMusic_LoadSelected(
+	const struct NativeMusicSelectionResolved *selected,
+	int levelID)
+{
+	struct NativeAssetsByteBuffer bytes;
+	memset(&bytes, 0, sizeof(bytes));
+	if (!selected || !selected->path[0] ||
+	    !NativeAssets_ReadBytes(selected->path, NATIVE_ASSET_READ_DATA_FILE,
+	                           &bytes))
+		return 0;
+
+	if (!NativeMusic_ValidateCseq(bytes.data, bytes.size) ||
+	    !NativeCustomSampleRegistry_LoadDirectory(
+	       selected->directory, selected->customSamples) ||
+	    !NativeMusic_ValidateCustomSampleRefs(bytes.data))
+	{
+		Platform_Log("[Music] Invalid selected CSEQ: %s\n", selected->path);
+		NativeCustomSampleRegistry_Clear();
+		NativeAssets_FreeBytes(&bytes);
+		return 0;
+	}
+
+	s_externalCseq=bytes.data;
+	s_externalCseqSize=bytes.size;
+	s_externalLevel=levelID;
+	snprintf(s_externalSlug,sizeof(s_externalSlug),"%s",selected->pack);
+	snprintf(s_externalPath,sizeof(s_externalPath),"%s",selected->path);
+	howl_ParseCseqHeader((struct CseqHeader *)s_externalCseq);
+	Platform_Log("[Music] Selected CSEQ for level %d: %s\n",
+	             levelID,selected->path);
+	return 1;
+}
+
 int NativeMusicRegistry_TryApplyLevel(int levelID)
 {
+	if (NativeSession_NoModsActive())
+	{
+		NativeMusicRegistry_Shutdown();
+		return 0;
+	}
 	char musicDir[NATIVE_MUSIC_PATH_MAX];
 	DIR *dir;
 	struct dirent *entry;
+	struct NativeMusicSelectionResolved selected;
+	const int source=NativeMusicSelection_Resolve(levelID,&selected);
 
+	if (source == NATIVE_MUSIC_SOURCE_RETAIL ||
+	    source == NATIVE_MUSIC_SOURCE_OGG)
+	{
+		NativeMusicRegistry_Shutdown();
+		return 0;
+	}
+
+	if (source == NATIVE_MUSIC_SOURCE_CSEQ)
+	{
+		if (s_externalCseq != NULL && s_externalLevel == levelID &&
+		    !strcmp(s_externalPath, selected.path))
+		{
+			howl_ParseCseqHeader((struct CseqHeader *)s_externalCseq);
+			return 1;
+		}
+		NativeMusicRegistry_Shutdown();
+		return NativeMusic_LoadSelected(&selected,levelID);
+	}
+
+	/* Existing mode retains all previously imported mods/music CSEQs. */
 	if (s_externalCseq != NULL &&
-	    s_externalLevel == levelID)
+	    s_externalLevel == levelID && !s_externalPath[0])
 	{
 		howl_ParseCseqHeader(
 			(struct CseqHeader *)s_externalCseq);
@@ -406,6 +475,7 @@ int NativeMusicRegistry_TryApplyLevel(int levelID)
 		s_externalCseqSize = 0;
 		s_externalLevel = -1;
 		s_externalSlug[0] = '\0';
+		s_externalPath[0] = '\0';
 		NativeCustomSampleRegistry_Clear();
 	}
 
@@ -490,6 +560,7 @@ void NativeMusicRegistry_Shutdown(void)
 	s_externalCseqSize = 0;
 	s_externalLevel = -1;
 	s_externalSlug[0] = '\0';
+	s_externalPath[0] = '\0';
 	NativeCustomSampleRegistry_Clear();
 }
 

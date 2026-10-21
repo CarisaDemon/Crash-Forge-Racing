@@ -351,6 +351,28 @@ void AH_Map_HubItems(struct UIMap *map, s16 *arrowCounter)
 	struct HubItem *item = D232.hubItemsXY_ptrArray[levelID - GEM_STONE_VALLEY];
 	Vec3 pos3D;
 
+#if defined(CTR_NATIVE)
+	if (NativeHangout_IsActive())
+	{
+		/* Keep the large chat-terminal marker on the Hangout minimap.
+		 * It reuses the retail save-screen symbol, but Hangout cannot
+		 * open a save menu. No story routes, bosses or unlock states. */
+		for (; item->posX != AH_HUB_ITEM_LIST_END_POS_X; item++)
+		{
+			if (item->iconType == AH_HUB_ITEM_SAVE_LOAD_MARKER)
+			{
+				int posX = (int)item->posX - 0x200;
+				int posY = (int)item->posY - 0x100;
+				UI_Map_GetIconPos(map, &posX, &posY);
+				AH_Map_LoadSave_Full(posX, posY,
+					&D232.loadSavePos[0], (char *)&D232.loadSave_col[0],
+					0x800, (int)item->angle);
+			}
+		}
+		return;
+	}
+#endif
+
 	if (item->posX != AH_HUB_ITEM_LIST_END_POS_X)
 	{
 		do
@@ -676,6 +698,9 @@ void AH_Map_Main(void)
 	}
 
 	if (
+#if defined(CTR_NATIVE)
+	    !NativeHangout_IsActive() &&
+#endif
 	    // if Aku Hint is not unlocked
 	    !CHECK_ADV_BIT(sdata->advProgress.rewards, ADV_REWARD_HINT_WELCOME_TO_ARENA) &&
 
@@ -720,6 +745,8 @@ void AH_Map_Main(void)
 
 		AH_Map_Warppads(map, gGT->threadBuckets[WARPPAD].thread, &arrowCounter);
 
+		/* In Hangout this draws only the big chat-screen marker.
+		 * Adventure retains all its original markers and routes. */
 		AH_Map_HubItems(map, &arrowCounter);
 
 		UI_Map_DrawMap(gGT->ptrIcons[AH_MAP_ICON_TOP_HALF], gGT->ptrIcons[AH_MAP_ICON_BOTTOM_HALF],

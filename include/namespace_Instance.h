@@ -325,7 +325,7 @@ struct ModelAnim
 	// copied to instance -> 0xd4
 	// used for compressed animations,
 	// or nullptr if animation is uncompressed
-	u32 *ptrDeltaArray;
+	u32 * P32 ptrDeltaArray;
 
 	// 0x18
 	// struct ModelFrame firstFrame;
@@ -362,13 +362,13 @@ struct ModelHeader
 
 	// 0x24
 	// null if there are animations
-	struct ModelFrame *ptrFrameData;
+	struct ModelFrame * P32 ptrFrameData;
 
 	// 0x28
-	struct TextureLayout **ptrTexLayout; // same as LEV
+	struct TextureLayout * P32 * P32 ptrTexLayout; // same as LEV
 
 	// 0x2C
-	u32 *ptrColors; // CLUT = color lookup table
+	u32 * P32 ptrColors; // CLUT = color lookup table
 
 	// 0x30
 	// same as anim->0x14
@@ -378,10 +378,10 @@ struct ModelHeader
 	u32 numAnimations;
 
 	// 0x38
-	struct ModelAnim **ptrAnimations;
+	struct ModelAnim * P32 * P32 ptrAnimations;
 
 	// 0x3C
-	struct AnimTex *animtex;
+	struct AnimTex * P32 animtex;
 };
 
 enum
@@ -413,7 +413,7 @@ struct Model
 	s16 numHeaders;
 
 	// 0x14
-	struct ModelHeader *headers;
+	struct ModelHeader * P32 headers;
 };
 
 CTR_STATIC_ASSERT(sizeof(((struct Model *)0)->name) == MODEL_NAME_WORD_COUNT * sizeof(u32));
@@ -460,7 +460,7 @@ struct InstDrawPerPlayer
 {
 	// 0x74
 	// used for flag & 0x2 to face camera
-	struct PushBuffer *pushBuffer;
+	struct PushBuffer * P32 pushBuffer;
 
 	// 0x78 - in DrawFunc_Split and DrawFunc_Normal
 	MATRIX mvp;
@@ -479,14 +479,14 @@ struct InstDrawPerPlayer
 
 	// 0xc0 - origin of cur frame
 	// 0xc4 - origin of next frame
-	struct ModelFrame *ptrCurrFrame;
-	struct ModelFrame *ptrNextFrame;
+	struct ModelFrame * P32 ptrCurrFrame;
+	struct ModelFrame * P32 ptrNextFrame;
 
 	// 0xc8
 	u32 ptrCommandList;
 
 	// 0xcc
-	struct TextureLayout **ptrTexLayout;
+	struct TextureLayout * P32 * P32 ptrTexLayout;
 
 	// 0xd0
 	u32 ptrColorLayout; // maybe should be `u32*`
@@ -501,7 +501,7 @@ struct InstDrawPerPlayer
 	s16 depthOffset[2];
 
 	// 0xe0 - pointer to LOD ModelHeader
-	struct ModelHeader *mh;
+	struct ModelHeader * P32 mh;
 
 	// 0xe4
 	int otRangeNormal;    // ptrOT + depthOffset
@@ -550,16 +550,16 @@ CTR_STATIC_ASSERT(sizeof(struct InstDrawPerPlayer) == 0x88);
 struct Instance
 {
 	// 0x0
-	struct Instance *next;
+	struct Instance * P32 next;
 
 	// 0x4
-	struct Instance *prev;
+	struct Instance * P32 prev;
 
 	// 0x8
 	char name[0x10];
 
 	// 0x18
-	struct Model *model;
+	struct Model * P32 model;
 
 	// 0x1c
 	SVec3 scale;
@@ -576,7 +576,7 @@ struct Instance
 
 	// 0x2c
 	// comes from LEVs
-	struct InstDef *instDef;
+	struct InstDef * P32 instDef;
 
 	// 0x30
 	// Rendering matrix (position + rotation)
@@ -623,11 +623,11 @@ struct Instance
 
 	// 0x5c
 	// between 8006c6f0 and 8006d5b8
-	void *funcPtr[4];
+	void * P32 funcPtr[4];
 
 	// 0x6c
 	// Thread and Instance are linked together
-	struct Thread *thread;
+	struct Thread * P32 thread;
 
 	// 0x70
 	// Packed compressed normal bytes; high byte stores driverID+1 when present.

@@ -3,6 +3,8 @@
 #if defined(CTR_NATIVE)
 
 #include <NativeChat.h>
+#include <NativeOnlineSfx.h>
+#include <platform/native_audio.h>
 #include <string.h>
 
 static struct NativeChatMessage s_nativeChatHistory[NATIVE_CHAT_HISTORY_MAX];
@@ -69,6 +71,13 @@ static void NativeChat_Add(
 		NativeChat_CopyText(message->playerName, (int)sizeof(message->playerName), playerName);
 
 	NativeChat_CopyText(message->text, (int)sizeof(message->text), text);
+
+	/* Internal UI cue: play once when the message enters chat history.
+	 * Never tie this to rendering/frame rate and do not expose it to mods. */
+	NativeAudio_OnlineSfxPlay(
+		kind == NATIVE_CHAT_SYSTEM ?
+			NATIVE_ONLINE_SFX_CHAT_SYSTEM :
+			NATIVE_ONLINE_SFX_CHAT_PLAYER);
 }
 
 void NativeChat_Reset(void)

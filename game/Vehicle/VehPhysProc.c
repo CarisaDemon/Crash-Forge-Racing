@@ -2538,10 +2538,21 @@ void VehPhysProc_SlamWall_Init(struct Thread *t, struct Driver *d)
 }
 
 
+#if defined(CTR_NATIVE)
+static int VehPhysProc_CNKTornadoSpinShouldPersist(struct Driver *d);
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80063cf4-0x80063d44.
 void VehPhysProc_SpinFirst_Update(struct Thread *t, struct Driver *d)
 {
 	int speedApprox;
+
+#if defined(CTR_NATIVE)
+	/* The ordinary spin stops as soon as the kart slows down. Tornado impact
+	 * needs its own full 2.3s even when the victim was already stationary. */
+	if (VehPhysProc_CNKTornadoSpinShouldPersist(d))
+		return;
+#endif
 
 	// cooldown after the spinning started
 	if (d->NoInputTimer != 0)
@@ -2643,6 +2654,50 @@ DriverFunc PlayerSpinningFuncTable[DRIVER_FUNC_COUNT] = {VehPhysProc_SpinFirst_I
                                                          VehFrameProc_Spinning,
                                                          VehEmitter_DriverMain};
 
+#if defined(CTR_NATIVE)
+enum
+{
+	/* CNK file specifies a 3000ms grab/lift, including faster spin. */
+	CNK_TORNADO_SPIN_NO_INPUT_TIMER = 3000,
+	CNK_TORNADO_SPIN_RATE = 420
+};
+static u8 s_nativeCNKTornadoSpinPending[8];
+static struct Driver *s_nativeCNKTornadoSpinVictim[8];
+
+void VehPhysProc_CNKTornadoMarkSpin(struct Driver *d)
+{
+	int id;
+	if (d == NULL || d->driverID >= 8)
+		return;
+	id = d->driverID;
+	s_nativeCNKTornadoSpinPending[id] = 1;
+	s_nativeCNKTornadoSpinVictim[id] = d;
+	d->NoInputTimer = CNK_TORNADO_SPIN_NO_INPUT_TIMER;
+	if (d->kartState == KS_SPINNING)
+	{
+		d->KartStates.Spinning.driftSpinRate =
+		    (d->KartStates.Spinning.spinDir < 0) ?
+		    -CNK_TORNADO_SPIN_RATE : CNK_TORNADO_SPIN_RATE;
+	}
+}
+
+static int VehPhysProc_CNKTornadoSpinShouldPersist(struct Driver *d)
+{
+	int id;
+	if (d == NULL || d->driverID >= 8)
+		return 0;
+	id = d->driverID;
+	if (!s_nativeCNKTornadoSpinPending[id] ||
+	    s_nativeCNKTornadoSpinVictim[id] != d)
+		return 0;
+	if (d->NoInputTimer > 0)
+		return 1;
+	s_nativeCNKTornadoSpinPending[id] = 0;
+	s_nativeCNKTornadoSpinVictim[id] = NULL;
+	return 0;
+}
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80063ec0-0x8006402c.
 void VehPhysProc_SpinFirst_Init(struct Thread *t, struct Driver *d)
 {
@@ -2672,6 +2727,17 @@ void VehPhysProc_SpinFirst_Init(struct Thread *t, struct Driver *d)
 		d->KartStates.Spinning.spinDir = -1;
 		d->KartStates.Spinning.driftSpinRate = -VEH_PHYS_PROC_SPIN_INITIAL_RATE;
 	}
+
+#if defined(CTR_NATIVE)
+	if (d->driverID < 8 &&
+	    s_nativeCNKTornadoSpinPending[d->driverID] &&
+	    s_nativeCNKTornadoSpinVictim[d->driverID] == d)
+	{
+		d->KartStates.Spinning.driftSpinRate =
+		    (d->KartStates.Spinning.spinDir < 0) ?
+		    -CNK_TORNADO_SPIN_RATE : CNK_TORNADO_SPIN_RATE;
+	}
+#endif
 
 	if ((s8)d->simpTurnState < 1)
 	{

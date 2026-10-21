@@ -188,7 +188,7 @@ union VehEmitterWallScratch
 struct VehGroundSkidsScratch
 {
 	SVECTOR projected[3];
-	struct PushBuffer *pushBuffer;
+	struct PushBuffer * P32 pushBuffer;
 	u32 colorNear;
 	u32 colorFar;
 	union
@@ -655,6 +655,9 @@ enum
 	HELD_ITEM_MISSILE_3X = 0xb,
 	HELD_ITEM_INVISIBILITY = 0xc,
 	HELD_ITEM_SUPER_ENGINE = 0xd,
+#if defined(CTR_NATIVE)
+	HELD_ITEM_CNK_TORNADO = 0xe,
+#endif
 	HELD_ITEM_NONE = 0xf,
 	HELD_ITEM_ROULETTE = 0x10,
 };
@@ -737,7 +740,14 @@ struct Turbo
 	// Cooldown for when fire is visible
 	// Set to 96 (which makes fire invisible for 0.1 seconds, 96 / 1000 = 96ms = 0.1s) when obtaining turbo from certain sources, namely those from
 	// power-sliding (used to make fire pop with each power-slide)
-	s16 fireVisibilityCooldown;
+    s16 fireVisibilityCooldown;
+#if defined(CTR_NATIVE)
+    /* PC-only extra turbo flames, independent of retail's two instances.
+     * Allocated when this turbo thread is born and released on destruction.
+     * Keep the exact retail Turbo layout in non-native builds. */
+    struct Instance **nativeExtraExhaust;
+    int nativeExtraExhaustCount;
+#endif
 };
 
 struct BotPhysics
@@ -790,7 +800,7 @@ struct BotData
 	int reserved_0x5a0;
 
 	// 0x5a4, offset in `struct BotData` == 0xc
-	struct NavFrame *botNavFrame;
+	struct NavFrame * P32 botNavFrame;
 
 	// 0x5a8
 	int navProgressRemainder;
@@ -862,7 +872,7 @@ struct BotData
 	};
 
 	// 0x620
-	struct MaskHeadWeapon *maskObj;
+	struct MaskHeadWeapon * P32 maskObj;
 
 	// 0x624
 	s16 weaponCooldown;
@@ -879,7 +889,7 @@ struct BotData
 struct Driver
 {
 	// 0x0
-	struct Icon **wheelSprites;
+	struct Icon * P32 * P32 wheelSprites;
 	// 0x4
 	u16 wheelSize;
 
@@ -897,18 +907,18 @@ struct Driver
 	// 0xE
 	s16 hazardTimer;
 	// 0x10
-	struct Instance *instBombThrow;
+	struct Instance * P32 instBombThrow;
 	// 0x14
-	struct Instance *instBubbleHold;
+	struct Instance * P32 instBubbleHold;
 	// 0x18
-	struct Instance *instTntRecv; // on your head
+	struct Instance * P32 instTntRecv; // on your head
 	// 0x1C
-	struct Instance *instSelf;
+	struct Instance * P32 instSelf;
 
 // Not in Aug Review
 #if BUILD >= SepReview
 	// 0x20
-	struct Instance *instTntSend; // on the ground
+	struct Instance * P32 instTntSend; // on the ground
 #endif
 
 	// 0x24
@@ -1001,7 +1011,7 @@ struct Driver
 	// 0x7C - VehPhysForce_TranslateMatrix (pos, rot, scale)
 	// 0x80 - OnAnimate
 	// 0x84 - OnParticles
-	DriverFunc funcPtrs[DRIVER_FUNC_COUNT];
+	DriverFunc P32 funcPtrs[DRIVER_FUNC_COUNT];
 
 	// 0x88
 	Vec3 velocity;
@@ -1011,7 +1021,7 @@ struct Driver
 
 	// 0xA0 - quadblock currently touched,
 	// it is zero while airborne
-	struct QuadBlock *currBlockTouching;
+	struct QuadBlock * P32 currBlockTouching;
 
 	// 0xA4
 	SVec3 normalVecUP;
@@ -1142,19 +1152,19 @@ struct Driver
 	// 0x350
 	// continues updating while driver is airborne,
 	// used for VisMem (sometimes?)
-	struct QuadBlock *underDriver;
+	struct QuadBlock * P32 underDriver;
 
 	// 0x354
 	// last "valid" quadblock the driver touched
 	// used for mask grab if next block is invalid
-	struct QuadBlock *lastValid;
+	struct QuadBlock * P32 lastValid;
 
 	// 0x358
 	// is it ice, gravel, or what?
-	struct Terrain *terrainMeta1;
+	struct Terrain * P32 terrainMeta1;
 
 	// 0x35C
-	struct Terrain *terrainMeta2;
+	struct Terrain * P32 terrainMeta2;
 
 	// each normalVec is 8 bytes apart,
 	// used as an array of vec4s, with
@@ -1616,23 +1626,23 @@ struct Driver
 	u16 engineVol;
 
 	// 0x498
-	struct Instance *instBigNum;
+	struct Instance * P32 instBigNum;
 
 	// 0x49c
-	struct Instance *instFruitDisp;
+	struct Instance * P32 instFruitDisp;
 
 	// 0x4a0
 	// raincloud when you hit red potion
-	struct Thread *thCloud;
+	struct Thread * P32 thCloud;
 
 	// 0x4a4
 	// pointer Tracking thread that
 	// is chasing this driver (missile/warpball)
-	struct Thread *thTrackingMe;
+	struct Thread * P32 thTrackingMe;
 
 	// 0x4a8
 	// Papu pyramid plants, see 231.c
-	struct Thread *plantEatingMe;
+	struct Thread * P32 plantEatingMe;
 
 	// 0x4ac
 	int damageColorTimer;
@@ -1722,7 +1732,7 @@ struct Driver
 	s16 quip4;
 
 	// 0x4f8
-	struct Instance *wakeInst;
+	struct Instance * P32 wakeInst;
 
 	// 0x4fc
 	s16 wakeScale;
@@ -1735,7 +1745,7 @@ struct Driver
 	u8 pendingDamageType;
 
 	// 0x500
-	struct Driver *pendingDamageAttacker;
+	struct Driver * P32 pendingDamageAttacker;
 
 	// 0x504
 	u8 pendingDamageReasonByte;
@@ -1856,7 +1866,7 @@ struct Driver
 	// characterID "Crash Bandicoot"
 
 	// 0x56c
-	s16 *EndOfRaceComment_ptrQuip;
+	s16 * P32 EndOfRaceComment_ptrQuip;
 
 	// 0x570
 	int EndOfRaceComment_characterID;
@@ -1917,7 +1927,7 @@ struct Driver
 		{
 			// 0x580
 			// object connected to thread
-			struct MaskHeadWeapon *maskObj;
+			struct MaskHeadWeapon * P32 maskObj;
 
 			// == Needs More Research ==
 
@@ -1952,7 +1962,7 @@ struct Driver
 		{
 			// 0x580
 			// object connected to thread
-			struct MaskHeadWeapon *maskObj;
+			struct MaskHeadWeapon * P32 maskObj;
 
 			// 0x584
 			SVec3 AngleAxis_NormalVec;
@@ -2006,7 +2016,7 @@ struct Driver
 	// 0x62C - 0x670 reserved for ghost
 
 	// 0x62C
-	struct GhostTape *ghostTape;
+	struct GhostTape * P32 ghostTape;
 
 	// 0x630
 	s16 ghostID;
@@ -2199,7 +2209,7 @@ CTR_STATIC_ASSERT(sizeof(RevEngineLockoutFlags) == 0x1);
 CTR_STATIC_ASSERT(sizeof(EngineSoundMode) == 0x1);
 
 CTR_STATIC_ASSERT(offsetof(struct Driver, ghostTape) == DRIVER_NTSC_RETAIL_SIZE);
-CTR_STATIC_ASSERT(sizeof(((struct Driver *)0)->funcPtrs) == DRIVER_FUNC_COUNT * sizeof(DriverFunc));
+CTR_STATIC_ASSERT(sizeof(((struct Driver *)0)->funcPtrs) == DRIVER_FUNC_COUNT * sizeof(DriverFunc P32));
 #if BUILD < EurRetail
 CTR_STATIC_ASSERT(offsetof(struct Driver, funcPtrs) == 0x54);
 #else

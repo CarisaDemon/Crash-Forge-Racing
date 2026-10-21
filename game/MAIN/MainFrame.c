@@ -5,6 +5,13 @@
 #include <platform/native_perf.h>
 #endif
 
+#if defined(CTR_NATIVE) && defined(CTR_CNK_NATIVE_BRIDGE_QA)
+/* Unity build includes MainFrame.c before CNKNativeBridgeQA.c.
+ * Declaration only: observer implementation is QA-only and never
+ * changes Driver fields or replaces a retail callback. */
+static void CNKNativeBridgeQA_AfterDriverStage(int stage, struct Driver *driver);
+#endif
+
 #if defined(CTR_NATIVE)
 static int MainFrame_ScaleElapsedTimerUnits(int rawElapsed)
 {
@@ -64,9 +71,19 @@ void MainFrame_TogglePauseAudio(b32 bool_pause)
 	{
 		if (sdata->boolSoundPaused)
 		{
+#ifdef CTR_NATIVE
+            NativeAudio_EnginePreserveNextHowlStop();
+#endif
 			howl_StopAudio(0, 0, 1);
 			howl_UnPauseAudio();
 			sdata->boolSoundPaused = 0;
+#ifdef CTR_NATIVE
+            /* The custom PCM voices survived HOWL's stop/restart, keeping
+             * their exact active clips, phases, pitch and volume. Retail
+             * engines are restored exclusively by howl_UnPauseAudio(). */
+            NativeAudio_EngineSetPaused(0);
+            Platform_Log("[ENGINE LIFECYCLE] race resume: custom voices preserved, no duplicate retail channels\n");
+#endif
 		}
 	}
 	else if (sdata->boolSoundPaused == 0)
@@ -74,6 +91,9 @@ void MainFrame_TogglePauseAudio(b32 bool_pause)
 		OtherFX_Stop2(1);
 		howl_PauseAudio();
 		sdata->boolSoundPaused = 1;
+#ifdef CTR_NATIVE
+        NativeAudio_EngineSetPaused(1);
+#endif
 	}
 	return;
 }
@@ -416,7 +436,14 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 									if (psVar12->funcThTick != 0) continue;
 									psVar9 = (struct Driver *)psVar12->object;
 									pcVar5 = psVar9->funcPtrs[iVar11];
-									if (pcVar5 != 0) pcVar5(psVar12, psVar9);
+									if (pcVar5 != 0) {
+                                        pcVar5(psVar12, psVar9);
+#if defined(CTR_NATIVE) && defined(CTR_CNK_NATIVE_BRIDGE_QA)
+                                        /* Snapshot exact DriverFunc stage boundaries
+                                         * ONLY for CNK QA, after original callback. */
+                                        CNKNativeBridgeQA_AfterDriverStage(iVar11, psVar9);
+#endif
+                                    }
 								}
 							}
 
@@ -452,7 +479,14 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 
 								psVar9 = (struct Driver *)psVar12->object;
 								pcVar5 = psVar9->funcPtrs[iVar11];
-								if (pcVar5 != 0) pcVar5(psVar12, psVar9);
+								if (pcVar5 != 0) {
+                                        pcVar5(psVar12, psVar9);
+#if defined(CTR_NATIVE) && defined(CTR_CNK_NATIVE_BRIDGE_QA)
+                                        /* Snapshot exact DriverFunc stage boundaries
+                                         * ONLY for CNK QA, after original callback. */
+                                        CNKNativeBridgeQA_AfterDriverStage(iVar11, psVar9);
+#endif
+                                    }
 							}
 						}
 					}
@@ -605,7 +639,8 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 					gGT->cooldownfromPauseUntilUnpause = (value > 0) ? value : 0;
 				}
 			}
-			else if ((sdata->ptrActiveMenu != NULL) &&
+			else if (!NativeHangout_IsCustomizationOpen() &&
+			         (sdata->ptrActiveMenu != NULL) &&
 			         (sdata->ptrActiveMenu != &data.menuRacingWheelConfig) &&
 			         (sdata->ptrActiveMenu != &D232.menuHintMenu) &&
 			         ((sdata->AnyPlayerTap & BTN_START) != 0))

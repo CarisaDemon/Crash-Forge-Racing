@@ -1,5 +1,6 @@
 #include <common.h>
 #if defined(CTR_NATIVE)
+#include <NativeHangout.h>
 #include <RacerLoadout.h>
 #include <VehiclePartRegistry.h>
 #include <math.h>
@@ -597,6 +598,14 @@ static void VehEmitter_WriteSkidmarkPair(struct Driver *d, int tireIndex, int x,
 
 static void VehEmitter_Skidmarks(struct Thread *thread, struct Driver *d, TerrainFlags terrainFlags)
 {
+#if defined(CTR_NATIVE)
+	/* Visual tire marks are invalid for wheel-less/hovercraft kart mods.
+	 * The native kart flag already hides the tires themselves. Keep the
+	 * original sliding physics and skid SOUND independently unchanged. */
+	if (VehiclePartRegistry_HidesWheels(
+			RacerLoadout_GetEffectiveKart((int)d->driverID)))
+		return;
+#endif
 	struct Instance *inst = thread->inst;
 	MATRIX *m = &inst->matrix;
 	u8 color = ((inst->flags & SPLIT_LINE) == 0) ? inst->depthBiasNormal : inst->depthBiasSecondary;
@@ -1035,15 +1044,29 @@ static int VehEmitter_ExhaustCustom(struct Thread *thread, struct Driver *d)
 				 (float)m->m[2][2] * z) / 4096.0f * VEH_EMITTER_EXHAUST_LOCAL_TO_PARTICLE);
 		}
 
+		/* Same canonical -Z arrow direction as the aligned custom flame.
+		 * Retain the original high-exhaust speed (length of +Y,-Z).
+		 * The user rotation is then applied to this common -Z axis. */
 		VehEmitter_RotateLocalExhaustVector(
 			rotation,
 			0.0f,
-			(float)VEH_EMITTER_EXHAUST_VEL_Y,
-			(float)VEH_EMITTER_EXHAUST_VEL_Z,
+			0.0f,
+			(float)VEH_EMITTER_EXHAUST_VEL_Z * 1.4142135623730951f,
 			&localVel);
 
 		VehEmitter_RotVec(&localVel, &exhaustVel);
-		VehEmitter_Exhaust(d, &exhaustPos, &exhaustVel);
+		struct Particle *particle = VehEmitter_Exhaust(
+			d, &exhaustPos, &exhaustVel);
+		if (particle != NULL)
+		{
+			float pipeScale = VehiclePartRegistry_GetExhaustScale(kartID, exhaust);
+			/* axis[5] is the particle size: apply the same scale as turbo
+			 * flame geometry, keeping the smoke direction/timing unchanged. */
+			particle->axis[5].startVal =
+				(s16)lroundf((float)particle->axis[5].startVal * pipeScale);
+			particle->axis[5].velocity =
+				(s16)lroundf((float)particle->axis[5].velocity * pipeScale);
+		}
 	}
 
 	return 1;
@@ -1082,6 +1105,22 @@ static void VehEmitter_ExhaustPair(struct Thread *thread, struct Driver *d)
 	VehEmitter_Exhaust(d, &exhaustPos, &exhaustVel);
 }
 
+#if defined(CTR_NATIVE)
+void VehEmitter_PreviewExhaust(struct Driver *d)
+{
+	if (d == NULL || d->instSelf == NULL || d->instSelf->thread == NULL)
+		return;
+
+	/* Match gameplay density at high refresh: emit only on a legacy 30-Hz
+	 * tick. The preview uses the same custom exhaust mounts, scales and
+	 * rotations as the equipped kart in normal gameplay. */
+	if (Platform_GetLegacy30HzTicks() <= 0)
+		return;
+
+	VehEmitter_ExhaustPair(d->instSelf->thread, d);
+}
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80059a18-0x8005ab24
 void VehEmitter_DriverMain(struct Thread *thread, struct Driver *d)
 {
@@ -1091,6 +1130,13 @@ void VehEmitter_DriverMain(struct Thread *thread, struct Driver *d)
 
 	d->skidmarkEnableFlags = (d->skidmarkEnableFlags & DRIVER_SKIDMARK_HISTORY_MASK) << DRIVER_SKIDMARK_HISTORY_SHIFT;
 	d->skidmarkFrameIndex = (d->skidmarkFrameIndex - 1) & DRIVER_SKIDMARK_FRAME_INDEX_MASK;
+#if defined(CTR_NATIVE)
+	/* Discard any historical skid trails on loadout change too. Otherwise
+	 * old marks can appear briefly after switching to a hovercraft. */
+	if (VehiclePartRegistry_HidesWheels(
+			RacerLoadout_GetEffectiveKart((int)d->driverID)))
+		d->skidmarkEnableFlags = 0;
+#endif
 
 	if (absSpeedApprox < 0)
 	{
@@ -1125,7 +1171,11 @@ void VehEmitter_DriverMain(struct Thread *thread, struct Driver *d)
 		// Do not spawn a fresh exhaust pair on every host refresh. gGT->timer and
 		// the original LOD cadence are already on the retail clock, so repeated
 		// calls during the same legacy tick only multiply smoke/flame density.
-		if ((exhaustTicks > 0) && !VehEmitter_ShouldSkipExhaust(thread, d))
+		if ((exhaustTicks > 0)
+#if defined(CTR_NATIVE)
+		    && !NativeHangout_IsCustomizationOpen()
+#endif
+		    && !VehEmitter_ShouldSkipExhaust(thread, d))
 		{
 			VehEmitter_ExhaustPair(thread, d);
 		}

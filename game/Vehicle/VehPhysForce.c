@@ -609,6 +609,15 @@ void VehPhysForce_OnApplyForces(struct Thread *thread, struct Driver *driver)
 	driver->velocity.x = CTR_MipsAddLo(driver->velocity.x, driver->accel.x);
 	driver->velocity.z = CTR_MipsAddLo(driver->velocity.z, driver->accel.z);
 	driver->velocity.y = CTR_MipsAddLo(driver->velocity.y, driver->accel.y);
+#if defined(CTR_NATIVE)
+	/* Gameplay physics (not visual Y offset). Collision sweeps this
+	 * velocity before it moves the kart, including at high refresh. */
+	driver->velocity.y = RB_CNKTornado_TickLiftVelocity(
+	    driver, driver->velocity.y, sdata->gGT->elapsedTimeMS);
+#endif
+#if defined(CTR_NATIVE) && defined(CTR_CNK_NATIVE_BRIDGE_QA)
+	CNKNativeBridgeQA_AfterForces(driver);
+#endif
 }
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8005ebac-0x8005ee34.
@@ -1144,11 +1153,20 @@ void VehPhysForce_TranslateMatrix(struct Thread *thread, struct Driver *driver)
 {
 	struct Instance *inst = thread->inst;
 
+#if defined(CTR_NATIVE)
+	/* End-of-step lock prevents extra horizontal motion from surface
+	 * collisions or the bot AI before updating kart visuals/camera. */
+	RB_CNKTornado_HoldHorizontal(driver);
+#endif
+
 	VehPhysForce_TranslateMatrix_UpdateSquashStretch(inst, driver);
 	VehPhysForce_RotAxisAngle(&driver->matrixFacingDir, driver->AxisAngle2_normalVec.v, driver->rotCurr.y);
 	VehPhysForce_TranslateMatrix_UpdateMatrixAnimation(driver);
 	VehPhysForce_TranslateMatrix_UpdateInstanceMatrix(inst, driver);
 	VehPhysForce_TranslateMatrix_UpdateWake(inst, driver);
+#if defined(CTR_NATIVE) && defined(CTR_CNK_NATIVE_BRIDGE_QA)
+	CNKNativeBridgeQA_AfterContacts(driver);
+#endif
 }
 
 static int VehPhysForce_CountLeadingSignBits(s32 value)

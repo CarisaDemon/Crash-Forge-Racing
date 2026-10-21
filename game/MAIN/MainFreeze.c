@@ -6,6 +6,13 @@
 #include "platform/native_log.h"
 #include "platform/native_input.h"
 #include "platform/native_input_glyphs.h"
+#include "platform/native_music_selection.h"
+#include <platform/native_custom_tracks.h>
+#include <platform/native_custom_music.h>
+#include <platform/native_menu_music_clock.h>
+#if defined(CTR_CSEQ_LIBERATION)
+#include <NativeMusicRegistry.h>
+#endif
 #include <SDL3/SDL.h>
 static int s_titleOptionsOpen;
 static s16 s_titleOptionsReturnRow;
@@ -16,12 +23,15 @@ static int s_titleVoicePreviewSound;
 static int s_titleVoicePreviewDelay;
 
 /* Hangout has no Adventure progression/hints in its pause hierarchy.
- * Keep a dedicated three-row menu so retail Adventure can remain untouched. */
+ * Keep a dedicated menu so retail Adventure can remain untouched. */
 static struct MenuRow s_hangoutPauseRows[] =
 {
-	{0x2, 2, 1, 0, 0},   /* RESUME  */
-	{0x3, 0, 2, 1, 1},   /* QUIT    */
-	{0xE, 1, 0, 2, 2},   /* OPTIONS */
+	{0x2, 5, 1, 0, 0},                                      /* RESUME        */
+	{NATIVE_HANGOUT_MENU_CUSTOMIZATION_STRING, 0, 2, 1, 1}, /* CUSTOMIZATION */
+	{NATIVE_HANGOUT_MENU_DISCONNECT_STRING, 1, 3, 2, 2},    /* DISCONNECT P1 */
+	{NATIVE_HANGOUT_MENU_CONNECT_STRING, 2, 4, 3, 3},       /* CONNECT P1    */
+	{0x3, 3, 5, 4, 4},                                      /* QUIT          */
+	{0xE, 4, 0, 5, 5},                                      /* OPTIONS       */
 	{-1, 0, 0, 0, 0}
 };
 
@@ -45,16 +55,32 @@ enum NativeOptionsPage
 	NATIVE_OPTIONS_PAGE_GAMEPLAY = 3,
 	NATIVE_OPTIONS_PAGE_CONTROLS = 4,
 	NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS = 5,
+	NATIVE_OPTIONS_PAGE_MUSIC = 6,
+	NATIVE_OPTIONS_PAGE_MUSIC_LEVELS = 7,
+	NATIVE_OPTIONS_PAGE_MUSIC_SONGS = 8,
+	NATIVE_OPTIONS_PAGE_MUSIC_TARGETS = 9,
+    NATIVE_OPTIONS_PAGE_MUSIC_PACK_SONGS = 10,
+    NATIVE_OPTIONS_PAGE_LANGUAGE = 11,
 };
 
 enum
 {
 	NATIVE_OPTIONS_TRANSITION_FRAMES = 12,
-	NATIVE_OPTIONS_ROOT_ROW_COUNT = 5,
-	NATIVE_OPTIONS_AUDIO_ROW_COUNT = 5,
-	NATIVE_OPTIONS_GRAPHICS_ROW_COUNT = 7,
-	NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT = 13,
-	NATIVE_OPTIONS_GAMEPLAY_ROW_COUNT = 4,
+	NATIVE_OPTIONS_ROOT_ROW_COUNT = 6,
+	NATIVE_OPTIONS_AUDIO_ROW_COUNT = 7,
+	NATIVE_OPTIONS_MUSIC_ROOT_ROWS = 5,
+	NATIVE_OPTIONS_MUSIC_CATEGORY_ROWS = 9,
+	NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE = 6,
+	NATIVE_OPTIONS_GRAPHICS_ROW_COUNT = 8,
+	NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT = 14,
+    NATIVE_ADVANCED_GRAPHICS_VISIBLE_ROWS = 8,
+    NATIVE_ADVANCED_GRAPHICS_FONT_PERCENT = 75,
+    NATIVE_ADVANCED_GRAPHICS_TEXT_Y = 63,
+    NATIVE_ADVANCED_GRAPHICS_ROW_TOP_Y = 60,
+    NATIVE_ADVANCED_GRAPHICS_ROW_STEP = 17,
+    NATIVE_ADVANCED_GRAPHICS_ROW_HEIGHT = 14,
+    NATIVE_ADVANCED_GRAPHICS_FRAME_HEIGHT = 197,
+	NATIVE_OPTIONS_GAMEPLAY_ROW_COUNT = 4, /* 5 for CNK (conditional height row) */
 	NATIVE_CONTROLS_PLAYER_LIST_ROW_COUNT = 5,
 	NATIVE_CONTROLS_PLAYER_CONFIG_ROW_COUNT = 7,
 	NATIVE_CONTROLS_REMAP_VISIBLE_ROWS = 10,
@@ -107,6 +133,7 @@ static const int s_nativeControlsRemapRows[] = {
 };
 
 static int s_nativeOptionsSessionOpen;
+static int s_nativeLanguageFirstRun;
 static int s_nativeOptionsPage;
 static int s_nativeOptionsTargetPage;
 static int s_nativeOptionsTransitionActive;
@@ -116,12 +143,24 @@ static int s_nativeOptionsEntryActive;
 static int s_nativeOptionsEntryFrame;
 static int s_nativeOptionsExitActive;
 static int s_nativeOptionsExitFrame;
-static s16 s_nativeOptionsRows[6];
+static s16 s_nativeOptionsRows[12];
+/* Unlike volume sliders, custom music choices persist per level and need
+ * pagination when hundreds of community songs are installed. */
+static int s_nativeMusicLevelPage;
+static int s_nativeMusicSongPage;
+static int s_nativeMusicPackSongPage;
+static int s_nativeMusicSelectedPack;
+static int s_nativeMusicSelectedLevel;
+static int s_nativeMusicCategory;
 
 static int s_nativeControlsView;
 static int s_nativeControlsPlayer;
 static int s_nativeControlsRow;
 static int s_nativeControlsScroll;
+static int s_nativeAdvancedGraphicsScroll;
+/* Don't let stationary mouse hover undo wheel/keyboard/controller scrolling. */
+static int s_nativeAdvancedMouseX = -1;
+static int s_nativeAdvancedMouseY = -1;
 static int s_nativeControlsPowerSlideSide;
 static int s_nativeControlsCaptureAction = -1;
 static int s_nativeControlsCaptureDeviceIndex = -1;
@@ -130,6 +169,99 @@ static int s_nativeControlsNameEditing;
 static int s_nativeControlsNamePlayer = -1;
 static int s_nativeControlsNameLen;
 static char s_nativeControlsNameBuffer[32];
+/* A single graphics transaction spans the regular AND advanced pages.
+ * Selecting values only edits this draft. Neither the live renderer nor
+ * ctr_settings.cfg changes until APPLY CHANGES is explicitly selected.
+ * Going Back without applying discards the draft. */
+typedef struct NativeGraphicsDraft
+{
+	int valid;
+	int resolutionIndex;
+	int resolutionWidth,resolutionHeight;
+	int fullscreen,aspectMode,fpsLimit,characterDetail;
+	int subpixel,textureFilter,dithering,perfOverlay,gpuTiming;
+	int compactVRAM,zbuffer;
+} NativeGraphicsDraft;
+static NativeGraphicsDraft s_nativeGraphicsDraft;
+
+static void MainFreeze_NativeGraphicsEnsureDraft(void)
+{
+	NativeGraphicsDraft *p=&s_nativeGraphicsDraft;
+	if(p->valid)return;
+	memset(p,0,sizeof(*p));
+	p->resolutionIndex=Platform_GetResolutionPresetIndex();
+	Platform_GetWindowSize(&p->resolutionWidth,&p->resolutionHeight);
+	p->fullscreen=Platform_GetFullscreenMode();
+	p->aspectMode=Platform_GetAspectRatioMode();
+	p->fpsLimit=Platform_GetFPSLimitMode();
+	p->characterDetail=Platform_GetCharacterDetailMode();
+	p->subpixel=Platform_GetSubpixelMode();
+	p->textureFilter=Platform_GetTextureFilteringMode();
+	p->dithering=Platform_GetDitheringMode();
+	p->perfOverlay=Platform_GetPerfOverlayMode();
+	p->gpuTiming=Platform_GetGpuTimingMode();
+	p->compactVRAM=Platform_GetExperimentalCompactVRAMMode();
+	p->zbuffer=Platform_GetExperimentalZBufferMode();
+	p->valid=1;
+}
+
+static int MainFreeze_NativeGraphicsIsDirty(void)
+{
+	const NativeGraphicsDraft *p=&s_nativeGraphicsDraft;
+	if(!p->valid)return 0;
+	return p->resolutionIndex!=Platform_GetResolutionPresetIndex() ||
+	       p->fullscreen!=Platform_GetFullscreenMode() ||
+	       p->aspectMode!=Platform_GetAspectRatioMode() ||
+	       p->fpsLimit!=Platform_GetFPSLimitMode() ||
+	       p->characterDetail!=Platform_GetCharacterDetailMode() ||
+	       p->subpixel!=Platform_GetSubpixelMode() ||
+	       p->textureFilter!=Platform_GetTextureFilteringMode() ||
+	       p->dithering!=Platform_GetDitheringMode() ||
+	       p->perfOverlay!=Platform_GetPerfOverlayMode() ||
+	       p->gpuTiming!=Platform_GetGpuTimingMode() ||
+	       p->compactVRAM!=Platform_GetExperimentalCompactVRAMMode() ||
+	       p->zbuffer!=Platform_GetExperimentalZBufferMode();
+}
+
+static void MainFreeze_NativeGraphicsApply(void)
+{
+	NativeGraphicsDraft *p=&s_nativeGraphicsDraft;
+	MainFreeze_NativeGraphicsEnsureDraft();
+	if(!MainFreeze_NativeGraphicsIsDirty())return;
+
+	/* Apply at the most stable order: resolution, fullscreen, aspect,
+	 * frame rate, detail, and finally any advanced renderer toggles. */
+	if(p->resolutionIndex>=0 &&
+	   p->resolutionIndex!=Platform_GetResolutionPresetIndex())
+		Platform_SetResolutionPreset(p->resolutionIndex);
+	if(p->fullscreen!=Platform_GetFullscreenMode())
+		Platform_SetFullscreenMode(p->fullscreen);
+	if(p->aspectMode!=Platform_GetAspectRatioMode())
+		Platform_SetAspectRatioMode(p->aspectMode);
+	if(p->fpsLimit!=Platform_GetFPSLimitMode())
+		Platform_SetFPSLimitMode(p->fpsLimit);
+	if(p->characterDetail!=Platform_GetCharacterDetailMode())
+		Platform_SetCharacterDetailMode(p->characterDetail);
+	if(p->subpixel!=Platform_GetSubpixelMode())
+		Platform_SetSubpixelMode(p->subpixel);
+	if(p->textureFilter!=Platform_GetTextureFilteringMode())
+		Platform_SetTextureFilteringMode(p->textureFilter);
+	if(p->dithering!=Platform_GetDitheringMode())
+		Platform_SetDitheringMode(p->dithering);
+	if(p->perfOverlay!=Platform_GetPerfOverlayMode())
+		Platform_SetPerfOverlayMode(p->perfOverlay);
+	if(p->gpuTiming!=Platform_GetGpuTimingMode())
+		Platform_SetGpuTimingMode(p->gpuTiming);
+	if(p->compactVRAM!=Platform_GetExperimentalCompactVRAMMode())
+		Platform_SetExperimentalCompactVRAMMode(p->compactVRAM);
+	if(p->zbuffer!=Platform_GetExperimentalZBufferMode())
+		Platform_SetExperimentalZBufferMode(p->zbuffer);
+
+	Platform_Log("[GRAPHICS APPLY] pending graphics settings committed\n");
+	p->valid=0;
+	MainFreeze_NativeGraphicsEnsureDraft();
+}
+
 
 static struct TransitionMeta s_nativeOptionsSlideMeta[2] = {
 	{-512, 0, 0, 0, 0},
@@ -161,6 +293,15 @@ void MainFreeze_OpenTitleOptions(struct RectMenu *menu)
 	menu->state |= ONLY_DRAW_TITLE | INVISIBLE;
 	sdata->gGT->demoCountdownTimer = TITLE_DEMO_IDLE_FRAMES;
 	RECTMENU_ClearInput();
+}
+
+/* First-launch request must enter exactly the same native Options UI
+ * as the manually selectable LANGUAGE item. Title state stays intact. */
+void MainFreeze_OpenLanguageSetup(struct RectMenu *menu)
+{
+    s_nativeLanguageFirstRun=1;
+    MainFreeze_OpenTitleOptions(menu);
+    Platform_Log("[LANGUAGE] first-run chooser opened\n");
 }
 
 int MainFreeze_TitleOptionsIsOpen(void)
@@ -613,22 +754,35 @@ static void MainFreeze_NativeOptionsReset(void)
 	s_nativeControlsNameLen = 0;
 	s_nativeControlsNameBuffer[0] = 0;
 
+	s_nativeGraphicsDraft.valid=0;
 	s_nativeOptionsSessionOpen = 1;
-	s_nativeOptionsPage = NATIVE_OPTIONS_PAGE_ROOT;
-	s_nativeOptionsTargetPage = NATIVE_OPTIONS_PAGE_ROOT;
+    s_nativeOptionsPage = s_nativeLanguageFirstRun ?
+                           NATIVE_OPTIONS_PAGE_LANGUAGE : NATIVE_OPTIONS_PAGE_ROOT;
+    s_nativeOptionsTargetPage = s_nativeOptionsPage;
 	s_nativeOptionsTransitionActive = 0;
 	s_nativeOptionsTransitionDirection = 1;
 	s_nativeOptionsTransitionFrame = 0;
-	s_nativeOptionsEntryActive = 1;
+    /* Display the first-launch language picker immediately, not an
+     * unrelated Options root screen that can be dismissed by mistake. */
+    s_nativeOptionsEntryActive = s_nativeLanguageFirstRun ? 0 : 1;
 	s_nativeOptionsEntryFrame = 0;
 	s_nativeOptionsExitActive = 0;
 	s_nativeOptionsExitFrame = 0;
 	memset(s_nativeOptionsRows, 0, sizeof(s_nativeOptionsRows));
+	s_nativeMusicLevelPage=0;
+	s_nativeMusicSongPage=0;
+    s_nativeMusicPackSongPage=0;
+    s_nativeMusicSelectedPack=0;
+	s_nativeMusicSelectedLevel=0;
+	s_nativeMusicCategory=0;
 
 	s_nativeControlsView = NATIVE_CONTROLS_VIEW_PLAYERS;
 	s_nativeControlsPlayer = 0;
 	s_nativeControlsRow = 0;
 	s_nativeControlsScroll = 0;
+	s_nativeAdvancedGraphicsScroll = 0;
+	s_nativeAdvancedMouseX = -1;
+	s_nativeAdvancedMouseY = -1;
 	s_nativeControlsPowerSlideSide = 0;
 	s_nativeControlsCaptureAction = -1;
 	s_nativeControlsCaptureDeviceIndex = -1;
@@ -652,6 +806,16 @@ static void MainFreeze_NativeOptionsBeginTransition(int targetPage, int directio
 	RECTMENU_ClearInput();
 
 	s_nativeOptionsTargetPage = targetPage;
+	/* Explicit Back from Graphics discards unconfirmed choices. */
+	if(targetPage==NATIVE_OPTIONS_PAGE_ROOT &&
+	   (s_nativeOptionsPage==NATIVE_OPTIONS_PAGE_GRAPHICS ||
+	    s_nativeOptionsPage==NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS))
+		s_nativeGraphicsDraft.valid=0;
+	if (targetPage == NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS)
+	{
+		s_nativeAdvancedMouseX = -1;
+		s_nativeAdvancedMouseY = -1;
+	}
 	s_nativeOptionsTransitionDirection = direction < 0 ? -1 : 1;
 	s_nativeOptionsTransitionFrame = 0;
 	s_nativeOptionsTransitionActive = 1;
@@ -669,6 +833,7 @@ static void MainFreeze_NativeOptionsBeginExit(void)
 	OptionsMenu_TestSound(0, 0);
 	RECTMENU_ClearInput();
 
+	s_nativeGraphicsDraft.valid=0;
 	s_nativeOptionsExitActive = 1;
 	s_nativeOptionsExitFrame = 0;
 	s_nativeOptionsSlideMeta[0].distX = 512;
@@ -739,6 +904,7 @@ static void MainFreeze_NativeOptionsDrawRoot(int offsetX)
 		"GRAPHICS",
 		"GAMEPLAY",
 		"CONTROLS",
+        "LANGUAGE",
 		"EXIT",
 	};
 
@@ -749,7 +915,7 @@ static void MainFreeze_NativeOptionsDrawRoot(int offsetX)
 	}
 
 	MainFreeze_NativeOptionsDrawCursor(offsetX, 65 + (s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_ROOT] * 22), 19);
-	MainFreeze_NativeOptionsDrawFrame("OPTIONS", offsetX, 170);
+	MainFreeze_NativeOptionsDrawFrame("OPTIONS", offsetX, 191);
 }
 
 static void MainFreeze_NativeOptionsDrawActionBinding(
@@ -829,6 +995,34 @@ static void MainFreeze_NativeOptionsDrawSlider(int offsetX, int y, int volume)
 	RECTMENU_DrawRwdTriangle(triangle, data.Options_VolumeSlider_Colors, ot, primMem);
 }
 
+/* Layout guard for every native settings language. Fonts used to overlap
+ * their right-column value when PAL captions were longer than US English.
+ * Scale ONLY this left label, keeping live values and button prompts legible.
+ * Uses the actual bitmap-font width, not a rough strlen approximation. */
+static void MainFreeze_NativeOptionsDrawFittedLabel(
+    const char *label,const char *rightValue,int offsetX,int y)
+{
+    const int leftX=78,rightX=434,gap=14;
+    int labelWidth;
+    int rightWidth;
+    int available;
+    s16 scale=FP(1.0);
+    if (!label) return;
+    labelWidth=DecalFont_GetLineWidth((char *)label,FONT_SMALL);
+    rightWidth=rightValue ?
+        DecalFont_GetLineWidth((char *)rightValue,FONT_SMALL):0;
+    available=rightX-leftX-gap-rightWidth;
+    if (available<10) available=10;
+    if (labelWidth>available)
+    {
+        int scaled=(available*FP(1.0))/labelWidth;
+        if (scaled<1) scaled=1;
+        scale=(s16)scaled;
+    }
+    DecalFont_DrawLineScaledNative((char *)label,leftX+offsetX,y,
+                                   FONT_SMALL,ORANGE,scale);
+}
+
 static void MainFreeze_NativeOptionsDrawAudio(int offsetX)
 {
 	const int row = s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_AUDIO];
@@ -840,14 +1034,22 @@ static void MainFreeze_NativeOptionsDrawAudio(int offsetX)
 		MainFreeze_NativeOptionsDrawSlider(offsetX, y, howl_VolumeGet(i) & 0xff);
 	}
 
-	DecalFont_DrawLine(sdata->lngStrings[LNG_MODE], 78 + offsetX, 116, FONT_SMALL, ORANGE);
+	MainFreeze_NativeOptionsDrawFittedLabel(sdata->lngStrings[LNG_MODE],
+       sdata->lngStrings[333 + howl_ModeGet()],offsetX,116);
 	DecalFont_DrawLine(sdata->lngStrings[333 + howl_ModeGet()], 434 + offsetX, 116, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
-	DecalFont_DrawLine("BACK", 78 + offsetX, 134, FONT_SMALL, ORANGE);
-	MainFreeze_NativeOptionsDrawActionBinding(
-		0, PLATFORM_INPUT_ACTION_TRIANGLE, offsetX, 134);
+	MainFreeze_NativeOptionsDrawFittedLabel("HEAR OTHER RACERS",
+        Platform_GetHearOtherRacers() ? "YES" : "NO",offsetX,134);
+    DecalFont_DrawLine(Platform_GetHearOtherRacers() ? "YES" : "NO",
+                       434 + offsetX, 134, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+    MainFreeze_NativeOptionsDrawFittedLabel("MUSIC","CHOOSE SONGS >",offsetX,152);
+    DecalFont_DrawLine("CHOOSE SONGS >", 434 + offsetX, 152,
+                       FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+    DecalFont_DrawLine("BACK", 78 + offsetX, 170, FONT_SMALL, ORANGE);
+    MainFreeze_NativeOptionsDrawActionBinding(
+        0, PLATFORM_INPUT_ACTION_TRIANGLE, offsetX, 170);
 
-	MainFreeze_NativeOptionsDrawCursor(offsetX, 59 + (row * 18), 14);
-	MainFreeze_NativeOptionsDrawFrame("AUDIO", offsetX, 145);
+    MainFreeze_NativeOptionsDrawCursor(offsetX, 59 + (row * 18), 14);
+    MainFreeze_NativeOptionsDrawFrame("AUDIO", offsetX, 191);
 }
 
 static void MainFreeze_NativeFormatFPSLimit(char *text, int textSize)
@@ -867,108 +1069,175 @@ static void MainFreeze_NativeFormatFPSLimit(char *text, int textSize)
 
 static void MainFreeze_NativeOptionsDrawGraphics(int offsetX)
 {
-	const int row = s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_GRAPHICS];
-	char refreshText[24];
-	char resolutionText[32];
-	char *detailText;
-	int resolutionIndex = Platform_GetResolutionPresetIndex();
-	int resolutionW = 0;
-	int resolutionH = 0;
+	MainFreeze_NativeGraphicsEnsureDraft();
+	const NativeGraphicsDraft *draft=&s_nativeGraphicsDraft;
+	const int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_GRAPHICS];
+	const int dirty=MainFreeze_NativeGraphicsIsDirty();
+	char refreshText[24],resolutionText[32];
+	int resolutionW=draft->resolutionWidth;
+	int resolutionH=draft->resolutionHeight;
+	if(draft->resolutionIndex>=0)
+		Platform_GetResolutionPresetSize(draft->resolutionIndex,
+			&resolutionW,&resolutionH);
+	snprintf(resolutionText,sizeof(resolutionText),"%dx%d",resolutionW,resolutionH);
 
-	if (resolutionIndex >= 0)
-		Platform_GetResolutionPresetSize(resolutionIndex, &resolutionW, &resolutionH);
+	MainFreeze_NativeOptionsDrawFittedLabel("RESOLUTION",resolutionText,offsetX,54);
+	DecalFont_DrawLine(resolutionText,434+offsetX,54,FONT_SMALL,JUSTIFY_RIGHT|WHITE);
+
+	const char *display=draft->fullscreen ? "FULLSCREEN" : "WINDOWED";
+	MainFreeze_NativeOptionsDrawFittedLabel("DISPLAY MODE",display,offsetX,72);
+	DecalFont_DrawLine((char *)display,434+offsetX,72,FONT_SMALL,JUSTIFY_RIGHT|WHITE);
+
+	const char *aspect=Platform_GetAspectRatioLabel(draft->aspectMode);
+	MainFreeze_NativeOptionsDrawFittedLabel("ASPECT",aspect,offsetX,90);
+	DecalFont_DrawLine((char *)aspect,434+offsetX,90,FONT_SMALL,JUSTIFY_RIGHT|WHITE);
+
+	if(draft->fpsLimit==PLATFORM_FPS_LIMIT_UNLIMITED)
+		snprintf(refreshText,sizeof(refreshText),"Unlimited");
+	else if(draft->fpsLimit==PLATFORM_FPS_LIMIT_DISPLAY_HZ)
+		snprintf(refreshText,sizeof(refreshText),"%d HZ",Platform_GetDisplayRefreshFPS());
 	else
-		Platform_GetWindowSize(&resolutionW, &resolutionH);
-
-	snprintf(resolutionText, sizeof(resolutionText), "%dx%d", resolutionW, resolutionH);
-
-	DecalFont_DrawLine("RESOLUTION", 78 + offsetX, 54, FONT_SMALL, ORANGE);
-	DecalFont_DrawLine(resolutionText, 434 + offsetX, 54, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
-
-	DecalFont_DrawLine("DISPLAY MODE", 78 + offsetX, 72, FONT_SMALL, ORANGE);
-	DecalFont_DrawLine(Platform_GetFullscreenMode() ? "FULLSCREEN" : "WINDOWED", 434 + offsetX, 72, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
-
-	DecalFont_DrawLine("ASPECT", 78 + offsetX, 90, FONT_SMALL, ORANGE);
-	DecalFont_DrawLine(Platform_GetWideMode() ? "16:9" : "4:3", 434 + offsetX, 90, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
-
-	DecalFont_DrawLine("FPS LIMIT", 78 + offsetX, 108, FONT_SMALL, ORANGE);
-	MainFreeze_NativeFormatFPSLimit(refreshText, (int)sizeof(refreshText));
-	DecalFont_DrawLine(refreshText, 434 + offsetX, 108, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
-
-	DecalFont_DrawLine("CHARACTER DETAIL", 78 + offsetX, 126, FONT_SMALL, ORANGE);
 	{
-		const int detailMode = Platform_GetCharacterDetailMode();
-		detailText = detailMode == 0 ? "LOW" : (detailMode == 1 ? "SMART" : (detailMode == 2 ? "HIGH" : "ULTRA"));
+		static const int fps[]={30,60,120,144,200,240};
+		const int mode=draft->fpsLimit;
+		snprintf(refreshText,sizeof(refreshText),"%d FPS",
+			(mode>=0 && mode<6)?fps[mode]:60);
 	}
-	DecalFont_DrawLine(detailText, 434 + offsetX, 126, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+	MainFreeze_NativeOptionsDrawFittedLabel("FPS LIMIT",refreshText,offsetX,108);
+	DecalFont_DrawLine(refreshText,434+offsetX,108,FONT_SMALL,JUSTIFY_RIGHT|WHITE);
 
-	DecalFont_DrawLine("ADVANCED GRAPHICS", 78 + offsetX, 144, FONT_SMALL, ORANGE);
-	DecalFont_DrawLine(">", 434 + offsetX, 144, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+	const int detail=draft->characterDetail;
+	const char *detailText=detail==0?"LOW":
+		(detail==1?"SMART":(detail==2?"HIGH":"ULTRA"));
+	MainFreeze_NativeOptionsDrawFittedLabel("CHARACTER DETAIL",detailText,offsetX,126);
+	DecalFont_DrawLine((char *)detailText,434+offsetX,126,FONT_SMALL,JUSTIFY_RIGHT|WHITE);
 
-	DecalFont_DrawLine("BACK", 78 + offsetX, 162, FONT_SMALL, ORANGE);
+	MainFreeze_NativeOptionsDrawFittedLabel("ADVANCED GRAPHICS",">",offsetX,144);
+	DecalFont_DrawLine(">",434+offsetX,144,FONT_SMALL,JUSTIFY_RIGHT|WHITE);
+
+	MainFreeze_NativeOptionsDrawFittedLabel("APPLY CHANGES",
+		dirty ? "PENDING" : "SAVED",offsetX,162);
+	DecalFont_DrawLine(dirty?"PENDING":"SAVED",
+		434+offsetX,162,FONT_SMALL,JUSTIFY_RIGHT|(dirty?ORANGE:WHITE));
+
+	DecalFont_DrawLine("BACK",78+offsetX,180,FONT_SMALL,ORANGE);
 	MainFreeze_NativeOptionsDrawActionBinding(
-		0, PLATFORM_INPUT_ACTION_TRIANGLE, offsetX, 162);
+		0,PLATFORM_INPUT_ACTION_TRIANGLE,offsetX,180);
 
-	MainFreeze_NativeOptionsDrawCursor(offsetX, 51 + (row * 18), 14);
-	MainFreeze_NativeOptionsDrawFrame("GRAPHICS", offsetX, 177);
+	MainFreeze_NativeOptionsDrawCursor(offsetX,51+(row*18),14);
+	MainFreeze_NativeOptionsDrawFrame("GRAPHICS",offsetX,199);
+}
+
+/* Scoped uniform font. The retail line renderer computes justification
+ * before it scales glyphs: offset its anchor to preserve proper right align. */
+static void MainFreeze_NativeAdvancedCompactText(
+    const char *text,int x,int y,int flags)
+{
+    const s16 scale=(s16)(((int)FP(1.0)*
+        NATIVE_ADVANCED_GRAPHICS_FONT_PERCENT+50)/100);
+    int width=DecalFont_GetLineWidth((char *)text,FONT_SMALL);
+    int drawn=(int)FP_Mult(width,scale);
+    if(flags&JUSTIFY_RIGHT)
+        x+=width-drawn;
+    else if(flags&JUSTIFY_CENTER)
+        x+=(width-drawn)/2;
+    DecalFont_DrawLineScaledNative((char *)text,x,y,FONT_SMALL,flags,scale);
+}
+
+/* Same selected-row to viewport logic as Controls / Remap, including wrap. */
+static void MainFreeze_NativeAdvancedClampScroll(void)
+{
+    const int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS];
+    const int maxScroll=NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT-
+                        NATIVE_ADVANCED_GRAPHICS_VISIBLE_ROWS;
+    if(row<s_nativeAdvancedGraphicsScroll)
+        s_nativeAdvancedGraphicsScroll=row;
+    else if(row>=s_nativeAdvancedGraphicsScroll+
+                 NATIVE_ADVANCED_GRAPHICS_VISIBLE_ROWS)
+        s_nativeAdvancedGraphicsScroll=row-
+            NATIVE_ADVANCED_GRAPHICS_VISIBLE_ROWS+1;
+    if(s_nativeAdvancedGraphicsScroll<0)
+        s_nativeAdvancedGraphicsScroll=0;
+    if(s_nativeAdvancedGraphicsScroll>maxScroll)
+        s_nativeAdvancedGraphicsScroll=maxScroll;
 }
 
 static void MainFreeze_NativeOptionsDrawAdvancedGraphics(int offsetX)
 {
-	const int row = s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS];
-	const int y0 = 46;
-	const int step = 13;
+    const int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS];
+    char rangeText[32];
+    MainFreeze_NativeGraphicsEnsureDraft();
+    const NativeGraphicsDraft *p=&s_nativeGraphicsDraft;
+    static const char *labels[NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT]={
+        "INTERNAL RESOLUTION","SUBPIXEL","TEXTURE FILTER",
+        "ANTI-ALIASING","WORLD DETAIL","PRESENT FILTER",
+        "DITHER","CRT FILTER","PERF OVERLAY","GPU TIMING [EXP]",
+        "VRAM STORAGE [EXP]","Z-BUFFER [EXP]","APPLY CHANGES","BACK"
+    };
+    const char *rightValues[NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT]={
+        "NATIVE",
+        p->subpixel ? "ON" : "OFF",
+        p->textureFilter ? "BILINEAR" : "NEAREST",
+        "OFF","RETAIL","DIRECT",
+        p->dithering ? "PS1" : "OFF",
+        "OFF",
+        p->perfOverlay ? "ON" : "OFF",
+        p->gpuTiming ? "ON EXP" : "OFF",
+        p->compactVRAM ? "RG8 EXP" : "RG32F",
+        p->zbuffer ? "CUSTOM EXP" : "OFF",
+        MainFreeze_NativeGraphicsIsDirty() ? "PENDING" : "SAVED",
+        ""
+    };
 
-	static const char *labels[NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT] = {
-		"INTERNAL RESOLUTION",
-		"SUBPIXEL",
-		"TEXTURE FILTER",
-		"ANTI-ALIASING",
-		"WORLD DETAIL",
-		"PRESENT FILTER",
-		"DITHER",
-		"CRT FILTER",
-		"PERF OVERLAY",
-		"GPU TIMING [EXP]",
-		"VRAM STORAGE [EXP]",
-		"Z-BUFFER [EXP]",
-		"BACK",
-	};
+    MainFreeze_NativeAdvancedClampScroll();
+    for(int visible=0;visible<NATIVE_ADVANCED_GRAPHICS_VISIBLE_ROWS;visible++)
+    {
+        const int absolute=s_nativeAdvancedGraphicsScroll+visible;
+        const int y=NATIVE_ADVANCED_GRAPHICS_TEXT_Y+
+                    visible*NATIVE_ADVANCED_GRAPHICS_ROW_STEP;
+        const int readOnly=absolute==0 || absolute==3 || absolute==4 ||
+                           absolute==5 || absolute==7;
+        if(absolute>=NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT)
+            break;
 
-	for (int i = 0; i < NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT; i++)
-		DecalFont_DrawLine(
-			(char *)labels[i], 78 + offsetX, y0 + i * step,
-			FONT_SMALL, ORANGE);
+        /* Both columns are 75% of FONT_SMALL: no individually scaled rows. */
+        MainFreeze_NativeAdvancedCompactText(
+            labels[absolute],78+offsetX,y,ORANGE);
+        if(absolute==NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT-1)
+            MainFreeze_NativeOptionsDrawActionBinding(
+                0,PLATFORM_INPUT_ACTION_TRIANGLE,offsetX,y);
+        else
+            MainFreeze_NativeAdvancedCompactText(
+                rightValues[absolute],434+offsetX,y,
+                JUSTIFY_RIGHT|(readOnly ? GRAY : WHITE));
+    }
 
-	/* Static rows describe the backend that really exists today. They are not
-	   fake toggles: adjustable rows below have a live renderer path. */
-	DecalFont_DrawLine("NATIVE", 434 + offsetX, y0 + 0 * step, FONT_SMALL, JUSTIFY_RIGHT | GRAY);
-	DecalFont_DrawLine(Platform_GetSubpixelMode() ? "ON" : "OFF",
-		434 + offsetX, y0 + 1 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
-	DecalFont_DrawLine(Platform_GetTextureFilteringMode() ? "BILINEAR" : "NEAREST",
-		434 + offsetX, y0 + 2 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
-	DecalFont_DrawLine("OFF", 434 + offsetX, y0 + 3 * step, FONT_SMALL, JUSTIFY_RIGHT | GRAY);
-	DecalFont_DrawLine("RETAIL", 434 + offsetX, y0 + 4 * step, FONT_SMALL, JUSTIFY_RIGHT | GRAY);
-	DecalFont_DrawLine("DIRECT", 434 + offsetX, y0 + 5 * step, FONT_SMALL, JUSTIFY_RIGHT | GRAY);
-	DecalFont_DrawLine(Platform_GetDitheringMode() ? "PS1" : "OFF",
-		434 + offsetX, y0 + 6 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
-	DecalFont_DrawLine("OFF", 434 + offsetX, y0 + 7 * step, FONT_SMALL, JUSTIFY_RIGHT | GRAY);
-	DecalFont_DrawLine(Platform_GetPerfOverlayMode() ? "ON" : "OFF",
-		434 + offsetX, y0 + 8 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
-	DecalFont_DrawLine(Platform_GetGpuTimingMode() ? "ON EXP" : "OFF",
-		434 + offsetX, y0 + 9 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
-	DecalFont_DrawLine(Platform_GetExperimentalCompactVRAMMode() ? "RG8 EXP" : "RG32F",
-		434 + offsetX, y0 + 10 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
-	DecalFont_DrawLine(Platform_GetExperimentalZBufferMode() ? "CUSTOM EXP" : "OFF",
-		434 + offsetX, y0 + 11 * step, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
-	MainFreeze_NativeOptionsDrawActionBinding(
-		0, PLATFORM_INPUT_ACTION_TRIANGLE,
-		offsetX, y0 + 12 * step);
+    MainFreeze_NativeOptionsDrawCursor(
+        offsetX,NATIVE_ADVANCED_GRAPHICS_ROW_TOP_Y+
+            (row-s_nativeAdvancedGraphicsScroll)*
+            NATIVE_ADVANCED_GRAPHICS_ROW_STEP,
+        NATIVE_ADVANCED_GRAPHICS_ROW_HEIGHT);
+    snprintf(rangeText,sizeof(rangeText),"%d-%d / %d",
+        s_nativeAdvancedGraphicsScroll+1,
+        s_nativeAdvancedGraphicsScroll+NATIVE_ADVANCED_GRAPHICS_VISIBLE_ROWS,
+        NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT);
+    MainFreeze_NativeAdvancedCompactText(
+        rangeText,432+offsetX,202,JUSTIFY_RIGHT|ORANGE);
+    MainFreeze_NativeOptionsDrawFrame(
+        "ADVANCED GRAPHICS",offsetX,NATIVE_ADVANCED_GRAPHICS_FRAME_HEIGHT);
+}
 
-	MainFreeze_NativeOptionsDrawCursor(
-		offsetX, 43 + (row * step), 11);
-	MainFreeze_NativeOptionsDrawFrame(
-		"ADVANCED GRAPHICS", offsetX, 220);
+static int MainFreeze_NativeOptionsGameplayHasHeight(void)
+{
+	const int driftMode = NativeHUD_GetDriftMeterMode();
+	return driftMode == NATIVE_HUD_DRIFT_CNK_CENTERED ||
+	       driftMode == NATIVE_HUD_DRIFT_CNK_3D;
+}
+
+static int MainFreeze_NativeOptionsGameplayRowCount(void)
+{
+	return NATIVE_OPTIONS_GAMEPLAY_ROW_COUNT +
+	       MainFreeze_NativeOptionsGameplayHasHeight();
 }
 
 static void MainFreeze_NativeOptionsDrawGameplay(int offsetX)
@@ -977,32 +1246,47 @@ static void MainFreeze_NativeOptionsDrawGameplay(int offsetX)
 	const int driftMode = NativeHUD_GetDriftMeterMode();
 	const char *driftText =
 		driftMode == NATIVE_HUD_DRIFT_CTR_CENTERED ? "CTR CENTERED" :
-		(driftMode == NATIVE_HUD_DRIFT_CNK_CENTERED ? "CNK CENTERED" : "OFF");
+		(driftMode == NATIVE_HUD_DRIFT_CNK_CENTERED ? "CNK CENTERED" :
+		(driftMode == NATIVE_HUD_DRIFT_CNK_3D ? "CNK 3D" : "OFF"));
 
-	DecalFont_DrawLine("SAFFI HUD", 78 + offsetX, 62, FONT_SMALL, ORANGE);
+	MainFreeze_NativeOptionsDrawFittedLabel("SAFFI HUD",
+       NativeHUD_GetSaffiEnabled() ? "ON" : "OFF",offsetX,62);
 	DecalFont_DrawLine(
 		NativeHUD_GetSaffiEnabled() ? "ON" : "OFF",
 		434 + offsetX, 62, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
 
-	DecalFont_DrawLine("RESERVES BAR", 78 + offsetX, 84, FONT_SMALL, ORANGE);
+	MainFreeze_NativeOptionsDrawFittedLabel("RESERVES BAR",
+       NativeHUD_GetReservesBarEnabled() ? "ON" : "OFF",offsetX,84);
 	DecalFont_DrawLine(
 		NativeHUD_GetReservesBarEnabled() ? "ON" : "OFF",
 		434 + offsetX, 84, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
 
-	DecalFont_DrawLine("DRIFT METER", 78 + offsetX, 106, FONT_SMALL, ORANGE);
+	MainFreeze_NativeOptionsDrawFittedLabel("DRIFT METER",driftText,offsetX,106);
 	DecalFont_DrawLine(
 		driftText,
 		434 + offsetX, 106, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
 
-	DecalFont_DrawLine("BACK", 78 + offsetX, 132, FONT_SMALL, ORANGE);
+	const int hasHeight = MainFreeze_NativeOptionsGameplayHasHeight();
+	const int backY = hasHeight ? 154 : 132;
+	if (hasHeight)
+	{
+		MainFreeze_NativeOptionsDrawFittedLabel("METER HEIGHT",
+       NativeHUD_GetCNKMeterHeight()==NATIVE_HUD_CNK_HEIGHT_HIGH ? "HIGH" : "LOW",offsetX,128);
+		DecalFont_DrawLine(
+			NativeHUD_GetCNKMeterHeight() == NATIVE_HUD_CNK_HEIGHT_HIGH
+				? "HIGH" : "LOW",
+			434 + offsetX, 128, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+	}
+	DecalFont_DrawLine("BACK", 78 + offsetX, backY, FONT_SMALL, ORANGE);
 	MainFreeze_NativeOptionsDrawActionBinding(
-		0, PLATFORM_INPUT_ACTION_TRIANGLE, offsetX, 132);
+		0, PLATFORM_INPUT_ACTION_TRIANGLE, offsetX, backY);
 
 	MainFreeze_NativeOptionsDrawCursor(
 		offsetX,
 		59 + (row * 22),
 		16);
-	MainFreeze_NativeOptionsDrawFrame("GAMEPLAY", offsetX, 150);
+	MainFreeze_NativeOptionsDrawFrame("GAMEPLAY", offsetX,
+		hasHeight ? 172 : 150);
 }
 
 static int MainFreeze_NativeControlsRemapActionCount(void)
@@ -1044,14 +1328,15 @@ static const char *MainFreeze_NativeControlsRemapLabel(int row, int action)
 	{
 		switch (row)
 		{
-		case 16: return "LEFT STICK - LEFT";
-		case 17: return "LEFT STICK - RIGHT";
-		case 18: return "LEFT STICK - UP";
-		case 19: return "LEFT STICK - DOWN";
-		case 20: return "RIGHT STICK - LEFT";
-		case 21: return "RIGHT STICK - RIGHT";
-		case 22: return "RIGHT STICK - UP";
-		case 23: return "RIGHT STICK - DOWN";
+		/* Compact labels fit the PS1-width menu without ellipses. */
+		case 16: return "L-STICK LEFT";
+		case 17: return "L-STICK RIGHT";
+		case 18: return "L-STICK UP";
+		case 19: return "L-STICK DOWN";
+		case 20: return "R-STICK LEFT";
+		case 21: return "R-STICK RIGHT";
+		case 22: return "R-STICK UP";
+		case 23: return "R-STICK DOWN";
 		default: break;
 		}
 	}
@@ -1079,10 +1364,10 @@ static const char *MainFreeze_NativeControlsRemapLabel(int row, int action)
 	case PLATFORM_INPUT_ACTION_START: return "START / PAUSE";
 	case PLATFORM_INPUT_ACTION_SELECT: return "SELECT";
 
-	case PLATFORM_INPUT_ACTION_LEFT_X: return "LEFT STICK - LEFT / RIGHT";
-	case PLATFORM_INPUT_ACTION_LEFT_Y: return "LEFT STICK - UP / DOWN";
-	case PLATFORM_INPUT_ACTION_RIGHT_X: return "RIGHT STICK - LEFT / RIGHT";
-	case PLATFORM_INPUT_ACTION_RIGHT_Y: return "RIGHT STICK - UP / DOWN";
+	case PLATFORM_INPUT_ACTION_LEFT_X: return "L-STICK LEFT / RIGHT";
+	case PLATFORM_INPUT_ACTION_LEFT_Y: return "L-STICK UP / DOWN";
+	case PLATFORM_INPUT_ACTION_RIGHT_X: return "R-STICK LEFT / RIGHT";
+	case PLATFORM_INPUT_ACTION_RIGHT_Y: return "R-STICK UP / DOWN";
 	default: return Platform_InputGetActionDisplayName(action);
 	}
 }
@@ -1257,7 +1542,8 @@ static void MainFreeze_NativeControlsDrawPlayers(int offsetX)
 			PLATFORM_INPUT_DEVICE_NONE;
 		const int textColor = hasDevice ? ORANGE : GRAY;
 
-		snprintf(label, sizeof(label), "PLAYER %d", playerIndex + 1);
+		snprintf(label, sizeof(label), "%s %d",
+		         NativeLocalization_Translate("PLAYER"), playerIndex + 1);
 		MainFreeze_NativeControlsGetDeviceText(
 			playerIndex, device, sizeof(device));
 
@@ -1408,7 +1694,9 @@ static void MainFreeze_NativeControlsDrawPlayer(int offsetX)
 		(gGT->gameMode1 &
 		 data.gGT_gameMode1_VibPerPlayer[playerIndex]) != 0;
 
-	snprintf(title, sizeof(title), "PLAYER %d CONTROLS", playerIndex + 1);
+	snprintf(title, sizeof(title), "%s %d %s",
+	         NativeLocalization_Translate("PLAYER"), playerIndex + 1,
+	         NativeLocalization_Translate("CONTROLS"));
 	MainFreeze_NativeControlsGetDeviceText(playerIndex, device, sizeof(device));
 	MainFreeze_NativeControlsGetGlyphText(playerIndex, glyph, sizeof(glyph));
 
@@ -1558,8 +1846,10 @@ static void MainFreeze_NativeControlsDrawRemap(int offsetX)
 	const int rowCount = actionCount + 1;
 	int visibleIndex;
 
-	snprintf(title, sizeof(title), "PLAYER %d - REMAP",
-	         s_nativeControlsPlayer + 1);
+	/* Short title leaves room for the row counter on small screens. */
+	snprintf(title, sizeof(title), "P%d - %s",
+	         s_nativeControlsPlayer + 1,
+	         NativeLocalization_Translate("REMAP"));
 
 	MainFreeze_NativeControlsClampScroll();
 
@@ -1677,7 +1967,8 @@ static void MainFreeze_NativeControlsDrawRemap(int offsetX)
 			{
 				char actionLabel[64];
 				snprintf(actionLabel, sizeof(actionLabel), "%s",
-				         MainFreeze_NativeControlsRemapLabel(row, action));
+				         NativeLocalization_Translate(
+				             MainFreeze_NativeControlsRemapLabel(row, action)));
 				MainFreeze_NativeControlsFitText(actionLabel, 198);
 				DecalFont_DrawLine(
 					actionLabel,
@@ -1768,6 +2059,365 @@ static void MainFreeze_NativeOptionsDrawControls(
 	}
 }
 
+/* Music UI reuses the main Options renderer and per-player input.
+ * Source EXISTING preserves existing imported CSEQ/legacy OGG by default;
+ * ORIGINAL bypasses both; the two PACK modes resolve indexed community
+ * songs in the existing CSEQ / OGG playback backends. */
+static int MainFreeze_MusicMin(int a,int b) { return a<b?a:b; }
+
+static void MainFreeze_MusicDrawFit(const char *raw,int x,int y,
+                                    int width,u32 flags)
+{
+    char buf[180];
+    size_t length;
+    if(!raw) raw="";
+    snprintf(buf,sizeof(buf),"%s",raw);
+    length=strlen(buf);
+    while(length>0 &&
+          DecalFont_GetLineWidth(buf,FONT_SMALL)>width)
+        buf[--length]=0;
+    DecalFont_DrawLine(buf,x,y,FONT_SMALL,flags);
+}
+
+static int MainFreeze_MusicPackKind(void)
+{
+    int source=NativeMusicSelection_GetDefaultSource();
+    return source==NATIVE_MUSIC_SOURCE_CSEQ ?
+           NATIVE_MUSIC_SOURCE_CSEQ : NATIVE_MUSIC_SOURCE_OGG;
+}
+
+static const char *MainFreeze_MusicPackLabel(void)
+{
+    int kind=MainFreeze_MusicPackKind();
+    int count;
+    if (NativeMusicSelection_GetDefaultSource() <
+        NATIVE_MUSIC_SOURCE_OGG) return "SELECT PACK MODE";
+    count=NativeMusicSelection_GetPackCount(kind);
+    if(count<=0) return "NONE INSTALLED";
+    return NativeMusicSelection_GetPackName(
+        kind,NativeMusicSelection_GetDefaultPackIndex(kind));
+}
+
+/* Clear, destination-first music navigation. Retail tracks use their
+ * real LEV slot. Boss music has its own synthetic cue, independent of
+ * the map it is raced on. Custom tracks use ID-based override slots. */
+enum
+{
+    NATIVE_MUSIC_CAT_RACES=0,
+    NATIVE_MUSIC_CAT_BATTLES,
+    NATIVE_MUSIC_CAT_HUBS,
+    NATIVE_MUSIC_CAT_MASKS,
+    NATIVE_MUSIC_CAT_BOSSES,
+    NATIVE_MUSIC_CAT_MENU,
+    NATIVE_MUSIC_CAT_CUTSCENES,
+    NATIVE_MUSIC_CAT_CUSTOM,
+    NATIVE_MUSIC_CAT_BACK
+};
+static const char *s_nativeMusicCategories[]={
+    "RACE TRACKS",
+    "BATTLE ARENAS",
+    "ADVENTURE HUBS",
+    "AKU / UKA MASK MUSIC",
+    "BOSS RACES",
+    "MENU & CREDITS",
+    "CUTSCENES",
+    "CUSTOM TRACKS",
+    "BACK"
+};
+static const int s_nativeMusicMenuSlots[]={MAIN_MENU_LEVEL,CREDITS_CRASH};
+static const int s_nativeMusicCutsceneSlots[]={
+    INTRO_RACE_TODAY,OXIDE_ENDING,OXIDE_TRUE_ENDING
+};
+static int MainFreeze_MusicTargetCount(void)
+{
+    switch(s_nativeMusicCategory)
+    {
+    case NATIVE_MUSIC_CAT_RACES:return 18;
+    case NATIVE_MUSIC_CAT_BATTLES:return 7;
+    case NATIVE_MUSIC_CAT_HUBS:return 6;
+    case NATIVE_MUSIC_CAT_MASKS:return 2;
+    case NATIVE_MUSIC_CAT_BOSSES:return 1;
+    case NATIVE_MUSIC_CAT_MENU:
+        return sizeof(s_nativeMusicMenuSlots)/sizeof(s_nativeMusicMenuSlots[0]);
+    case NATIVE_MUSIC_CAT_CUTSCENES:
+        return sizeof(s_nativeMusicCutsceneSlots)/sizeof(s_nativeMusicCutsceneSlots[0]);
+    case NATIVE_MUSIC_CAT_CUSTOM:
+        return NativeCustomTracks_Count();
+    default:return 0;
+    }
+}
+static int MainFreeze_MusicTargetAt(int pos)
+{
+    switch(s_nativeMusicCategory)
+    {
+    case NATIVE_MUSIC_CAT_RACES:return pos;
+    case NATIVE_MUSIC_CAT_BATTLES:return NITRO_COURT+pos;
+    case NATIVE_MUSIC_CAT_HUBS:
+        if(pos<5)return GEM_STONE_VALLEY+pos;
+        return ADVENTURE_GARAGE;
+    case NATIVE_MUSIC_CAT_MASKS:
+        return pos ? NATIVE_MUSIC_MASK_UKA_SLOT : NATIVE_MUSIC_MASK_AKU_SLOT;
+    case NATIVE_MUSIC_CAT_BOSSES:return NATIVE_MUSIC_BOSS_SLOT;
+    case NATIVE_MUSIC_CAT_MENU:return s_nativeMusicMenuSlots[pos];
+    case NATIVE_MUSIC_CAT_CUTSCENES:return s_nativeMusicCutsceneSlots[pos];
+    case NATIVE_MUSIC_CAT_CUSTOM:return NATIVE_MUSIC_CUSTOM_BASE+pos;
+    default:return -1;
+    }
+}
+static const char *MainFreeze_MusicTargetName(int slot)
+{
+    if(slot==NATIVE_MUSIC_MASK_AKU_SLOT)return "AKU AKU (MASK)";
+    if(slot==NATIVE_MUSIC_MASK_UKA_SLOT)return "UKA UKA (MASK)";
+    if(slot==NATIVE_MUSIC_BOSS_SLOT)return "BOSS RACES";
+    /* The private Hangout soundtrack is not listed in public music choices. */
+    if(slot==MAIN_MENU_LEVEL)return "MAIN MENU";
+    if(slot==CREDITS_CRASH)return "END CREDITS";
+    if(slot==INTRO_RACE_TODAY)return "RACE INTRO";
+    /* Studio-logo intro is no longer available in public soundtrack menus. */
+    if(slot==OXIDE_ENDING)return "OXIDE ENDING";
+    if(slot==OXIDE_TRUE_ENDING)return "TRUE ENDING";
+    if(slot==ADVENTURE_GARAGE)return "CHARACTER SELECT";
+    if(slot>=NATIVE_MUSIC_CUSTOM_BASE)
+    {
+        const char *name=NativeCustomTracks_Name(slot-NATIVE_MUSIC_CUSTOM_BASE);
+        return name ? name : "CUSTOM TRACK";
+    }
+    if(slot>=0 && slot<INTRO_RACE_TODAY)
+    {
+        return sdata->lngStrings[data.metaDataLEV[slot].name_LNG];
+    }
+    return "UNKNOWN";
+}
+static int MainFreeze_MusicVisibleLevels(void)
+{
+    int left=MainFreeze_MusicTargetCount() -
+        s_nativeMusicLevelPage*NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE;
+    return MainFreeze_MusicMin(left>0?left:0,
+                              NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE);
+}
+static int MainFreeze_MusicVisibleChoices(void)
+{
+    /* Root of music browser: 3 legacy choices + one row per PACK.
+     * The individual songs are on a second screen for the chosen pack. */
+    int left=3+NativeMusicSelection_GetAvailablePackCount(
+                 s_nativeMusicSelectedLevel) -
+        s_nativeMusicSongPage*NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE;
+    return MainFreeze_MusicMin(left>0?left:0,
+                               NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE);
+}
+static int MainFreeze_MusicVisiblePackSongs(void)
+{
+    int left=NativeMusicSelection_GetAvailablePackSongCount(
+                  s_nativeMusicSelectedLevel,s_nativeMusicSelectedPack) -
+        s_nativeMusicPackSongPage*NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE;
+    return MainFreeze_MusicMin(left>0?left:0,
+                               NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE);
+}
+static void MainFreeze_NativeOptionsDrawMusic(int offsetX)
+{
+    static const char *names[]={
+        "DEFAULT MUSIC","MUSIC PACK","CHOOSE MUSIC",
+        "RELOAD PACKS","BACK"
+    };
+    int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC];
+    const int kind=NativeMusicSelection_GetDefaultSource();
+    for(int i=0;i<NATIVE_OPTIONS_MUSIC_ROOT_ROWS;i++)
+    {
+        int y=62+i*23;
+        DecalFont_DrawLine(names[i],78+offsetX,y,FONT_SMALL,ORANGE);
+        if(i==0)
+            MainFreeze_MusicDrawFit(
+                NativeMusicSelection_SourceName(kind),
+                432+offsetX,y,177,JUSTIFY_RIGHT|WHITE);
+        if(i==1)
+            MainFreeze_MusicDrawFit(MainFreeze_MusicPackLabel(),
+                432+offsetX,y,190,JUSTIFY_RIGHT|WHITE);
+        if(i==2)
+            DecalFont_DrawLine("BY LOCATION >",432+offsetX,y,
+                               FONT_SMALL,JUSTIFY_RIGHT|WHITE);
+        if(i==3)
+            DecalFont_DrawLine("SCAN FILES",432+offsetX,y,
+                               FONT_SMALL,JUSTIFY_RIGHT|WHITE);
+        if(i==4)
+            MainFreeze_NativeOptionsDrawActionBinding(
+                0,PLATFORM_INPUT_ACTION_TRIANGLE,offsetX,y);
+    }
+    MainFreeze_NativeOptionsDrawCursor(offsetX,59+row*23,18);
+    MainFreeze_NativeOptionsDrawFrame("MUSIC",offsetX,181);
+}
+static void MainFreeze_NativeOptionsDrawMusicLevels(int offsetX)
+{
+    const int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_LEVELS];
+    for(int i=0;i<NATIVE_OPTIONS_MUSIC_CATEGORY_ROWS;i++)
+    {
+        int y=51+i*17;
+        MainFreeze_MusicDrawFit(s_nativeMusicCategories[i],
+            88+offsetX,y,325,i==NATIVE_MUSIC_CAT_CUSTOM &&
+            NativeCustomTracks_Count()==0 ? GRAY : ORANGE);
+        if(i!=NATIVE_MUSIC_CAT_BACK)
+            DecalFont_DrawLine(">",425+offsetX,y,
+                               FONT_SMALL,JUSTIFY_RIGHT|WHITE);
+    }
+    MainFreeze_NativeOptionsDrawCursor(offsetX,48+row*17,14);
+    MainFreeze_NativeOptionsDrawFrame("WHERE TO PLAY?",offsetX,194);
+}
+static void MainFreeze_NativeOptionsDrawMusicTargets(int offsetX)
+{
+    const int shown=MainFreeze_MusicVisibleLevels();
+    const int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_TARGETS];
+    char note[128];
+    if(shown==0)
+        MainFreeze_MusicDrawFit("NO TRACK MODS INSTALLED",
+                               78+offsetX,83,344,WHITE);
+    for(int i=0;i<shown;i++)
+    {
+        int slot=MainFreeze_MusicTargetAt(s_nativeMusicLevelPage*
+                    NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE+i);
+        int y=59+i*21;
+        MainFreeze_MusicDrawFit(MainFreeze_MusicTargetName(slot),
+                                78+offsetX,y,185,ORANGE);
+        MainFreeze_MusicDrawFit(
+            NativeMusicSelection_GetLevelSelectionName(slot),
+            430+offsetX,y,174,JUSTIFY_RIGHT|WHITE);
+    }
+    DecalFont_DrawLine("BACK",78+offsetX,59+shown*21,
+                       FONT_SMALL,ORANGE);
+    snprintf(note,sizeof(note),"%s %d/%d  LEFT / RIGHT",
+             NativeLocalization_Translate("PAGE"),
+             s_nativeMusicLevelPage+1,
+             (MainFreeze_MusicTargetCount()+
+              NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE-1)/
+              NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE > 0 ?
+             (MainFreeze_MusicTargetCount()+
+              NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE-1)/
+              NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE : 1);
+    DecalFont_DrawLine(note,256+offsetX,203,
+                       FONT_SMALL,JUSTIFY_CENTER|WHITE);
+    MainFreeze_NativeOptionsDrawCursor(offsetX,56+row*21,16);
+    MainFreeze_NativeOptionsDrawFrame(
+        (char *)s_nativeMusicCategories[s_nativeMusicCategory],
+        offsetX,197);
+}
+static void MainFreeze_NativeOptionsDrawMusicSongs(int offsetX)
+{
+    const int shown=MainFreeze_MusicVisibleChoices();
+    const int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_SONGS];
+    const int current=NativeMusicSelection_GetLevelChoice(
+                          s_nativeMusicSelectedLevel);
+    const int selectedPack=NativeMusicSelection_GetAvailablePackPositionForChoice(
+                               s_nativeMusicSelectedLevel,current);
+    const char *targetName=MainFreeze_MusicTargetName(
+        s_nativeMusicSelectedLevel);
+    char caption[100];
+    for(int i=0;i<shown;i++)
+    {
+        int pos=s_nativeMusicSongPage*
+                NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE+i;
+        int y=59+i*21;
+        if(pos<3)
+        {
+            const char *label=NativeMusicSelection_GetLevelChoiceName(pos);
+            if(s_nativeMusicSelectedLevel>=NATIVE_MUSIC_CUSTOM_BASE)
+            {
+                if(pos==1)label="TRACK DEFAULT";
+                else if(pos==2)label="TRACK IMPORTS";
+            }
+            MainFreeze_MusicDrawFit(label,78+offsetX,y,340,
+                                     current==pos ? ORANGE : WHITE);
+        }
+        else
+        {
+            const int pack=pos-3;
+            const int count=NativeMusicSelection_GetAvailablePackSongCount(
+                                  s_nativeMusicSelectedLevel,pack);
+            const char *name=NativeMusicSelection_GetAvailablePackName(
+                                  s_nativeMusicSelectedLevel,pack);
+            char label[190],tail[30];
+            snprintf(label,sizeof(label),"%s >",name);
+            snprintf(tail,sizeof(tail),"%d SONG%s",count,count==1?"":"S");
+            MainFreeze_MusicDrawFit(label,78+offsetX,y,275,
+                                     selectedPack==pack ? ORANGE : WHITE);
+            DecalFont_DrawLine(tail,432+offsetX,y,FONT_SMALL,
+                               JUSTIFY_RIGHT|WHITE);
+        }
+    }
+    DecalFont_DrawLine("BACK",78+offsetX,59+shown*21,FONT_SMALL,ORANGE);
+    snprintf(caption,sizeof(caption),"%s %d/%d",
+             NativeLocalization_Translate("PACKS"),
+             s_nativeMusicSongPage+1,
+             (3+NativeMusicSelection_GetAvailablePackCount(
+                  s_nativeMusicSelectedLevel)+
+              NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE-1)/
+              NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE);
+    DecalFont_DrawLine(caption,78+offsetX,203,FONT_SMALL,WHITE);
+    MainFreeze_MusicDrawFit(targetName,432+offsetX,203,230,
+                             JUSTIFY_RIGHT|ORANGE);
+    MainFreeze_NativeOptionsDrawCursor(offsetX,56+row*21,16);
+    MainFreeze_NativeOptionsDrawFrame("SELECT MUSIC PACK",offsetX,197);
+}
+static void MainFreeze_NativeOptionsDrawMusicPackSongs(int offsetX)
+{
+    const int shown=MainFreeze_MusicVisiblePackSongs();
+    const int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_PACK_SONGS];
+    const int current=NativeMusicSelection_GetLevelChoice(
+                          s_nativeMusicSelectedLevel);
+    const char *packName=NativeMusicSelection_GetAvailablePackName(
+                             s_nativeMusicSelectedLevel,s_nativeMusicSelectedPack);
+    char caption[100];
+    for(int i=0;i<shown;i++)
+    {
+        int pos=s_nativeMusicPackSongPage*
+                NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE+i;
+        int choice=NativeMusicSelection_GetAvailablePackSongChoice(
+            s_nativeMusicSelectedLevel,s_nativeMusicSelectedPack,pos);
+        const char *songName=NativeMusicSelection_GetAvailablePackSongName(choice);
+        MainFreeze_MusicDrawFit(songName,78+offsetX,59+i*21,342,
+                                 choice==current ? ORANGE : WHITE);
+    }
+    DecalFont_DrawLine("BACK",78+offsetX,59+shown*21,FONT_SMALL,ORANGE);
+    snprintf(caption,sizeof(caption),"%s %d/%d",
+             NativeLocalization_Translate("SONGS"),
+             s_nativeMusicPackSongPage+1,
+             (NativeMusicSelection_GetAvailablePackSongCount(
+                  s_nativeMusicSelectedLevel,s_nativeMusicSelectedPack)+
+              NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE-1)/
+              NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE);
+    DecalFont_DrawLine(caption,78+offsetX,203,FONT_SMALL,WHITE);
+    MainFreeze_MusicDrawFit(packName,432+offsetX,203,240,
+                             JUSTIFY_RIGHT|ORANGE);
+    MainFreeze_NativeOptionsDrawCursor(offsetX,56+row*21,16);
+    MainFreeze_NativeOptionsDrawFrame("PACK SONGS",offsetX,197);
+}
+
+/* Translations warning is ALWAYS at the top, including initial setup.
+ * Render via the same DecalFont pipeline as the rest of the PC port.
+ * Strings are plain ASCII on this US font atlas; accented Latin glyphs
+ * remain a future atlas extension, never emit corrupt UTF-8 bytes. */
+static void MainFreeze_NativeOptionsDrawLanguage(int offsetX)
+{
+    const int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_LANGUAGE];
+    const int chosen=Platform_GetGameLanguage();
+    DecalFont_DrawLine("LANGUAGE",256+offsetX,32,
+                       FONT_SMALL,JUSTIFY_CENTER|ORANGE);
+    DecalFont_DrawLine("TRANSLATIONS MAY HAVE ERRORS",256+offsetX,56,
+                       FONT_SMALL,JUSTIFY_CENTER|WHITE);
+    DecalFont_DrawLine("PLEASE REPORT ANY MISTAKES",256+offsetX,69,
+                       FONT_SMALL,JUSTIFY_CENTER|ORANGE);
+    for(int i=0;i<6;i++)
+    {
+        int y=91+i*16;
+        char *name=(char *)NativeLocalization_GetLanguageName(i);
+        DecalFont_DrawLine(name,256+offsetX,y,
+                          FONT_SMALL,JUSTIFY_CENTER|
+                          (Platform_HasGameLanguage() && chosen==i ? ORANGE : WHITE));
+    }
+    if(!s_nativeLanguageFirstRun)
+        DecalFont_DrawLine("BACK",256+offsetX,190,
+                           FONT_SMALL,JUSTIFY_CENTER|ORANGE);
+    MainFreeze_NativeOptionsDrawCursor(offsetX,88+row*16,15);
+    MainFreeze_NativeOptionsDrawFrame("LANGUAGE",offsetX,210);
+}
+
 static void MainFreeze_NativeOptionsDrawPage(int page, int offsetX, const GAMEPAD_MainFreeze_MenuPtrOptions *gamepad)
 {
 	switch (page)
@@ -1775,6 +2425,21 @@ static void MainFreeze_NativeOptionsDrawPage(int page, int offsetX, const GAMEPA
 	case NATIVE_OPTIONS_PAGE_AUDIO:
 		MainFreeze_NativeOptionsDrawAudio(offsetX);
 		break;
+	case NATIVE_OPTIONS_PAGE_MUSIC:
+		MainFreeze_NativeOptionsDrawMusic(offsetX);
+		break;
+	case NATIVE_OPTIONS_PAGE_MUSIC_LEVELS:
+		MainFreeze_NativeOptionsDrawMusicLevels(offsetX);
+		break;
+	case NATIVE_OPTIONS_PAGE_MUSIC_TARGETS:
+		MainFreeze_NativeOptionsDrawMusicTargets(offsetX);
+		break;
+	case NATIVE_OPTIONS_PAGE_MUSIC_SONGS:
+		MainFreeze_NativeOptionsDrawMusicSongs(offsetX);
+		break;
+    case NATIVE_OPTIONS_PAGE_MUSIC_PACK_SONGS:
+        MainFreeze_NativeOptionsDrawMusicPackSongs(offsetX);
+        break;
 	case NATIVE_OPTIONS_PAGE_GRAPHICS:
 		MainFreeze_NativeOptionsDrawGraphics(offsetX);
 		break;
@@ -1787,6 +2452,9 @@ static void MainFreeze_NativeOptionsDrawPage(int page, int offsetX, const GAMEPA
 	case NATIVE_OPTIONS_PAGE_CONTROLS:
 		MainFreeze_NativeOptionsDrawControls(offsetX, gamepad);
 		break;
+    case NATIVE_OPTIONS_PAGE_LANGUAGE:
+        MainFreeze_NativeOptionsDrawLanguage(offsetX);
+        break;
 	default:
 		MainFreeze_NativeOptionsDrawRoot(offsetX);
 		break;
@@ -1857,6 +2525,42 @@ static void MainFreeze_NativeOptionsAdjustVolume(int row)
 	}
 }
 
+static void MainFreeze_NativeOptionsInputLanguage(void)
+{
+    const u32 tap=sdata->AnyPlayerTap;
+    const int rows=s_nativeLanguageFirstRun ? 6 : 7;
+    const int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_LANGUAGE];
+    if(tap&BTN_UP) {
+        MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_LANGUAGE,rows,-1);
+        return;
+    }
+    if(tap&BTN_DOWN) {
+        MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_LANGUAGE,rows,1);
+        return;
+    }
+    if(!(tap&(BTN_CIRCLE|BTN_CROSS_one)))return;
+    if(row>=0 && row<6)
+    {
+        /* Persist immediately. Switching language in-game refreshes every
+         * translated text draw without restarting music, game or mods. */
+        Platform_SetGameLanguage(row);
+        OtherFX_Play(1,1);
+        if(s_nativeLanguageFirstRun)
+        {
+            s_nativeLanguageFirstRun=0;
+            MainFreeze_NativeOptionsBeginExit();
+        }
+        else MainFreeze_NativeOptionsBeginTransition(
+            NATIVE_OPTIONS_PAGE_ROOT,-1);
+    }
+    else if(!s_nativeLanguageFirstRun)
+    {
+        OtherFX_Play(1,1);
+        MainFreeze_NativeOptionsBeginTransition(
+            NATIVE_OPTIONS_PAGE_ROOT,-1);
+    }
+}
+
 static void MainFreeze_NativeOptionsInputAudio(void)
 {
 	const int row = s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_AUDIO];
@@ -1891,17 +2595,453 @@ static void MainFreeze_NativeOptionsInputAudio(void)
 		return;
 	}
 
-	if ((row == 4) && (sdata->AnyPlayerTap & (BTN_CIRCLE | BTN_CROSS_one)))
+	if ((row == 4) &&
+        (sdata->AnyPlayerTap & (BTN_LEFT | BTN_RIGHT | BTN_CIRCLE | BTN_CROSS_one)))
+    {
+        OtherFX_Play(1, 1);
+        Platform_SetHearOtherRacers(!Platform_GetHearOtherRacers());
+        return;
+    }
+
+    if ((row == 5) && (sdata->AnyPlayerTap & (BTN_CIRCLE | BTN_CROSS_one)))
+    {
+		/* Audio and track metadata are indexed before HOWL starts.
+		 * Avoid blocking the live CSEQ sequencer on menu navigation. */
+		if (!NativeCustomTracks_IsActiveRace())
+			NativeCustomTracks_EnsureScanned();
+		NativeMusicSelection_EnsureReady();
+		OtherFX_Play(1, 1);
+		MainFreeze_NativeOptionsBeginTransition(NATIVE_OPTIONS_PAGE_MUSIC, 1);
+	}
+	if ((row == 6) && (sdata->AnyPlayerTap & (BTN_CIRCLE | BTN_CROSS_one)))
 	{
 		OtherFX_Play(1, 1);
 		MainFreeze_NativeOptionsBeginTransition(NATIVE_OPTIONS_PAGE_ROOT, -1);
 	}
 }
 
+/* Music choices are saved for *all* locations, but only the current
+ * audible location should be restarted. Use precisely the same slot routing
+ * as CseqMusic_Start, including custom tracks, bosses and Hangout.
+ * A mask cue is a temporary song; handle it without killing its backing
+ * racing soundtrack. */
+static int MainFreeze_MusicLiveSlot(void)
+{
+    struct GameTracker *gGT;
+    if(sdata==NULL || (gGT=sdata->gGT)==NULL)
+        return -1;
+    if(NativeHangout_IsActive())
+        return NATIVE_MUSIC_HANGOUT_SLOT;
+    if(NativeCustomTracks_IsActiveRace() &&
+       NativeCustomTracks_SelectedIndex()>=0)
+        return NATIVE_MUSIC_CUSTOM_BASE+
+               NativeCustomTracks_SelectedIndex();
+    if(IS_BOSS_RACE(gGT->gameMode1))
+        return NATIVE_MUSIC_BOSS_SLOT;
+    return gGT->levelID;
+}
+
+static void MainFreeze_MusicLiveApplyChoice(int requestedSlot)
+{
+    struct GameTracker *gGT;
+    struct NativeMusicSelectionResolved resolved;
+    const struct CseqHeader *retail;
+    struct SongSet *hubSet=NULL;
+    int hubBits=0;
+    int activeSlot;
+    int source;
+    int maskID;
+    int activeMask;
+    int restartClock;
+    int wasPaused;
+    int started;
+
+    if(sdata==NULL || (gGT=sdata->gGT)==NULL ||
+       sdata->boolAudioEnabled==0 ||
+       sdata->Loading.stage!=LOAD_IDLE ||
+       (gGT->gameMode1&END_OF_RACE)!=0)
+        return;
+
+    activeSlot=MainFreeze_MusicLiveSlot();
+    if(activeSlot<0)
+        return;
+
+    activeMask=(sdata->cseqBoolPlay!=0 &&
+                (sdata->cseqHighestIndex==CSEQ_SONG_AKU ||
+                 sdata->cseqHighestIndex==CSEQ_SONG_UKA)) ?
+                 sdata->cseqHighestIndex : 0;
+    maskID=(requestedSlot==NATIVE_MUSIC_MASK_AKU_SLOT) ?
+            CSEQ_SONG_AKU :
+            (requestedSlot==NATIVE_MUSIC_MASK_UKA_SLOT) ?
+            CSEQ_SONG_UKA : 0;
+
+    /* Changing a specific inactive track must NOT interrupt the music
+       that's already playing somewhere else. */
+    if(requestedSlot>=0 && requestedSlot!=activeSlot &&
+       (!maskID || maskID!=activeMask))
+        return;
+
+    if(activeMask)
+    {
+        if(requestedSlot>=0 && maskID!=activeMask)
+        {
+            Platform_Log("[MUSIC LIVE] saved other slot=%d during mask; no interrupt\n",
+                         requestedSlot);
+            return;
+        }
+        /* Restore the current cue without touching song-0's OGG/CSEQ
+           timeline. Its normal end-of-mask transition will pick up the
+           newly selected background song later. */
+        restartClock=NativeMenuMusicClock_IsRunning();
+        if(restartClock) NativeMenuMusicClock_Stop();
+        CseqMusic_Stop(activeMask);
+        started=CseqMusic_Start(activeMask,0,NULL,0,1);
+        if(restartClock) NativeMenuMusicClock_Start();
+        Platform_Log("[MUSIC LIVE] restarted mask song=%d result=%d\n",
+                     activeMask,started);
+        return;
+    }
+
+    /* Never start race audio over the title/garage transition or over a
+       cutscene's XA. The selected choice is still saved for its next load. */
+    if((gGT->gameMode1 & GAME_CUTSCENE)!=0 ||
+       ((gGT->gameMode1 & MAIN_MENU)!=0 &&
+        gGT->levelID!=MAIN_MENU_LEVEL &&
+        gGT->levelID!=ADVENTURE_GARAGE))
+        return;
+
+    /* A freshly selected song can start even if the previous location's
+       source was intentionally silent. Use the already-loaded retail HOWL
+       CSEQ as the reference; a custom external CSEQ points elsewhere. */
+    retail=(const struct CseqHeader *)(const void *)sdata->sampleBlock1;
+    if(retail->songSize<(int)sizeof(*retail) ||
+       retail->songSize>0x40000 ||
+       retail->numSongs==0 || retail->numSongs>128)
+    {
+        Platform_LogWarn("[MUSIC LIVE] retail CSEQ bank not ready; saved for next load\n");
+        return;
+    }
+
+    /* Menu HOWL ticks run on a separate 60-Hz thread. Waiting for that
+       thread to stop is required before freeing/replacing a CSEQ pack.
+       Never hold SDL audio output lock while changing these resources. */
+    restartClock=NativeMenuMusicClock_IsRunning();
+    if(restartClock) NativeMenuMusicClock_Stop();
+    wasPaused=(sdata->boolSoundPaused!=0) ||
+        (((gGT->gameMode1&PAUSE_ALL)!=0) &&
+         ((gGT->gameMode1&MAIN_MENU)==0));
+
+    CseqMusic_StopAll();
+    Music_End();
+#if defined(CTR_CSEQ_LIBERATION)
+    NativeMusicRegistry_Shutdown();
+#endif
+    /* Restores the retail *bank* when transitioning away from an external
+       CSEQ, so 'ORIGINAL CTR' does not follow dangling pointers. It also
+       restores the source for OGG mode, whose CSEQ pool is silent. */
+    howl_ParseCseqHeader((struct CseqHeader *)(void *)sdata->sampleBlock1);
+
+    if((gGT->gameMode1 & ADVENTURE_ARENA)!=0 &&
+       gGT->levelID>=GEM_STONE_VALLEY &&
+       gGT->levelID<GEM_STONE_VALLEY+5)
+    {
+        hubSet=&sdata->advHubSongSet;
+        hubBits=1<<(gGT->levelID-GEM_STONE_VALLEY);
+    }
+
+    source=NativeMusicSelection_Resolve(activeSlot,&resolved);
+    started=CseqMusic_Start(0,0,hubSet,hubBits,1);
+    if(started)
+    {
+        sdata->cseqBoolPlay=1;
+        sdata->cseqHighestIndex=0;
+        sdata->cseqTempo=0;
+        if(wasPaused) CseqMusic_Pause();
+    }
+    else
+        Music_End();
+
+    if(restartClock) NativeMenuMusicClock_Start();
+    Platform_Log("[MUSIC LIVE] slot=%d requested=%d source=%d song=%s started=%d (clock=%d)\n",
+                 activeSlot,requestedSlot,source,
+                 resolved.path[0]?resolved.path:"RETAIL/EXISTING",
+                 started,restartClock);
+}
+
+static void MainFreeze_NativeOptionsInputMusic(void)
+{
+    const u32 tap=sdata->AnyPlayerTap;
+    const int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC];
+    if(tap & BTN_UP)
+    {
+        MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_MUSIC,
+             NATIVE_OPTIONS_MUSIC_ROOT_ROWS,-1);
+        return;
+    }
+    if(tap & BTN_DOWN)
+    {
+        MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_MUSIC,
+             NATIVE_OPTIONS_MUSIC_ROOT_ROWS,1);
+        return;
+    }
+
+    if(row==0 && (tap&(BTN_LEFT|BTN_RIGHT|BTN_CIRCLE|BTN_CROSS_one)))
+    {
+        int kind=NativeMusicSelection_GetDefaultSource();
+        int step=(tap&BTN_LEFT)?-1:1;
+        NativeMusicSelection_SetDefaultSource((kind+step+4)%4);
+        MainFreeze_MusicLiveApplyChoice(-1);
+        OtherFX_Play(1,1);
+        return;
+    }
+    if(row==1 && (tap&(BTN_LEFT|BTN_RIGHT|BTN_CIRCLE|BTN_CROSS_one)))
+    {
+        if (NativeMusicSelection_GetDefaultSource() <
+            NATIVE_MUSIC_SOURCE_OGG) return;
+        int kind=MainFreeze_MusicPackKind();
+        NativeMusicSelection_CycleDefaultPack(
+             kind,(tap&BTN_LEFT)?-1:1);
+        MainFreeze_MusicLiveApplyChoice(-1);
+        OtherFX_Play(1,1);
+        return;
+    }
+    if(!(tap&(BTN_CIRCLE|BTN_CROSS_one))) return;
+
+    if(row==2)
+    {
+        s_nativeMusicCategory=0;
+        s_nativeMusicLevelPage=0;
+        s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_LEVELS]=0;
+        MainFreeze_NativeOptionsBeginTransition(
+             NATIVE_OPTIONS_PAGE_MUSIC_LEVELS,1);
+    }
+    else if(row==3)
+    {
+        if(!NativeCustomTracks_IsActiveRace())
+            NativeCustomTracks_Scan();
+        NativeMusicSelection_Reload();
+        MainFreeze_MusicLiveApplyChoice(-1);
+        OtherFX_Play(1,1);
+    }
+    else if(row==4)
+        MainFreeze_NativeOptionsBeginTransition(
+             NATIVE_OPTIONS_PAGE_AUDIO,-1);
+}
+
+static void MainFreeze_NativeOptionsInputMusicLevels(void)
+{
+    const u32 tap=sdata->AnyPlayerTap;
+    int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_LEVELS];
+    if(tap&BTN_UP)
+    {
+        MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_MUSIC_LEVELS,
+                                       NATIVE_OPTIONS_MUSIC_CATEGORY_ROWS,-1);
+        return;
+    }
+    if(tap&BTN_DOWN)
+    {
+        MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_MUSIC_LEVELS,
+                                       NATIVE_OPTIONS_MUSIC_CATEGORY_ROWS,1);
+        return;
+    }
+    if(!(tap&(BTN_CIRCLE|BTN_CROSS_one)))return;
+    if(row==NATIVE_MUSIC_CAT_BACK)
+    {
+        MainFreeze_NativeOptionsBeginTransition(
+            NATIVE_OPTIONS_PAGE_MUSIC,-1);
+        return;
+    }
+    s_nativeMusicCategory=row;
+    if(MainFreeze_MusicTargetCount()==0)
+    {
+        OtherFX_Play(5,1);
+        return;
+    }
+    s_nativeMusicLevelPage=0;
+    s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_TARGETS]=0;
+    MainFreeze_NativeOptionsBeginTransition(
+        NATIVE_OPTIONS_PAGE_MUSIC_TARGETS,1);
+}
+static void MainFreeze_NativeOptionsInputMusicTargets(void)
+{
+    const u32 tap=sdata->AnyPlayerTap;
+    const int visible=MainFreeze_MusicVisibleLevels();
+    const int pageCount=(MainFreeze_MusicTargetCount()+
+        NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE-1)/
+        NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE;
+    int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_TARGETS];
+
+    if(tap&(BTN_LEFT|BTN_RIGHT))
+    {
+        int next=s_nativeMusicLevelPage+((tap&BTN_LEFT)?-1:1);
+        if(next>=0 && next<pageCount)
+        {
+            s_nativeMusicLevelPage=next;
+            if(row>MainFreeze_MusicVisibleLevels())
+                s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_TARGETS]=0;
+            OtherFX_Play(0,1);
+        }
+        return;
+    }
+    if(tap&BTN_UP)
+    {
+        MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_MUSIC_TARGETS,
+                                       visible+1,-1);
+        return;
+    }
+    if(tap&BTN_DOWN)
+    {
+        MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_MUSIC_TARGETS,
+                                       visible+1,1);
+        return;
+    }
+    if(!(tap&(BTN_CIRCLE|BTN_CROSS_one)))return;
+    if(row>=visible)
+    {
+        MainFreeze_NativeOptionsBeginTransition(
+            NATIVE_OPTIONS_PAGE_MUSIC_LEVELS,-1);
+        return;
+    }
+    s_nativeMusicSelectedLevel=MainFreeze_MusicTargetAt(
+        s_nativeMusicLevelPage*NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE+row);
+    {
+        int selected=NativeMusicSelection_GetLevelChoice(
+                         s_nativeMusicSelectedLevel);
+        int pack=NativeMusicSelection_GetAvailablePackPositionForChoice(
+                         s_nativeMusicSelectedLevel,selected);
+        int position=selected<3 ? selected : (pack>=0 ? 3+pack : 0);
+        s_nativeMusicSongPage=position/NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE;
+        s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_SONGS]=
+            position%NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE;
+    }
+    MainFreeze_NativeOptionsBeginTransition(
+        NATIVE_OPTIONS_PAGE_MUSIC_SONGS,1);
+}
+static void MainFreeze_NativeOptionsInputMusicSongs(void)
+{
+    const u32 tap=sdata->AnyPlayerTap;
+    const int pageCount=(3+NativeMusicSelection_GetAvailablePackCount(
+                             s_nativeMusicSelectedLevel)+
+        NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE-1)/
+        NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE;
+    const int visible=MainFreeze_MusicVisibleChoices();
+    int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_SONGS];
+
+    if(tap&(BTN_LEFT|BTN_RIGHT))
+    {
+        int next=s_nativeMusicSongPage+((tap&BTN_LEFT)?-1:1);
+        if(next>=0 && next<pageCount)
+        {
+            s_nativeMusicSongPage=next;
+            if(row>MainFreeze_MusicVisibleChoices())
+                s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_SONGS]=0;
+            OtherFX_Play(0,1);
+        }
+        return;
+    }
+    if(tap&BTN_UP)
+    {
+        MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_MUSIC_SONGS,
+                                       visible+1,-1);
+        return;
+    }
+    if(tap&BTN_DOWN)
+    {
+        MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_MUSIC_SONGS,
+                                       visible+1,1);
+        return;
+    }
+    if(!(tap&(BTN_CIRCLE|BTN_CROSS_one)))return;
+    if(row<visible)
+    {
+        int pos=s_nativeMusicSongPage*NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE+row;
+        if(pos<3)
+        {
+            NativeMusicSelection_SetLevelChoice(s_nativeMusicSelectedLevel,pos);
+            MainFreeze_MusicLiveApplyChoice(s_nativeMusicSelectedLevel);
+            OtherFX_Play(1,1);
+            MainFreeze_NativeOptionsBeginTransition(
+                NATIVE_OPTIONS_PAGE_MUSIC_TARGETS,-1);
+            return;
+        }
+        /* A soundtrack pack is a group, not a song. Drill into its
+         * actual CSEQ/OGG song list without setting music prematurely. */
+        s_nativeMusicSelectedPack=pos-3;
+        int current=NativeMusicSelection_GetLevelChoice(
+                        s_nativeMusicSelectedLevel);
+        int index=NativeMusicSelection_GetAvailablePackSongPosition(
+                      s_nativeMusicSelectedLevel,s_nativeMusicSelectedPack,
+                      current);
+        s_nativeMusicPackSongPage=index/NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE;
+        s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_PACK_SONGS]=
+            index%NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE;
+        OtherFX_Play(1,1);
+        MainFreeze_NativeOptionsBeginTransition(
+            NATIVE_OPTIONS_PAGE_MUSIC_PACK_SONGS,1);
+        return;
+    }
+    MainFreeze_NativeOptionsBeginTransition(
+        NATIVE_OPTIONS_PAGE_MUSIC_TARGETS,-1);
+}
+static void MainFreeze_NativeOptionsInputMusicPackSongs(void)
+{
+    const u32 tap=sdata->AnyPlayerTap;
+    const int count=NativeMusicSelection_GetAvailablePackSongCount(
+                        s_nativeMusicSelectedLevel,s_nativeMusicSelectedPack);
+    const int pageCount=(count+NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE-1)/
+                         NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE;
+    const int visible=MainFreeze_MusicVisiblePackSongs();
+    const int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_PACK_SONGS];
+    if(tap&(BTN_LEFT|BTN_RIGHT))
+    {
+        int next=s_nativeMusicPackSongPage+((tap&BTN_LEFT)?-1:1);
+        if(next>=0 && next<pageCount)
+        {
+            s_nativeMusicPackSongPage=next;
+            if(row>MainFreeze_MusicVisiblePackSongs())
+                s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_MUSIC_PACK_SONGS]=0;
+            OtherFX_Play(0,1);
+        }
+        return;
+    }
+    if(tap&BTN_UP)
+    {
+        MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_MUSIC_PACK_SONGS,
+                                        visible+1,-1);
+        return;
+    }
+    if(tap&BTN_DOWN)
+    {
+        MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_MUSIC_PACK_SONGS,
+                                        visible+1,1);
+        return;
+    }
+    if(!(tap&(BTN_CIRCLE|BTN_CROSS_one)))return;
+    if(row<visible)
+    {
+        int position=s_nativeMusicPackSongPage*
+                        NATIVE_OPTIONS_MUSIC_LIST_PAGE_SIZE+row;
+        int choice=NativeMusicSelection_GetAvailablePackSongChoice(
+            s_nativeMusicSelectedLevel,s_nativeMusicSelectedPack,position);
+        if(choice>=3)
+        {
+            NativeMusicSelection_SetLevelChoice(s_nativeMusicSelectedLevel,choice);
+            MainFreeze_MusicLiveApplyChoice(s_nativeMusicSelectedLevel);
+            OtherFX_Play(1,1);
+            MainFreeze_NativeOptionsBeginTransition(
+                NATIVE_OPTIONS_PAGE_MUSIC_TARGETS,-1);
+            return;
+        }
+    }
+    MainFreeze_NativeOptionsBeginTransition(
+        NATIVE_OPTIONS_PAGE_MUSIC_SONGS,-1);
+}
+
 static void MainFreeze_NativeOptionsCycleResolution(int direction)
 {
 	const int count = Platform_GetResolutionPresetCount();
-	int current = Platform_GetResolutionPresetIndex();
+	MainFreeze_NativeGraphicsEnsureDraft();
+	int current = s_nativeGraphicsDraft.resolutionIndex;
 
 	if (count <= 0)
 		return;
@@ -1948,167 +3088,129 @@ static void MainFreeze_NativeOptionsCycleResolution(int direction)
 		if (current >= count) current = 0;
 	}
 
-	Platform_SetResolutionPreset(current);
+	s_nativeGraphicsDraft.resolutionIndex=current;
 }
 
 static void MainFreeze_NativeOptionsInputGraphics(void)
 {
-	const int row = s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_GRAPHICS];
-	u32 adjust = sdata->AnyPlayerTap & (BTN_LEFT | BTN_RIGHT | BTN_CIRCLE | BTN_CROSS_one);
+	MainFreeze_NativeGraphicsEnsureDraft();
+	NativeGraphicsDraft *p=&s_nativeGraphicsDraft;
+	const int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_GRAPHICS];
+	const u32 tap=sdata->AnyPlayerTap;
+	const u32 adjust=tap&(BTN_LEFT|BTN_RIGHT|BTN_CIRCLE|BTN_CROSS_one);
+	const int direction=(tap&BTN_LEFT)?-1:1;
 
-	if (sdata->AnyPlayerTap & BTN_UP)
+	if(tap&BTN_UP)
 	{
-		MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_GRAPHICS, NATIVE_OPTIONS_GRAPHICS_ROW_COUNT, -1);
+		MainFreeze_NativeOptionsMoveRow(
+			NATIVE_OPTIONS_PAGE_GRAPHICS,NATIVE_OPTIONS_GRAPHICS_ROW_COUNT,-1);
 		return;
 	}
-	if (sdata->AnyPlayerTap & BTN_DOWN)
+	if(tap&BTN_DOWN)
 	{
-		MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_GRAPHICS, NATIVE_OPTIONS_GRAPHICS_ROW_COUNT, 1);
+		MainFreeze_NativeOptionsMoveRow(
+			NATIVE_OPTIONS_PAGE_GRAPHICS,NATIVE_OPTIONS_GRAPHICS_ROW_COUNT,1);
 		return;
 	}
-
-	if ((row == 6) && (sdata->AnyPlayerTap & (BTN_CIRCLE | BTN_CROSS_one)))
+	if(row==7 && (tap&(BTN_CIRCLE|BTN_CROSS_one)))
 	{
-		OtherFX_Play(1, 1);
-		MainFreeze_NativeOptionsBeginTransition(NATIVE_OPTIONS_PAGE_ROOT, -1);
+		OtherFX_Play(1,1);
+		MainFreeze_NativeOptionsBeginTransition(NATIVE_OPTIONS_PAGE_ROOT,-1);
 		return;
 	}
-
-	if ((row == 5) && (sdata->AnyPlayerTap & (BTN_CIRCLE | BTN_CROSS_one)))
+	if(row==6 && (tap&(BTN_CIRCLE|BTN_CROSS_one)))
 	{
-		OtherFX_Play(1, 1);
+		OtherFX_Play(1,1);
+		MainFreeze_NativeGraphicsApply();
+		return;
+	}
+	if(row==5 && (tap&(BTN_CIRCLE|BTN_CROSS_one)))
+	{
+		OtherFX_Play(1,1);
 		MainFreeze_NativeOptionsBeginTransition(
-			NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS, 1);
+			NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS,1);
 		return;
 	}
-
-	if (!adjust)
-		return;
-
-	OtherFX_Play(1, 1);
-	switch (row)
+	if(!adjust)return;
+	OtherFX_Play(1,1);
+	switch(row)
 	{
 	case 0:
-		MainFreeze_NativeOptionsCycleResolution((sdata->AnyPlayerTap & BTN_LEFT) ? -1 : 1);
+		MainFreeze_NativeOptionsCycleResolution(direction);
 		break;
 	case 1:
-		Platform_SetFullscreenMode(!Platform_GetFullscreenMode());
+		p->fullscreen=!p->fullscreen;
 		break;
 	case 2:
-		Platform_SetWideMode(!Platform_GetWideMode());
+		p->aspectMode=(p->aspectMode+PLATFORM_ASPECT_RATIO_COUNT+
+			direction)%PLATFORM_ASPECT_RATIO_COUNT;
 		break;
 	case 3:
-	{
-		int mode = Platform_GetFPSLimitMode();
-		if (sdata->AnyPlayerTap & BTN_LEFT)
-			mode = (mode + PLATFORM_FPS_LIMIT_COUNT - 1) % PLATFORM_FPS_LIMIT_COUNT;
-		else
-			mode = (mode + 1) % PLATFORM_FPS_LIMIT_COUNT;
-		Platform_SetFPSLimitMode(mode);
+		p->fpsLimit=(p->fpsLimit+PLATFORM_FPS_LIMIT_COUNT+
+			direction)%PLATFORM_FPS_LIMIT_COUNT;
 		break;
-	}
 	case 4:
-	{
-		int mode = Platform_GetCharacterDetailMode();
-		if (sdata->AnyPlayerTap & BTN_LEFT)
-			mode = (mode + 3) % 4;
-		else
-			mode = (mode + 1) % 4;
-		Platform_SetCharacterDetailMode(mode);
+		p->characterDetail=(p->characterDetail+4+direction)%4;
 		break;
-	}
 	}
 }
 
 static void MainFreeze_NativeOptionsInputAdvancedGraphics(void)
 {
-	const int row =
-		s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS];
-	const u32 adjust =
-		sdata->AnyPlayerTap &
-		(BTN_LEFT | BTN_RIGHT | BTN_CIRCLE | BTN_CROSS_one);
-
-	if (sdata->AnyPlayerTap & BTN_UP)
+	MainFreeze_NativeGraphicsEnsureDraft();
+	NativeGraphicsDraft *p=&s_nativeGraphicsDraft;
+	const int row=s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS];
+	const u32 tap=sdata->AnyPlayerTap;
+	const u32 adjust=tap&(BTN_LEFT|BTN_RIGHT|BTN_CIRCLE|BTN_CROSS_one);
+	if(tap&BTN_UP)
 	{
 		MainFreeze_NativeOptionsMoveRow(
 			NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS,
-			NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT,
-			-1);
+			NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT,-1);
 		return;
 	}
-
-	if (sdata->AnyPlayerTap & BTN_DOWN)
+	if(tap&BTN_DOWN)
 	{
 		MainFreeze_NativeOptionsMoveRow(
 			NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS,
-			NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT,
-			1);
+			NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT,1);
 		return;
 	}
-
-	if ((row == 12) &&
-	    (sdata->AnyPlayerTap & (BTN_CIRCLE | BTN_CROSS_one)))
+	if(row==13 && (tap&(BTN_CIRCLE|BTN_CROSS_one)))
 	{
-		OtherFX_Play(1, 1);
+		OtherFX_Play(1,1);
 		MainFreeze_NativeOptionsBeginTransition(
-			NATIVE_OPTIONS_PAGE_GRAPHICS, -1);
+			NATIVE_OPTIONS_PAGE_GRAPHICS,-1);
 		return;
 	}
-
-	if (!adjust)
-		return;
-
-	switch (row)
+	if(row==12 && (tap&(BTN_CIRCLE|BTN_CROSS_one)))
 	{
-	case 1:
-		OtherFX_Play(1, 1);
-		Platform_SetSubpixelMode(!Platform_GetSubpixelMode());
-		break;
-
-	case 2:
-		OtherFX_Play(1, 1);
-		Platform_SetTextureFilteringMode(
-			!Platform_GetTextureFilteringMode());
-		break;
-
-	case 6:
-		OtherFX_Play(1, 1);
-		Platform_SetDitheringMode(!Platform_GetDitheringMode());
-		break;
-
-	case 8:
-		OtherFX_Play(1, 1);
-		Platform_SetPerfOverlayMode(!Platform_GetPerfOverlayMode());
-		break;
-
-	case 9:
-		OtherFX_Play(1, 1);
-		Platform_SetGpuTimingMode(!Platform_GetGpuTimingMode());
-		break;
-
-	case 10:
-		OtherFX_Play(1, 1);
-		Platform_SetExperimentalCompactVRAMMode(
-			!Platform_GetExperimentalCompactVRAMMode());
-		break;
-
-	case 11:
-		OtherFX_Play(1, 1);
-		Platform_SetExperimentalZBufferMode(
-			!Platform_GetExperimentalZBufferMode());
-		break;
-
-	default:
-		/* These rows describe real current backend state but are not yet
-		   adjustable. Do not save fake settings for unimplemented effects. */
-		OtherFX_Play(0, 1);
-		break;
+		OtherFX_Play(1,1);
+		MainFreeze_NativeGraphicsApply();
+		return;
 	}
+	if(!adjust)return;
+	switch(row)
+	{
+	case 1:p->subpixel=!p->subpixel;break;
+	case 2:p->textureFilter=!p->textureFilter;break;
+	case 6:p->dithering=!p->dithering;break;
+	case 8:p->perfOverlay=!p->perfOverlay;break;
+	case 9:p->gpuTiming=!p->gpuTiming;break;
+	case 10:p->compactVRAM=!p->compactVRAM;break;
+	case 11:p->zbuffer=!p->zbuffer;break;
+	default:
+		OtherFX_Play(0,1);
+		return;
+	}
+	OtherFX_Play(1,1);
 }
 
 static void MainFreeze_NativeOptionsInputGameplay(void)
 {
 	const int row = s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_GAMEPLAY];
+	const int hasHeight = MainFreeze_NativeOptionsGameplayHasHeight();
+	const int backRow = hasHeight ? 4 : 3;
 	const u32 adjust =
 		sdata->AnyPlayerTap &
 		(BTN_LEFT | BTN_RIGHT | BTN_CIRCLE | BTN_CROSS_one);
@@ -2117,7 +3219,7 @@ static void MainFreeze_NativeOptionsInputGameplay(void)
 	{
 		MainFreeze_NativeOptionsMoveRow(
 			NATIVE_OPTIONS_PAGE_GAMEPLAY,
-			NATIVE_OPTIONS_GAMEPLAY_ROW_COUNT,
+			MainFreeze_NativeOptionsGameplayRowCount(),
 			-1);
 		return;
 	}
@@ -2126,12 +3228,12 @@ static void MainFreeze_NativeOptionsInputGameplay(void)
 	{
 		MainFreeze_NativeOptionsMoveRow(
 			NATIVE_OPTIONS_PAGE_GAMEPLAY,
-			NATIVE_OPTIONS_GAMEPLAY_ROW_COUNT,
+			MainFreeze_NativeOptionsGameplayRowCount(),
 			1);
 		return;
 	}
 
-	if (row == 3)
+	if (row == backRow)
 	{
 		if (sdata->AnyPlayerTap & (BTN_CIRCLE | BTN_CROSS_one))
 		{
@@ -2169,16 +3271,23 @@ static void MainFreeze_NativeOptionsInputGameplay(void)
 		{
 			mode--;
 			if (mode < NATIVE_HUD_DRIFT_OFF)
-				mode = NATIVE_HUD_DRIFT_CNK_CENTERED;
+				mode = NATIVE_HUD_DRIFT_CNK_3D;
 		}
 		else
 		{
 			mode++;
-			if (mode > NATIVE_HUD_DRIFT_CNK_CENTERED)
+			if (mode > NATIVE_HUD_DRIFT_CNK_3D)
 				mode = NATIVE_HUD_DRIFT_OFF;
 		}
 
 		NativeHUD_SetDriftMeterMode(mode);
+		return;
+	}
+	if (hasHeight && row == 3)
+	{
+		NativeHUD_SetCNKMeterHeight(
+			NativeHUD_GetCNKMeterHeight() == NATIVE_HUD_CNK_HEIGHT_HIGH
+			? NATIVE_HUD_CNK_HEIGHT_LOW : NATIVE_HUD_CNK_HEIGHT_HIGH);
 	}
 }
 
@@ -2547,6 +3656,17 @@ static void MainFreeze_NativeOptionsInputControls(
 						s_nativeControlsPlayer];
 				Platform_SaveVibrationMask(
 					gGT->gameMode1 & GAME_MODE_VIBRATION_MASK);
+				{
+					const int enabled =
+						(gGT->gameMode1 & data.gGT_gameMode1_VibPerPlayer[
+							s_nativeControlsPlayer]) == 0;
+					if (!Platform_InputPreviewVibration(s_nativeControlsPlayer, enabled) &&
+					    enabled)
+					{
+						Platform_LogWarn("[CONTROLS] Controller P%d has no available rumble\n",
+						                 s_nativeControlsPlayer + 1);
+					}
+				}
 				OtherFX_Play(1, 1);
 			}
 			break;
@@ -2604,6 +3724,7 @@ static void MainFreeze_NativeOptionsApplyTouch(const GAMEPAD_MainFreeze_MenuPtrO
 {
 	int mouseX;
 	int mouseY;
+	int advancedMouseMoved = 1;
 	int rowCount;
 	int rowStartY;
 	int rowStep;
@@ -2614,6 +3735,16 @@ static void MainFreeze_NativeOptionsApplyTouch(const GAMEPAD_MainFreeze_MenuPtrO
 
 	if (!RECTMENU_NativeTouchGet(&mouseX, &mouseY))
 		return;
+
+	/* A stationary mouse must never steal the selection back after a
+	   keyboard, controller or mouse-wheel scroll. It can still click. */
+	if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS)
+	{
+		advancedMouseMoved = (mouseX != s_nativeAdvancedMouseX) ||
+		                     (mouseY != s_nativeAdvancedMouseY);
+		s_nativeAdvancedMouseX = mouseX;
+		s_nativeAdvancedMouseY = mouseY;
+	}
 
 	/* In the remap list, the only exits are the explicit BACK row below
 	   and the visible top-left BACK button when clicked with the mouse. */
@@ -2645,6 +3776,36 @@ static void MainFreeze_NativeOptionsApplyTouch(const GAMEPAD_MainFreeze_MenuPtrO
 		rowStep = 18;
 		rowHeight = 14;
 		break;
+	case NATIVE_OPTIONS_PAGE_MUSIC:
+		rowCount=NATIVE_OPTIONS_MUSIC_ROOT_ROWS;
+		rowStartY=59;
+		rowStep=23;
+		rowHeight=18;
+		break;
+	case NATIVE_OPTIONS_PAGE_MUSIC_LEVELS:
+		rowCount=NATIVE_OPTIONS_MUSIC_CATEGORY_ROWS;
+		rowStartY=48;
+		rowStep=17;
+		rowHeight=14;
+		break;
+	case NATIVE_OPTIONS_PAGE_MUSIC_TARGETS:
+		rowCount=MainFreeze_MusicVisibleLevels()+1;
+		rowStartY=56;
+		rowStep=21;
+		rowHeight=16;
+		break;
+	case NATIVE_OPTIONS_PAGE_MUSIC_SONGS:
+		rowCount=MainFreeze_MusicVisibleChoices()+1;
+		rowStartY=56;
+		rowStep=21;
+		rowHeight=16;
+		break;
+    case NATIVE_OPTIONS_PAGE_MUSIC_PACK_SONGS:
+        rowCount=MainFreeze_MusicVisiblePackSongs()+1;
+        rowStartY=56;
+        rowStep=21;
+        rowHeight=16;
+        break;
 	case NATIVE_OPTIONS_PAGE_GRAPHICS:
 		rowCount = NATIVE_OPTIONS_GRAPHICS_ROW_COUNT;
 		rowStartY = 51;
@@ -2652,17 +3813,27 @@ static void MainFreeze_NativeOptionsApplyTouch(const GAMEPAD_MainFreeze_MenuPtrO
 		rowHeight = 14;
 		break;
 	case NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS:
-		rowCount = NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT;
-		rowStartY = 51;
-		rowStep = 14;
-		rowHeight = 12;
+		MainFreeze_NativeAdvancedClampScroll();
+		rowCount=NATIVE_OPTIONS_ADVANCED_GRAPHICS_ROW_COUNT-
+			s_nativeAdvancedGraphicsScroll;
+		if(rowCount>NATIVE_ADVANCED_GRAPHICS_VISIBLE_ROWS)
+			rowCount=NATIVE_ADVANCED_GRAPHICS_VISIBLE_ROWS;
+		rowStartY=NATIVE_ADVANCED_GRAPHICS_ROW_TOP_Y;
+		rowStep=NATIVE_ADVANCED_GRAPHICS_ROW_STEP;
+		rowHeight=NATIVE_ADVANCED_GRAPHICS_ROW_HEIGHT;
 		break;
 	case NATIVE_OPTIONS_PAGE_GAMEPLAY:
-		rowCount = NATIVE_OPTIONS_GAMEPLAY_ROW_COUNT;
+		rowCount = MainFreeze_NativeOptionsGameplayRowCount();
 		rowStartY = 59;
 		rowStep = 22;
 		rowHeight = 16;
 		break;
+    case NATIVE_OPTIONS_PAGE_LANGUAGE:
+        rowCount=s_nativeLanguageFirstRun ? 6 : 7;
+        rowStartY=88;
+        rowStep=16;
+        rowHeight=15;
+        break;
 	case NATIVE_OPTIONS_PAGE_CONTROLS:
 		rowCount = MainFreeze_NativeOptionsControlsRowCount();
 		rowX = 108;
@@ -2719,6 +3890,15 @@ static void MainFreeze_NativeOptionsApplyTouch(const GAMEPAD_MainFreeze_MenuPtrO
 					(s_nativeControlsView == NATIVE_CONTROLS_VIEW_REMAP) ?
 					(s_nativeControlsScroll + i) : i;
 			}
+			else if(s_nativeOptionsPage==
+			        NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS)
+			{
+				/* Hover selects only after mouse movement. Stationary
+				   hover must not override D-pad or wheel navigation. */
+				if (advancedMouseMoved)
+					s_nativeOptionsRows[s_nativeOptionsPage]=
+						(s16)(s_nativeAdvancedGraphicsScroll+i);
+			}
 			else
 			{
 				s_nativeOptionsRows[s_nativeOptionsPage] = (s16)i;
@@ -2764,6 +3944,11 @@ static void MainFreeze_NativeOptionsApplyTouch(const GAMEPAD_MainFreeze_MenuPtrO
 
 		if (RECTMENU_NativeTouchConsumeRect(&rowRect))
 		{
+			/* A click must work even when the pointer hasn't moved. */
+			if (s_nativeOptionsPage ==
+			    NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS)
+				s_nativeOptionsRows[s_nativeOptionsPage] =
+					(s16)(s_nativeAdvancedGraphicsScroll + row);
 			sdata->AnyPlayerTap |= BTN_CROSS_one;
 			sdata->buttonTapPerPlayer[0] |= BTN_CROSS_one;
 		}
@@ -2882,6 +4067,17 @@ static b32 MainFreeze_NativeOptionsUpdate(struct RectMenu *menu, GAMEPAD_MainFre
 		return false;
 	}
 
+    /* A first-run install must choose a language before leaving.
+     * Never let START/triangle accidentally close the selector. */
+    if (s_nativeLanguageFirstRun &&
+        s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_LANGUAGE &&
+        (sdata->AnyPlayerTap & (BTN_START|BTN_TRIANGLE|BTN_SQUARE_one)))
+    {
+        RECTMENU_ClearInput();
+        MainFreeze_NativeOptionsDrawPage(s_nativeOptionsPage,0,gamepad);
+        return false;
+    }
+
 	if (sdata->AnyPlayerTap & BTN_START)
 	{
 		OtherFX_Play(1, 1);
@@ -2925,9 +4121,27 @@ static b32 MainFreeze_NativeOptionsUpdate(struct RectMenu *menu, GAMEPAD_MainFre
 		}
 
 		OtherFX_Play(1, 1);
-		if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS)
+        if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_LANGUAGE)
+            MainFreeze_NativeOptionsBeginTransition(
+                NATIVE_OPTIONS_PAGE_ROOT,-1);
+		else if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_ADVANCED_GRAPHICS)
 			MainFreeze_NativeOptionsBeginTransition(
 				NATIVE_OPTIONS_PAGE_GRAPHICS, -1);
+        else if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_MUSIC_PACK_SONGS)
+            MainFreeze_NativeOptionsBeginTransition(
+                NATIVE_OPTIONS_PAGE_MUSIC_SONGS, -1);
+		else if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_MUSIC_SONGS)
+			MainFreeze_NativeOptionsBeginTransition(
+				NATIVE_OPTIONS_PAGE_MUSIC_TARGETS, -1);
+		else if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_MUSIC_TARGETS)
+			MainFreeze_NativeOptionsBeginTransition(
+				NATIVE_OPTIONS_PAGE_MUSIC_LEVELS, -1);
+		else if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_MUSIC_LEVELS)
+			MainFreeze_NativeOptionsBeginTransition(
+				NATIVE_OPTIONS_PAGE_MUSIC, -1);
+		else if (s_nativeOptionsPage == NATIVE_OPTIONS_PAGE_MUSIC)
+			MainFreeze_NativeOptionsBeginTransition(
+				NATIVE_OPTIONS_PAGE_AUDIO, -1);
 		else
 			MainFreeze_NativeOptionsBeginTransition(
 				NATIVE_OPTIONS_PAGE_ROOT, -1);
@@ -2940,6 +4154,21 @@ static b32 MainFreeze_NativeOptionsUpdate(struct RectMenu *menu, GAMEPAD_MainFre
 	case NATIVE_OPTIONS_PAGE_AUDIO:
 		MainFreeze_NativeOptionsInputAudio();
 		break;
+	case NATIVE_OPTIONS_PAGE_MUSIC:
+		MainFreeze_NativeOptionsInputMusic();
+		break;
+	case NATIVE_OPTIONS_PAGE_MUSIC_LEVELS:
+		MainFreeze_NativeOptionsInputMusicLevels();
+		break;
+	case NATIVE_OPTIONS_PAGE_MUSIC_TARGETS:
+		MainFreeze_NativeOptionsInputMusicTargets();
+		break;
+	case NATIVE_OPTIONS_PAGE_MUSIC_SONGS:
+		MainFreeze_NativeOptionsInputMusicSongs();
+		break;
+    case NATIVE_OPTIONS_PAGE_MUSIC_PACK_SONGS:
+        MainFreeze_NativeOptionsInputMusicPackSongs();
+        break;
 	case NATIVE_OPTIONS_PAGE_GRAPHICS:
 		MainFreeze_NativeOptionsInputGraphics();
 		break;
@@ -2952,6 +4181,9 @@ static b32 MainFreeze_NativeOptionsUpdate(struct RectMenu *menu, GAMEPAD_MainFre
 	case NATIVE_OPTIONS_PAGE_CONTROLS:
 		MainFreeze_NativeOptionsInputControls(gamepad);
 		break;
+    case NATIVE_OPTIONS_PAGE_LANGUAGE:
+        MainFreeze_NativeOptionsInputLanguage();
+        break;
 	default:
 		if (sdata->AnyPlayerTap & BTN_UP)
 			MainFreeze_NativeOptionsMoveRow(NATIVE_OPTIONS_PAGE_ROOT, NATIVE_OPTIONS_ROOT_ROW_COUNT, -1);
@@ -2960,7 +4192,7 @@ static b32 MainFreeze_NativeOptionsUpdate(struct RectMenu *menu, GAMEPAD_MainFre
 		else if (sdata->AnyPlayerTap & (BTN_CIRCLE | BTN_CROSS_one))
 		{
 			const int row = s_nativeOptionsRows[NATIVE_OPTIONS_PAGE_ROOT];
-			if (row == 4)
+			if (row == 5)
 			{
 				OtherFX_Play(1, 1);
 				MainFreeze_NativeOptionsBeginExit();
@@ -2969,7 +4201,8 @@ static b32 MainFreeze_NativeOptionsUpdate(struct RectMenu *menu, GAMEPAD_MainFre
 			}
 
 			OtherFX_Play(1, 1);
-			MainFreeze_NativeOptionsBeginTransition(row + 1, 1);
+            MainFreeze_NativeOptionsBeginTransition(
+                row==4 ? NATIVE_OPTIONS_PAGE_LANGUAGE : row+1,1);
 		}
 		break;
 	}
@@ -3164,6 +4397,12 @@ force_inline b32 PROCESSINPUTS_MainFreeze_MenuPtrOptions(struct RectMenu *menu, 
 					gGT->gameMode1 ^= data.gGT_gameMode1_VibPerPlayer[gamepad->gamepadId[gamepadRow]];
 #ifdef CTR_NATIVE
 					Platform_SaveVibrationMask(gGT->gameMode1 & GAME_MODE_VIBRATION_MASK);
+					{
+						const int player = gamepad->gamepadId[gamepadRow];
+						const int enabled =
+							(gGT->gameMode1 & data.gGT_gameMode1_VibPerPlayer[player]) == 0;
+						Platform_InputPreviewVibration(player, enabled);
+					}
 #endif
 				}
 				else
@@ -3433,7 +4672,7 @@ force_inline void DISPLAYRECTMENU_MainFreeze_MenuPtrOptions(struct RectMenu *men
 #ifdef CTR_NATIVE
 	const int nativeOptionsY = 140 - (menuRowsNegativePadding / 2);
 	DecalFont_DrawLine("SCREEN", 76, nativeOptionsY, FONT_SMALL, ORANGE);
-	DecalFont_DrawLine(Platform_GetWideMode() ? "16:9" : "4:3", 436, nativeOptionsY, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
+	DecalFont_DrawLine((char *)Platform_GetAspectRatioLabel(Platform_GetAspectRatioMode()), 436, nativeOptionsY, FONT_SMALL, JUSTIFY_RIGHT | WHITE);
 
 	DecalFont_DrawLine("FPS LIMIT", 76, nativeOptionsY + 10, FONT_SMALL, ORANGE);
 	{
@@ -3707,6 +4946,42 @@ void MainFreeze_MenuPtrDefault(struct RectMenu *menu)
 
 	// get stringID from selected row
 	stringID = menu->rows[menu->rowSelected].stringIndex;
+
+#if defined(CTR_NATIVE)
+	if (NativeHangout_IsActive() &&
+	    menu == &s_hangoutPauseMenu &&
+	    stringID == NATIVE_HANGOUT_MENU_DISCONNECT_STRING)
+	{
+		RECTMENU_Hide(menu);
+		NativeHangout_SetMenuOpen(0);
+		NativeHangout_DisconnectPlayer();
+		gGT->cooldownFromUnpauseUntilPause = 5;
+		RECTMENU_ClearInput();
+		OtherFX_Play(1, 1);
+		return;
+	}
+
+	if (NativeHangout_IsActive() &&
+	    menu == &s_hangoutPauseMenu &&
+	    stringID == NATIVE_HANGOUT_MENU_CONNECT_STRING)
+	{
+		RECTMENU_Hide(menu);
+		NativeHangout_SetMenuOpen(0);
+		NativeHangout_ConnectPlayer();
+		gGT->cooldownFromUnpauseUntilPause = 5;
+		RECTMENU_ClearInput();
+		OtherFX_Play(1, 1);
+		return;
+	}
+
+	if (NativeHangout_IsActive() &&
+	    menu == &s_hangoutPauseMenu &&
+	    stringID == NATIVE_HANGOUT_MENU_CUSTOMIZATION_STRING)
+	{
+		NativeHangout_RequestCustomizationTransition();
+		return;
+	}
+#endif
 
 	// stringID 14: "OPTIONS"
 	if (stringID == 14)

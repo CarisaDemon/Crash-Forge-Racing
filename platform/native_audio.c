@@ -1751,14 +1751,30 @@ internal int NativeAudio_PrepareVoicePcmBuffer(u32 addr, struct NativeAudioPcmBu
 	}
 	else
 	{
+		int byteCount;
+		int scan;
+
 		if (addr >= NATIVE_AUDIO_SPU_MEMSIZE)
 		{
 			return 0;
 		}
 
-		maxSamples =
-			((NATIVE_AUDIO_SPU_MEMSIZE - (int)addr) / 16) *
-			XA_SAMPLES_PER_SOUND_UNIT;
+		/* Only reserve PCM for this ADPCM sample, not for every block
+		 * remaining in the 512 KiB SPU. Large per-key allocations inside
+		 * the SDL audio lock can otherwise delay a CSEQ note, especially
+		 * when menu transitions trigger additional sound-bank activity.
+		 * DecodeAdpcmBytes stops at the same ADPCM_LOOP_END flag. */
+		byteCount = NATIVE_AUDIO_SPU_MEMSIZE - (int)addr;
+		for (scan = 0; scan + 16 <= byteCount; scan += 16)
+		{
+			if ((s_audio.spu.memory[addr + scan + 1] &
+			     ADPCM_LOOP_END) != 0)
+			{
+				scan += 16;
+				break;
+			}
+		}
+		maxSamples = (scan / 16) * XA_SAMPLES_PER_SOUND_UNIT;
 	}
 	if ((maxSamples <= 0) || (maxSamples > (INT_MAX / (int)sizeof(s16))))
 	{
@@ -2079,30 +2095,76 @@ internal void NativeAudio_SelectDriverHint(void)
 	}
 }
 
+/* The European retail disc keeps all voice categories under separate
+ * XA/<regional-language>/ dirs with an independent .XNF routing table.
+ * This matches original PAL CDSYS_SetXAToLang behavior on native PC.
+ *
+ * Language IDs share the native Options registry. NL is an additional
+ * PAL language; older config files with IDs 0-4 remain compatible.
+ *
+ * Once a language bank has been checked it is cached (6*1556-byte reads
+ * maximum on voice language switching), never per decoded audio sample.
+ * Language switch takes effect on the NEXT spoken line and does not
+ * interrupt a currently playing racing voice or music stream.
+ */
+static int s_palVoiceLastLanguage=-1;
+static int s_palVoiceBankAvailable;
+static const char *NativeAudio_PALVoiceCode(void)
+{
+    static const char *codes[6]={"ENG","SPN","FRN","GRM","ITL","DCH"};
+    char path[128];
+    struct NativeAudioByteBuffer xnf;
+    int lang=Platform_GetGameLanguage();
+    if(lang<0 || lang>=6)lang=0;
+    if(lang!=s_palVoiceLastLanguage)
+    {
+        int loaded;
+        snprintf(path,sizeof(path),"voices_pal/XA/%s.XNF",codes[lang]);
+        loaded=NativeAudio_ReadFileBytes(path,&xnf);
+        s_palVoiceBankAvailable=0;
+        if(loaded)
+        {
+            if(xnf.size>=XA_HEADER_SIZE &&
+               NativeAudio_ReadLE32(xnf.data)==0x464e4958 &&
+               NativeAudio_ReadLE32(xnf.data+4)==102 &&
+               NativeAudio_ReadLE32(xnf.data+8)==XA_NUM_TYPES)
+                s_palVoiceBankAvailable=1;
+            NativeAudio_FreeByteBuffer(&xnf);
+        }
+        s_palVoiceLastLanguage=lang;
+        Platform_Log("[PAL VOICE BANK] language=%d code=%s available=%d\n",
+                     lang,codes[lang],s_palVoiceBankAvailable);
+    }
+    return s_palVoiceBankAvailable?codes[lang]:NULL;
+}
+
 internal int NativeAudio_BuildXAPath(char *path, size_t pathSize, int categoryID, int fileNumber)
 {
-	const char *dir = NULL;
-	int written;
-
-	if (categoryID == 0)
-	{
-		dir = "XA/MUSIC";
-	}
-	else if (categoryID == 1)
-	{
-		dir = "XA/ENG/EXTRA";
-	}
-	else if (categoryID == 2)
-	{
-		dir = "XA/ENG/GAME";
-	}
-	else
-	{
-		return 0;
-	}
-
-	written = snprintf(path, pathSize, "%s/S%02d.XA", dir, fileNumber);
-	return (written > 0) && ((size_t)written < pathSize);
+    const char *code=NULL;
+    int written;
+    if(fileNumber<0 || fileNumber>99) return 0;
+    /* MUSIC must stay on existing USA disc/custom-music routing. */
+    if(categoryID==0)
+        written=snprintf(path,pathSize,"XA/MUSIC/S%02d.XA",fileNumber);
+    else if(categoryID==1 || categoryID==2)
+    {
+        code=NativeAudio_PALVoiceCode();
+        if(code)
+            written=snprintf(path,pathSize,"voices_pal/XA/%s/%s/S%02d.XA",
+                             code,categoryID==1?"EXTRA":"GAME",fileNumber);
+        else
+        {
+            /* NEVER substitute USA/English speech for an unavailable
+             * Spanish/French/German/Italian/Dutch regional XA bank.
+             * Leave its line silent until a same-language mod provides it. */
+            if(Platform_GetGameLanguage()!=0)
+                return 0;
+            written=snprintf(path,pathSize,"XA/ENG/%s/S%02d.XA",
+                             categoryID==1?"EXTRA":"GAME",fileNumber);
+        }
+    }
+    else return 0;
+    return written>0 && (size_t)written<pathSize;
 }
 
 internal int NativeAudio_LookupXATrackInfo(int categoryID, int xaID, struct NativeAudioXaTrackInfo *info)
@@ -2122,10 +2184,78 @@ internal int NativeAudio_LookupXATrackInfo(int categoryID, int xaID, struct Nati
 		return 0;
 	}
 
-	if (!NativeAudio_ReadFileBytes("XA/ENG.XNF", &xnf))
-	{
+	/* NTSC-only race-placement recordings are disabled for EVERY
+	 * language (including English), pending explicit replacements.
+	 * USA GAME 306/307 are unused Ripper Roo beta outtakes. */
+	if (categoryID == 2 &&
+	    ((xaID < 304 && xaID % 19 >= 16) || xaID == 306 || xaID == 307))
 		return 0;
-	}
+
+	/* PAL translations own a dedicated voice XA manifest (different
+     * track-to-channel indexes and durations for each language).
+     * Never use the NTSC XNF with regional XA files: it will route
+     * characters to incorrect clips. Music always uses original XNF. */
+    char palXnf[128];
+    const char *regionalCode=categoryID==0?NULL:NativeAudio_PALVoiceCode();
+    if(categoryID!=0 && !regionalCode && Platform_GetGameLanguage()!=0)
+    {
+        /* Missing regional XNF = silence, not English. MUSIC is exempt. */
+        return 0;
+    }
+    if(regionalCode)
+    {
+        int originalID=xaID;
+        if(categoryID==2)
+        {
+            /* PS1 NTSC-U GAME voiceData table:
+             * 16 racers x 19 lines + 10 special/extended tracks.
+             * PAL GAME: 16 racers x 16 lines + 8 special tracks.
+             * First 16 lines for each character keep their role/order.
+             * The three extra NTSC lines per racer do not exist in PAL.
+             */
+            if(xaID<304)
+            {
+                int racer=xaID/19;
+                int line=xaID%19;
+                if(line>=16)
+                    return 0; /* absent regional speech, never substitute */
+                xaID=racer*16+line;
+            }
+            else if(xaID==304 || xaID==305)
+                xaID-=48; /* US 304-305 -> PAL 256-257 */
+            else if(xaID>=308 && xaID<=313)
+                xaID-=50; /* US 308-313 -> PAL 258-263 */
+            else
+                return 0; /* US 306-307 and out of range are absent */
+        }
+        else if(categoryID==1)
+        {
+            /* PAL EXTRA has 81 lines versus NTSC's 87.
+             * NTSC ids 62-63 and 83-86 have no regional counterpart.
+             * After those first two, remaining PAL entries shift -2. */
+            if(xaID==62 || xaID==63 || xaID>=83)
+                return 0;
+            if(xaID>=64)
+                xaID-=2;
+        }
+        snprintf(palXnf,sizeof(palXnf),
+                 "voices_pal/XA/%s.XNF",regionalCode);
+        if(xaID!=originalID)
+        {
+            static unsigned regionalMapLogs=0;
+            if(regionalMapLogs<12)
+            {
+                regionalMapLogs++;
+                Platform_Log("[PAL VOICE MAP] lang=%d cat=%d USA=%d PAL=%d\n",
+                             Platform_GetGameLanguage(),categoryID,originalID,xaID);
+            }
+        }
+    }
+    if(!NativeAudio_ReadFileBytes(
+          regionalCode?palXnf:"XA/ENG.XNF",&xnf))
+    {
+        return 0;
+    }
 
 	if (xnf.size < XA_HEADER_SIZE)
 	{
@@ -2536,6 +2666,8 @@ internal int NativeAudio_LoadXATrackPcm(struct NativeAudioDecodeArena *arena, in
 	}
 	if (!NativeAudio_ReadFileBytes(path, &data))
 	{
+		Platform_LogWarn("[PAL VOICE] missing XA category=%d id=%d path=%s\n",
+                         categoryID,xaID,path);
 		return 0;
 	}
 
@@ -3258,6 +3390,7 @@ internal void NativeAudio_MixFrame(s16 *outLeft, s16 *outRight)
 	if (!s_audio.muted)
 	{
 		NativeCustomMusic_MixFrameNoLock(&mixLeft, &mixRight, s_audio.masterVolumeLeft, s_audio.masterVolumeRight);
+		NativeAudio_EngineMixFrameNoLock(&mixLeft, &mixRight, s_audio.masterVolumeLeft, s_audio.masterVolumeRight);
 	}
 	NativeAudio_ReverbProcessNoLock(reverbSendLeft, reverbSendRight, &reverbWetLeft, &reverbWetRight);
 	NativeAudio_MixSample(&mixLeft, &mixRight, NativeAudio_ApplyMasterVolume(reverbWetLeft, s_audio.masterVolumeLeft),
@@ -3429,12 +3562,15 @@ internal int NativeAudio_OpenDevice(void)
 
 void NativeAudio_Shutdown(void)
 {
+	NativeAudio_EngineUnbindAll();
+	NativeAudio_OnlineSfxShutdown();
 	if (s_audio.output.stream != NULL)
 	{
 		SDL_DestroyAudioStream(s_audio.output.stream);
 		s_audio.output.stream = NULL;
 		s_audio.output.device = 0;
 	}
+	NativeAudio_CNKChargeShutdown();
 
 	/*
 	 * The global HOWL catalog is native-only host memory. It is intentionally
@@ -3468,6 +3604,9 @@ s32 NativeAudio_SpuInit(void)
 	}
 
 	s_audio.init = 1;
+	/* Online/Hangout CNK one-shots are decoded once on the gameplay thread.
+	 * Playback later is allocation-free in the SDL callback. */
+	NativeAudio_OnlineSfxPreload();
 	return 1;
 }
 
@@ -3504,9 +3643,39 @@ u32 NativeAudio_SpuWrite(const u8 *addr, u32 size)
 	}
 
 	memcpy(&s_audio.spu.memory[wptrOfs], addr, size);
-	// NOTE(aalhendi): SPU RAM writes invalidate all decoded voice PCM. Drop cached buffers
-	// so stale samples do not accumulate in the arena during long sessions.
-	NativeAudio_ResetVoicePcmArenaNoLock(1);
+	/*
+	 * Do not discard ALL playing instruments for an unrelated SPU bank
+	 * transfer. Only samples whose compressed source overlaps this write
+	 * need decoding again. In particular, catalog-backed CSEQ samples
+	 * and instruments in other banks must continue without interruption.
+	 * Keep the shared PCM arena alive until all voices go idle, so pointers
+	 * for unrelated active voices are never invalidated mid-song.
+	 */
+	{
+		const u32 writeEnd = (u32)wptrOfs + size;
+		int i;
+		for (i = 0; i < NATIVE_AUDIO_SPU_VOICE_COUNT; ++i)
+		{
+			struct NativeAudioVoice *voice = &s_audio.voices[i];
+			const u32 sampleStart = voice->attr.addr;
+			u32 sampleEnd;
+
+			if (voice->pcm == NULL || voice->sampleCount <= 0 ||
+			    NativeHowlSampleCatalog_IsRetailHandle(sampleStart) ||
+			    NativeCustomSampleRegistry_IsHandle(sampleStart) ||
+			    sampleStart >= NATIVE_AUDIO_SPU_MEMSIZE)
+				continue;
+
+			/* Each SPU ADPCM frame contains 16 bytes and decodes 28
+			 * samples, including the final END-marked frame. */
+			sampleEnd = sampleStart +
+			    ((u32)voice->sampleCount / XA_SAMPLES_PER_SOUND_UNIT) * 16u;
+			if (sampleStart < writeEnd && sampleEnd > (u32)wptrOfs)
+				voice->sampleDirty = 1;
+		}
+
+		NativeAudio_ReclaimVoicePcmArenaIfIdleNoLock();
+	}
 
 	NativeAudio_UnlockOutput();
 
@@ -3917,6 +4086,17 @@ int NativeAudio_PlayXATrack(int categoryID, int xaID, int volumeLeft, int volume
 
 	NativeAudio_UnlockOutput();
 
+    if(categoryID==1 || categoryID==2)
+    {
+        static unsigned palVoiceLogged=0;
+        if(palVoiceLogged<30)
+        {
+            ++palVoiceLogged;
+            Platform_Log("[PAL VOICE PLAY] lang=%d cat=%d id=%d frames=%d rate=%d\n",
+                         Platform_GetGameLanguage(),categoryID,xaID,
+                         frameCount,sampleRate);
+        }
+    }
 	return 1;
 }
 
