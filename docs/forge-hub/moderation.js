@@ -883,8 +883,9 @@ async function initialize() {
             throw new Error("Creator authentication is not configured.");
         }
         publicApiKey = config.supabase_publishable_key;
-        const sdk = await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.50.0/+esm");
-        client = sdk.createClient(config.supabase_url, config.supabase_publishable_key, {
+        const {loadSupabaseCreateClient} = await import("./supabase-sdk-loader.js");
+        const createClient = await loadSupabaseCreateClient();
+        client = createClient(config.supabase_url, config.supabase_publishable_key, {
             auth:{flowType:"pkce",detectSessionInUrl:true,persistSession:true}
         });
         const session = await client.auth.getSession();
