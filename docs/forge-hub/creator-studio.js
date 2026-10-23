@@ -840,8 +840,9 @@ async function initialize() {
     }
     try {
         // Official browser client; only loaded for an explicitly configured backend.
-        const sdk = await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.50.0/+esm");
-        client = sdk.createClient(url, key, {
+        const {loadSupabaseCreateClient} = await import("./supabase-sdk-loader.js");
+        const createClient = await loadSupabaseCreateClient();
+        client = createClient(url, key, {
             auth:{flowType:"pkce",detectSessionInUrl:true,persistSession:true}
         });
         const session = await client.auth.getSession();
