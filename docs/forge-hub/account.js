@@ -271,8 +271,9 @@ async function setup(){
        publicKey.startsWith("sb_secret_")){
       throw Error("Invalid public account configuration");
     }
-    const sdk=await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.50.0/+esm");
-    client=sdk.createClient(BASE,publicKey,{
+    const {loadSupabaseCreateClient}=await import("./supabase-sdk-loader.js");
+    const createClient=await loadSupabaseCreateClient();
+    client=createClient(BASE,publicKey,{
       auth:{flowType:"pkce",detectSessionInUrl:true,persistSession:true}
     });
     const {data,error}=await client.auth.getSession();
